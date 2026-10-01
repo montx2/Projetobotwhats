@@ -9,7 +9,7 @@ Tudo que importa, nada que atrapalha:
 |---|---|
 | 👁️ **View Once** | Captura automática + responda qualquer view once com qualquer mensagem — **100% silenciosa, vai SÓ pro seu privado (0 rastros)** |
 | 🛡️ **Anti-Delete** | **Ligado em tudo por padrão** — tudo que apagarem vai **SÓ pro seu privado (0 rastros)**, com filtros de ignorar |
-| 🖼️ **Figurinhas** | Imagem, vídeo, GIF e figurinha→figurinha, **com remoção de fundo por IA** |
+| 🖼️ **Figurinhas** | Imagem, vídeo, GIF e figurinha→figurinha, **com remoção de fundo por IA** — e **figurinha automática direto de um link** (`.s <link>`), sem baixar nada antes |
 | 🎭 **Remoção de fundo** | Pool de APIs com várias contas girando (estilo "requisições ilimitadas") |
 | 🧠 **IA completa** | Chat, geração de imagens, voz, tradução e resumo — com pool de chaves + fallback grátis |
 | ⬇️ **Downloader universal** | TikTok, Instagram, Pinterest, YouTube, X, Facebook, Threads, Reddit, Twitch, Vimeo e a cauda longa |
@@ -80,9 +80,27 @@ Vem **ligado em todos os chats**. Quando alguém apaga, o bot manda o conteúdo 
 ### 🖼️ Figurinhas
 ```
 .s / .fig / !sticker    → foto, vídeo, GIF ou figurinha → figurinha
+.s <link>               → baixa o link e JÁ monta a figurinha (novo 🔥)
 .sfundo                 → figurinha SEM FUNDO (IA remove o fundo)
 .fundo                  → devolve PNG transparente (sem virar figurinha)
 ```
+
+**Figurinha direto do link** — manda o link, recebe a figurinha pronta, sem baixar nada antes:
+```
+.s https://br.pinterest.com/pin/123456789/     → figurinha do pin
+.s pin.it/abc123                               → aceita link curto e até sem https://
+.s inteira https://pin.it/abc123               → imagem completa, sem esticar
+.s cortar https://pin.it/abc123                → preenche o quadrado cortando as bordas
+.sfundo https://i.pinimg.com/originals/a/b/c.jpg → baixa e remove o fundo com IA
+.s <link1> <link2> <link3>                     → até 3 links de uma vez
+```
+- Funciona com **qualquer** link que o `.dl` baixa: Pinterest, TikTok, Instagram,
+  YouTube, X/Twitter, Facebook, Threads, Reddit, GIFs (Giphy/Tenor) e sites em geral.
+- Link que já é arquivo (termina em `.jpg`, `.png`, `.gif`, `.mp4`…) é baixado na hora,
+  sem passar pelos extratores — o caminho mais rápido.
+- **Carrossel/slideshow** vira figurinha da primeira foto; **vídeo** vira figurinha animada (até 7 s).
+- Também funciona **respondendo** a uma mensagem que contém o link: responde com `.s` e pronto.
+- Se o link for só áudio, o bot avisa e sugere `.dl <link>`.
 
 > O nome do pacote e o autor da figurinha são fixos (definidos em `nomePack` /
 > `autorPack`, no `data/config.json`). Não existe mais comando para trocar por
@@ -197,8 +215,9 @@ COBALT_INSTANCES=https://sua-instancia.cobalt,https://outra-instancia
 ## 🧪 Testes
 
 ```bash
-npm test          # 81 testes offline (lógica, roteamento, anti-delete, view once,
-                  # figurinhas WebP/EXIF, extratores de redes sociais e carregamento do .env)
+npm test          # 102 testes offline (lógica, roteamento, anti-delete, view once,
+                  # figurinhas WebP/EXIF, figurinha a partir de link, extratores de
+                  # redes sociais e carregamento do .env)
 npm run doctor    # diagnóstico do ambiente
 npm run env       # mostra o que o bot leu do .env (chaves, caminhos, contagens)
 ```
@@ -211,6 +230,7 @@ npm run env       # mostra o que o bot leu do .env (chaves, caminhos, contagens)
 | Código de pareamento não aparece | Confira o número: só dígitos, com DDI (ex. 55…) |
 | Loop de 405 ao conectar | O bot já faz cache da versão do WA Web; se persistir: `WA_VERSION_OVERRIDE=2,3000,REVISAO` |
 | Figurinha não sai | Falta FFmpeg: `pkg install ffmpeg` / `apt install ffmpeg` / `winget install ffmpeg` |
+| `.s <link>` não sai a figurinha | Confira se o link abre no navegador. Vídeos muito longos passam do teto de 64 MB do `.s` — use um link curto (TikTok/Reels/Pin) ou baixe com `.dl <link>` |
 | `.fundo` / `.sfundo` diz "Nenhum provedor configurado" | Confira se o `.env` está **na raiz do bot** e reinicie. Veja o que o bot enxerga com `.pools` (dono) ou `npm run env` |
 | Coloquei a chave e nada mudou | O `.env` só é lido na **inicialização** — depois de salvar, reinicie (`./bot.sh stop` + `./bot.sh start`) |
 | Download falha em alguma rede | O bot tenta em cascata (extrator da rede → Cobalt → yt-dlp → scraping). Tente de novo ou use `.dl <link>` |
@@ -226,7 +246,8 @@ src/
 ├── main.js               # boot, dono, handlers
 ├── core/                 # config, env, http, keypool (motor de contas), store
 ├── wa/                   # conexão Baileys (QR/código) + cache de mensagens
-├── features/             # viewonce, antidelete, sticker, bgremoval, ai, download
+├── features/             # viewonce, antidelete, sticker, stickerlink (figurinha de
+│                         # link), bgremoval, ai, download
 │   └── downloaders/      # tiktok, instagram, pinterest, youtube, twitter,
 │                         # facebook, generic, cobalt, ytdlp, media, qualidade
 └── util/                 # ffmpeg, webp (exif), texto

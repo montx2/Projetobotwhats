@@ -118,7 +118,8 @@ Mande **`.menu`** em qualquer conversa (inclusive "Conversar com você mesmo").
 | Testar se está vivo | `.ping` |
 | Status e saúde | `.info` / `.doctor` / `.pools` |
 | Figurinha | `.s` (responda uma foto/vídeo/GIF) |
-| Figurinha sem fundo | `.sfundo` |
+| Figurinha direto de link | `.s <link>` (Pinterest, TikTok, Instagram, GIF…) |
+| Figurinha sem fundo | `.sfundo` (mídia ou link) |
 | Baixar TikTok | `.tiktok <link>` |
 | Baixar Pinterest | `.pin <link>` |
 | Baixar Instagram | `.insta <link>` |
@@ -132,6 +133,22 @@ QUALQUER mensagem (um "oi" serve) e o bot baixa pra você. A captura
 automática também já vem ligada.
 
 **Auto-download:** cole um link de rede social solto no chat → ele baixa sozinho.
+
+**Figurinha direto do link (novo 🔥):** não precisa baixar nada antes —
+manda o link e recebe a figurinha pronta:
+
+```
+.s https://br.pinterest.com/pin/123456789/     → figurinha do pin
+.s pin.it/abc123                               → aceita link curto e até sem https://
+.s inteira https://pin.it/abc123               → imagem completa, sem esticar
+.sfundo https://pin.it/abc123                  → baixa e remove o fundo com IA
+.s <link1> <link2> <link3>                     → até 3 links de uma vez
+```
+
+Funciona com qualquer link que o `.dl` baixa (Pinterest, TikTok, Instagram,
+YouTube, X, Facebook, Threads, Reddit, GIFs…) e também **respondendo** uma
+mensagem que tenha o link. Link que já é arquivo (`.jpg`, `.png`, `.gif`,
+`.mp4`…) é baixado na hora, sem passar pelos extratores.
 
 ---
 
@@ -158,7 +175,7 @@ termux-wake-lock
 | `./bot.sh pair NUMERO` | salva número de pareamento |
 | `./bot.sh stop` | para o bot |
 | `./bot.sh doctor` | diagnóstico do ambiente |
-| `./bot.sh test` | roda os 36 testes |
+| `./bot.sh test` | roda a suíte de testes (102 offline) |
 | `./bot.sh update` | atualiza código + dependências |
 
 ---
@@ -176,6 +193,7 @@ termux-wake-lock
 | **Bot cai ao fechar a tela** | `termux-wake-lock` + bateria sem restrição (Passo 7) |
 | **Sessão expirou / deslogou** | `rm -rf data/auth` e repita o **Passo 5** |
 | **`.fundo`/`.sfundo` pede configuração** | adicione `REMOVE_BG_KEYS` no `.env` (Passo 4) e reinicie; confira com `npm run env` |
+| **`.s <link>` não gera a figurinha** | confira se o link abre no navegador. Links de vídeo muito longos passam do teto de 64 MB do `.s` — use um link curto (TikTok/Reels/Pin) ou baixe com `.dl <link>` |
 | **Quero zerar as configurações** | apague `data/config.json` e reinicie |
 | **Quero trocar de conta** | `rm -rf data/auth` + `./bot.sh pair NOVONUMERO` + `./bot.sh start` |
 

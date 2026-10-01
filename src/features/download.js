@@ -7,6 +7,9 @@
 // Redes com extrator dedicado (métodos reais, comparados com bots em produção):
 //   TikTok · Instagram · Pinterest · YouTube · X/Twitter · Facebook
 //   Threads · Reddit · Twitch · Vimeo
+//
+// Quem consome isto além do `.dl`: o `.s <link>` (stickerlink.js), que usa o
+// mesmo `resolveDownload` para transformar um link em figurinha pronta.
 
 import { SYM, ok, warn, fail, wait } from '../core/ui.js';
 import { cfg } from '../core/config.js';
@@ -54,12 +57,12 @@ export function isKnownSocialUrl(url) {
 }
 
 /** Baixa uma URL de mídia aplicando o Referer que o CDN costuma exigir. */
-async function downloadMedia(url, onProgress) {
+async function downloadMedia(url, onProgress, maxBytes = 200 * 1024 * 1024) {
   const referer = mediaReferer(url);
   log.dl(`baixando ${String(url).slice(0, 70)}…`);
   return fetchBuffer(url, {
     timeoutMs: 180_000,
-    maxBytes: 200 * 1024 * 1024,
+    maxBytes,
     headers: referer ? { Referer: referer, referer: referer } : {}
   });
 }
@@ -85,7 +88,7 @@ async function byPlatform(url, platform, quality, audioOnly) {
 }
 
 /** Baixa os buffers de resultados que vieram só com URLs. */
-async function withBuffers(result, onProgress) {
+async function withBuffers(result, onProgress, maxBytes) {
   if (result.buffers?.length) return result;
   const items = (result.media || []).slice(0, 10);
   if (!items.length) throw new Error('o extrator não devolveu mídia');
@@ -94,7 +97,7 @@ async function withBuffers(result, onProgress) {
     if (items.length > 1) {
       await onProgress?.(wait(`Baixando mídia ${i + 1}/${items.length}`));
     }
-    buffers.push(await downloadMedia(items[i].url, onProgress));
+    buffers.push(await downloadMedia(items[i].url, onProgress, maxBytes));
   }
   return { ...result, buffers };
 }
@@ -122,9 +125,14 @@ async function firstOf(strategies) {
 
 /**
  * Resolve uma URL para um resultado pronto de download.
+ * @param {string} url
+ * @param {'melhor'|'alta'|'media'|'baixa'} quality
+ * @param {{audioOnly?: boolean, onProgress?: Function, maxBytes?: number}} [opts]
+ *   `maxBytes` limita o tamanho de cada arquivo baixado (o `.s <link>` usa um
+ *   teto menor: não faz sentido baixar 200 MB para uma figurinha de 7 s).
  * @returns {Promise<{platform,title,author,duration,kind,buffers,audioBuffer,media}>}
  */
-export async function resolveDownload(url, quality = 'melhor', { audioOnly = false, onProgress } = {}) {
+export async function resolveDownload(url, quality = 'melhor', { audioOnly = false, onProgress, maxBytes } = {}) {
   const platform = detectPlatform(url) || 'Web';
   const qLabel = qualityLabel(quality);
   await onProgress?.(wait(`Buscando em ${platform} · ${qLabel}`));
@@ -137,7 +145,7 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
   });
   if (dedicated?.media?.length || dedicated?.buffers?.length) {
     const enriched = dedicated;
-    const out = await withBuffers(enriched, onProgress).catch(async (error) => {
+    const out = await withBuffers(enriched, onProgress, maxBytes).catch(async (error) => {
       log.warn(`download de buffers falhou (${error.message}) — tentando reservas`);
       return null;
     });
@@ -192,7 +200,7 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
       const { downloadByPageScrape } = await import('./downloaders/generic.js');
       const found = await downloadByPageScrape(url);
       if (!found?.media?.length) return null;
-      return await withBuffers(found, onProgress);
+      return await withBuffers(found, onProgress, maxBytes);
     }
   ]);
 

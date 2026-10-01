@@ -25,6 +25,7 @@ banner([
   platformBanner(),
   isTermux() ? '▸ Termux: pareamento por código (sem QR)' : '▸ Desktop: QR Code habilitado',
   '▸ Modo privado: exclusivo do dono (.ativar libera um chat)',
+  '▸ Figurinha de link: .s <link> baixa e monta na hora',
   `▸ Remoção de fundo: ${bgStatus()[0]}`,
   `▸ Config .env: ${envSummary().loaded ? envSummary().file : `não encontrado em ${envSummary().file}`}`,
   hasFfmpeg() ? '▸ FFmpeg: ok' : '⚠ FFmpeg ausente (figurinhas não funcionarão)'

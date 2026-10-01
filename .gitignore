@@ -1,0 +1,14 @@
+# Dependências
+node_modules/
+
+# Segredos locais — as chaves de API ficam só na sua máquina
+.env
+
+# Sessão do WhatsApp (credenciais do Baileys): NUNCA versionar
+data/auth/
+auth_info/
+auth_info_baileys/
+
+# Temporários de execução e de teste
+*.log
+tests/tmp-data/
