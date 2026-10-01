@@ -65,6 +65,10 @@ Quanto mais contas, mais "ilimitado" fica — o bot gira entre elas:
 REMOVE_BG_KEYS=chave_da_conta1,chave_da_conta2,chave_da_conta3
 ```
 
+> O arquivo precisa ficar **na raiz do bot** (junto do `package.json`) e o bot só
+> lê o `.env` ao **iniciar** — depois de colar as chaves, reinicie. Para conferir o
+> que ele enxergou: `npm run env` no terminal ou `.pools` no WhatsApp.
+
 ### 🧠 IA (opcional)
 ```env
 GEMINI_KEYS=chave1,chave2    # grátis em https://aistudio.google.com
@@ -171,7 +175,7 @@ termux-wake-lock
 | **Não conecta / fica tentando** | verifique sua internet; o bot tenta sozinho de novo |
 | **Bot cai ao fechar a tela** | `termux-wake-lock` + bateria sem restrição (Passo 7) |
 | **Sessão expirou / deslogou** | `rm -rf data/auth` e repita o **Passo 5** |
-| **`.sfundo` pede configuração** | adicione `REMOVE_BG_KEYS` no `.env` (Passo 4) |
+| **`.fundo`/`.sfundo` pede configuração** | adicione `REMOVE_BG_KEYS` no `.env` (Passo 4) e reinicie; confira com `npm run env` |
 | **Quero zerar as configurações** | apague `data/config.json` e reinicie |
 | **Quero trocar de conta** | `rm -rf data/auth` + `./bot.sh pair NOVONUMERO` + `./bot.sh start` |
 

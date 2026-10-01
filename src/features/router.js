@@ -11,7 +11,7 @@
 //    terceiros são View Once e Anti-Delete.
 
 import { isStale, alreadySeen } from '../core/freshness.js';
-import { cfg } from '../core/config.js';
+import { cfg, envSummary } from '../core/config.js';
 import { log } from '../core/logger.js';
 import { messageCache, isBotSent, markBotSent } from '../wa/cache.js';
 import { extractAnyText, isIgnored, normalizeIgnoreTarget, handleDelete, statusText } from './antidelete.js';
@@ -360,7 +360,9 @@ export async function handleMessage(sock, msg, deps) {
       });
     } catch (error) {
       log.error(`comando .${command.name} falhou`, error);
-      await reply(fail('Não foi possível concluir', String(error.message || error).slice(0, 220))).catch(() => {});
+      // 600 em vez de 220: as mensagens de diagnóstico (ex.: remoção de fundo sem
+      // chave, com o caminho do .env) precisam chegar inteiras ao usuário.
+      await reply(fail('Não foi possível concluir', String(error.message || error).slice(0, 600))).catch(() => {});
     }
     return;
   }
@@ -796,15 +798,32 @@ async function runCommand(sock, msg, cmd, ctx) {
 
     case 'pools': {
       requireOwner(ctx, msg);
-      const lines = [header('Pools de APIs', 'chaves e provedores'), ''];
+      const env = envSummary();
       const { removebg, endpoints } = bgPools();
-      lines.push(
+      const lines = [
+        header('Pools de APIs', 'chaves e provedores'),
+        '',
+        `${SYM.section} *ARQUIVO .ENV*`,
+        ` ${SYM.detail} ${env.file}`,
+        ` ${SYM.detail} ${env.loaded ? 'arquivo encontrado' : 'ARQUIVO NÃO ENCONTRADO (crie na raiz do bot)'}`,
+        '',
         `${SYM.section} *REMOVE.BG*`,
-        ...removebg.summary().map((s) => ` ${SYM.detail} ${s}`),
+        ...(removebg.size
+          ? removebg.summary().map((s) => ` ${SYM.detail} ${s}`)
+          : [` ${SYM.detail} nenhuma chave — coloque REMOVE_BG_KEYS=chave1,chave2 no .env e reinicie`]),
         '',
         `${SYM.section} *ENDPOINTS*`,
-        ...endpoints.summary().map((s) => ` ${SYM.detail} ${s}`)
-      );
+        ...(endpoints.size
+          ? endpoints.summary().map((s) => ` ${SYM.detail} ${s}`)
+          : [` ${SYM.detail} nenhum — opcional: REMOVE_BG_URLS=https://sua-api/removebg`]),
+        '',
+        `${SYM.section} *REMBG LOCAL*`,
+        ` ${SYM.detail} ${env.localRembg ? 'ativo (LOCAL_REMBG=1)' : 'desligado — opcional: LOCAL_REMBG=1'}`,
+        '',
+        `${SYM.section} *OUTRAS CHAVES*`,
+        ` ${SYM.detail} IA: gemini ${env.geminiKeys} · groq ${env.groqKeys} · openai ${env.openaiKeys} · pollinations ${env.pollinationsKeys}`,
+        ` ${SYM.detail} downloads: cobalt ${env.cobaltInstances}`
+      ];
       return reply(lines.join('\n'));
     }
 
@@ -888,6 +907,7 @@ function doctorText() {
   const ff = hasFfmpeg();
   const yt = hasYtDlp();
   const cb = cobaltPool();
+  const env = envSummary();
   return card([
     header('Diagnóstico', 'saúde do sistema'),
     [
@@ -897,6 +917,14 @@ function doctorText() {
       kv('yt-dlp', yt ? `${SYM.ok} instalado (modo turbo)` : 'opcional'),
       kv('Plataforma', process.platform),
       kv('Memória', `${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB`)
+    ].join('\n'),
+    [
+      `${SYM.section} *ARQUIVO .ENV*`,
+      kv('Caminho', env.file),
+      kv('Status', env.loaded ? `${SYM.ok} lido pelo bot` : `${SYM.err} não encontrado`),
+      kv('REMOVE_BG_KEYS', `${env.removeBgKeys} chave(s)`),
+      kv('REMOVE_BG_URLS', `${env.removeBgUrls} endpoint(s)`),
+      kv('LOCAL_REMBG', env.localRembg ? 'ligado' : 'desligado')
     ].join('\n'),
     [
       `${SYM.section} *SERVIÇOS*`,

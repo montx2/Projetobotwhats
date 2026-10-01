@@ -30,26 +30,37 @@ else warn('yt-dlp ausente (opcional) — dá uma reserva fortíssima nos downloa
 if (fs.existsSync(path.join(ROOT, 'node_modules', '@whiskeysockets', 'baileys'))) ok('Dependências npm instaladas');
 else bad('Dependências ausentes — rode: npm install');
 
-// .env
-const envFile = path.join(ROOT, '.env');
-if (fs.existsSync(envFile)) {
-  ok('.env presente');
-  const env = fs.readFileSync(envFile, 'utf8');
-  const keys = {
-    REMOVE_BG_KEYS: 'remoção de fundo (remove.bg)',
-    GEMINI_KEYS: 'IA Gemini',
-    OPENAI_KEYS: 'IA OpenAI',
-    GROQ_KEYS: 'IA Groq',
-    COBALT_INSTANCES: 'downloads universais (Cobalt)'
-  };
-  for (const [key, label] of Object.entries(keys)) {
-    const line = env.split('\n').find((l) => l.startsWith(key + '='));
-    const value = line ? line.slice(key.length + 1).trim() : '';
-    if (value) ok(`${label}: configurado (${value.split(',').length} item(ns))`);
-    else warn(`${label}: vazio — funciona sem, mas leia o README para ativar ${label}`);
-  }
+// .env — validado com O MESMO carregador que o bot usa (src/core/env.js).
+// Antes o doctor lia o arquivo "na mão" e podia dizer "configurado" enquanto o
+// bot dizia "sem chaves"; agora os dois enxergam exatamente a mesma coisa.
+const { ENV_FILE, loadDotEnv, envList, envBool } = await import('../src/core/env.js');
+const envLoad = loadDotEnv();
+if (!envLoad.loaded) {
+  warn(`.env ausente em ${ENV_FILE} — copie o .env.example para .env e preencha (opcional mas recomendado)`);
 } else {
-  warn('.env ausente — copie o .env.example para .env e preencha (opcional mas recomendado)');
+  ok(`.env lido pelo bot: ${ENV_FILE} (${envLoad.entries} variável(is) no arquivo)`);
+  const bgOk = envList('REMOVE_BG_KEYS').length || envList('REMOVE_BG_URLS').length || envBool('LOCAL_REMBG', false);
+  if (bgOk) {
+    ok(
+      `remoção de fundo: ${envList('REMOVE_BG_KEYS').length} chave(s) remove.bg · ` +
+        `${envList('REMOVE_BG_URLS').length} endpoint(s) · rembg local ${envBool('LOCAL_REMBG', false) ? 'ligado' : 'desligado'}`
+    );
+  } else {
+    warn('remoção de fundo: nenhuma chave — .fundo e .sfundo vão falhar. Coloque REMOVE_BG_KEYS=chave1,chave2');
+  }
+  const ia = {
+    'IA Gemini': envList('GEMINI_KEYS').length,
+    'IA OpenAI': envList('OPENAI_KEYS').length,
+    'IA Groq': envList('GROQ_KEYS').length,
+    'IA Pollinations': envList('POLLINATIONS_KEYS').length
+  };
+  for (const [label, count] of Object.entries(ia)) {
+    if (count) ok(`${label}: ${count} chave(s)`);
+    else warn(`${label}: vazio — funciona sem (o bot usa Pollinations grátis)`);
+  }
+  const cobalt = envList('COBALT_INSTANCES').length;
+  if (cobalt) ok(`downloads universais (Cobalt): ${cobalt} instância(s)`);
+  else warn('downloads universais (Cobalt): vazio — o bot usa as instâncias públicas (opcional)');
 }
 
 // Sessão
