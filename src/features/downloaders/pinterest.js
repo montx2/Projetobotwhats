@@ -48,11 +48,17 @@ export function isNumericPinId(id) {
   return /^\d{5,}$/.test(String(id || ''));
 }
 
+/** Já é uma página de pin do Pinterest (e não um link curto)? */
+function isPinterestPinUrl(url) {
+  return /(?:^|\.)pinterest\.[a-z.]+/i.test(String(url)) && /\/pin\//i.test(String(url));
+}
+
 /** https://…/pin/<id>/sent/?invite_code=… → https://…/pin/<id>/ */
 export function canonicalPinUrl(url, pinId) {
   if (!pinId) return url;
   try {
     const u = new URL(url);
+    if (!/pinterest\.[a-z.]+$/i.test(u.hostname)) throw new Error('host não é do Pinterest');
     return `${u.protocol}//${u.host}/pin/${pinId}/`;
   } catch {
     return `https://www.pinterest.com/pin/${pinId}/`;
@@ -366,7 +372,9 @@ async function viaSavePin(finalUrl) {
  */
 export async function resolvePinterestTarget(url) {
   const direct = extractPinId(url);
-  if (isNumericPinId(direct)) {
+  // Id direto só vale em página de pin: `pin.it/1234567890` é um CÓDIGO curto
+  // (pode ser só dígitos) e precisa do redirect para virar id de verdade.
+  if (isNumericPinId(direct) && isPinterestPinUrl(url)) {
     return { id: direct, pageUrl: canonicalPinUrl(url, direct), html: null, finalUrl: url };
   }
   const res = await httpGet(url, { headers: BROWSER_PAGE_HEADERS, timeoutMs: 20_000 }).catch(() => null);

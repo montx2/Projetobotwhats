@@ -101,6 +101,11 @@ Vem **ligado em todos os chats**. Quando alguém apaga, o bot manda o conteúdo 
 - **Carrossel/slideshow** vira figurinha da primeira foto; **vídeo** vira figurinha animada (até 7 s).
 - Também funciona **respondendo** a uma mensagem que contém o link: responde com `.s` e pronto.
 - Se o link for só áudio, o bot avisa e sugere `.dl <link>`.
+- Antes de montar, o bot **confere o conteúdo da imagem baixada**: se a rede social
+  devolver a página de login/preview (o caso clássico é um gradiente de marca da
+  própria rede, ou link compartilhado do tipo `/sent/`) em vez do post, ele tenta
+  outra versão do mesmo arquivo e, se não houver, avisa que não conseguiu —
+  nunca entrega uma figurinha colorida sem nada a ver.
 
 > O nome do pacote e o autor da figurinha são fixos (definidos em `nomePack` /
 > `autorPack`, no `data/config.json`). Não existe mais comando para trocar por

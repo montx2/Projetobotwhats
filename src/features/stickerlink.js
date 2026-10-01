@@ -188,49 +188,63 @@ function candidateList(result) {
 async function inspectCandidate(candidate) {
   const { buffer, item } = candidate;
   const kind = detectSourceKind(buffer, item?.type || '');
-  // Vídeo/GIF seguem para o FFmpeg; áudio tem erro próprio (o link é só som,
-  // não é asset errado). Só imagem passa pela checagem de conteúdo.
-  if (kind === 'video' || kind === 'gif' || kind === 'animated' || kind === 'audio') {
-    return { ok: true, kind, reason: '' };
-  }
-  const info = sniffImage(buffer);
-  if (!info) {
-    return { ok: false, kind, info: null, reason: 'não é uma imagem (o servidor devolveu outra coisa)' };
-  }
-  if (candidate.trusted) return { ok: true, kind, info, reason: '' };
+  // Áudio tem erro próprio (o link é só som, não é asset errado).
+  if (kind === 'audio') return { ok: true, kind, reason: '' };
 
-  if (!isUsableImageSize(info, { min: 64 })) {
-    return {
-      ok: false,
-      kind,
-      info,
-      reason: `imagem pequena demais (${info.width}x${info.height}) para ser o post`
-    };
-  }
-  const grade = await analyzeImageDetail(buffer).catch(() => null);
-  if (!grade) {
-    // Sem FFmpeg não há como olhar o conteúdo — e sem ele o motor de figurinha
-    // não roda de qualquer forma. Melhor recusar do que mandar asset de marca.
-    return {
-      ok: false,
-      kind,
-      info,
-      reason: 'não consegui confirmar que a imagem é do post (FFmpeg indisponível — veja `.doctor`)'
-    };
-  }
-  if (grade.smooth || grade.solid) {
-    return {
-      ok: false,
-      kind,
-      info,
-      grade,
-      reason:
-        grade.solid
+  if (kind === 'image') {
+    const info = sniffImage(buffer);
+    if (!info) {
+      return { ok: false, kind, info: null, reason: 'não é uma imagem (o servidor devolveu outra coisa)' };
+    }
+    if (candidate.trusted) return { ok: true, kind, info, reason: '' };
+
+    if (!isUsableImageSize(info, { min: 64 })) {
+      return {
+        ok: false,
+        kind,
+        info,
+        reason: `imagem pequena demais (${info.width}x${info.height}) para ser o post`
+      };
+    }
+    const grade = await analyzeImageDetail(buffer).catch(() => null);
+    if (!grade) {
+      // Sem FFmpeg não há como olhar o conteúdo — e sem ele o motor de figurinha
+      // não roda de qualquer forma. Melhor recusar do que mandar asset de marca.
+      return {
+        ok: false,
+        kind,
+        info,
+        reason: 'não consegui confirmar que a imagem é do post (FFmpeg indisponível — veja `.doctor`)'
+      };
+    }
+    if (grade.smooth || grade.solid) {
+      return {
+        ok: false,
+        kind,
+        info,
+        grade,
+        reason: grade.solid
           ? 'imagem de uma cor só (placeholder da rede social, não o post)'
           : 'imagem lisa/gradiente (asset de marca da rede social, não o post)'
-    };
+      };
+    }
+    return { ok: true, kind, info, grade, reason: '' };
   }
-  return { ok: true, kind, info, grade, reason: '' };
+
+  // Vídeo/GIF que o extrator NÃO garantiu ser do post: confere o 1º quadro
+  // (o FFmpeg decodifica igual) para não entregar vídeo de anúncio/banner.
+  if (!candidate.trusted) {
+    const grade = await analyzeImageDetail(buffer).catch(() => null);
+    if (grade?.smooth || grade?.solid) {
+      return {
+        ok: false,
+        kind,
+        grade,
+        reason: 'vídeo sem conteúdo de post (primeiro quadro é liso/chapado — asset de marca)'
+      };
+    }
+  }
+  return { ok: true, kind, reason: '' };
 }
 
 /**

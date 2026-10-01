@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { parseYouTubeId, downloadYouTube } from '../src/features/downloaders/youtube.js';
 import { downloadTikTok, tiktokVideoId } from '../src/features/downloaders/tiktok.js';
 import {
+  canonicalPinUrl,
   downloadPinterest,
   extractPinId,
   findPinInState,
@@ -425,6 +426,57 @@ test('Pinterest: link curto (pin.it) resolve o id e consulta o widget pelo id NU
         r.alternates.some((a) => a.url === `https://i.pinimg.com/564x/e6/81/f4/${hash}.jpg`),
         'guarda as rendições menores como alternativa'
       );
+    }
+  );
+});
+
+test('canonicalPinUrl: link compartilhado vira a página do pin e host curto cai no pinterest.com', () => {
+  assert.equal(
+    canonicalPinUrl(
+      'https://www.pinterest.com/pin/429530883237169819/sent/?invite_code=abc&sender=1&sfo=1',
+      '429530883237169819'
+    ),
+    'https://www.pinterest.com/pin/429530883237169819/'
+  );
+  assert.equal(canonicalPinUrl('https://br.pinterest.com/pin/123/qualquer', '123'), 'https://br.pinterest.com/pin/123/');
+  assert.equal(canonicalPinUrl('https://pin.it/abc', '123'), 'https://www.pinterest.com/pin/123/');
+});
+
+test('Pinterest: código curto só de dígitos é resolvido, não confundido com id', async () => {
+  const hash = 'e681f482b3f43f1e4bf0b921d7759f4e';
+  const consultas = [];
+  await mockFetch(
+    [
+      [
+        'pin.it/1234567890',
+        () => ({
+          ...htmlResponse('<html><body>preview</body></html>'),
+          url: 'https://www.pinterest.com/pin/429530883237169819/'
+        })
+      ],
+      [
+        'widgets.pinterest.com',
+        (u) => {
+          consultas.push(u);
+          return jsonResponse({
+            data: [
+              {
+                id: '429530883237169819',
+                grid_title: 'Flamengo memes',
+                pinner: { username: 'dessalobato' },
+                images: { '564x': { url: `https://i.pinimg.com/564x/e6/81/f4/${hash}.jpg`, width: 514, height: 514 } }
+              }
+            ]
+          });
+        }
+      ],
+      [/i\.pinimg\.com/, () => bufferResponse(Buffer.from('IMG'), { contentType: 'image/jpeg' })]
+    ],
+    async () => {
+      const r = await downloadPinterest('https://pin.it/1234567890', 'melhor');
+      assert.match(consultas[0], /pin_ids=429530883237169819/);
+      assert.doesNotMatch(consultas[0], /pin_ids=1234567890/);
+      assert.equal(r.media[0].url, `https://i.pinimg.com/originals/e6/81/f4/${hash}.jpg`);
     }
   );
 });
