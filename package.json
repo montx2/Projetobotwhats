@@ -1,7 +1,7 @@
 {
   "name": "nexus-bot",
   "version": "7.0.0",
-  "description": "⚡ NEXUS — WhatsApp Multi-Device bot: View Once, Anti-Delete com filtros, Stickers com remoção de fundo por IA (pool de APIs), IA completa (chat, imagens, voz, tradução) e downloader universal (Pinterest, TikTok, Instagram e mais), com melhor qualidade por padrão. Termux-first, também roda em Linux e Windows.",
+  "description": "⚡ NEXUS — WhatsApp Multi-Device bot: View Once, Anti-Delete com filtros, Stickers com remoção de fundo por IA (pool de APIs), figurinha automática direto de um link (.s <link>), IA completa (chat, imagens, voz, tradução) e downloader universal (Pinterest, TikTok, Instagram e mais), com melhor qualidade por padrão. Termux-first, também roda em Linux e Windows.",
   "type": "module",
   "main": "src/main.js",
   "scripts": {

@@ -17,8 +17,12 @@ else bad(`Node ${process.version} — precisa do Node 20+ (pkg install nodejs-lt
 
 // FFmpeg
 const ff = spawnSync(process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg', ['-version'], { timeout: 8000 });
-if (ff.status === 0) ok('FFmpeg instalado');
-else bad('FFmpeg ausente — figurinhas e conversões precisam dele.\n   Termux: pkg install ffmpeg · Linux: apt install ffmpeg · Windows: winget install ffmpeg');
+if (ff.status === 0) {
+  ok('FFmpeg instalado');
+  ok('figurinhas: mídia anexada/citada E figurinha direto de link (.s <link>) funcionando');
+} else {
+  bad('FFmpeg ausente — figurinhas e conversões precisam dele.\n   Termux: pkg install ffmpeg · Linux: apt install ffmpeg · Windows: winget install ffmpeg');
+}
 
 // yt-dlp (opcional, modo turbo dos downloads)
 const { hasYtDlp, findYtdlp } = await import('../src/features/downloaders/ytdlp.js');

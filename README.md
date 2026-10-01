@@ -9,7 +9,7 @@ Tudo que importa, nada que atrapalha:
 |---|---|
 | 👁️ **View Once** | Captura automática + responda qualquer view once com qualquer mensagem — **100% silenciosa, vai SÓ pro seu privado (0 rastros)** |
 | 🛡️ **Anti-Delete** | **Ligado em tudo por padrão** — tudo que apagarem vai **SÓ pro seu privado (0 rastros)**, com filtros de ignorar |
-| 🖼️ **Figurinhas** | Imagem, vídeo, GIF e figurinha→figurinha, **com remoção de fundo por IA** |
+| 🖼️ **Figurinhas** | Imagem, vídeo, GIF e figurinha→figurinha, **com remoção de fundo por IA** — e **figurinha automática direto de um link** (`.s <link>`), sem baixar nada antes |
 | 🎭 **Remoção de fundo** | Pool de APIs com várias contas girando (estilo "requisições ilimitadas") |
 | 🧠 **IA completa** | Chat, geração de imagens, voz, tradução e resumo — com pool de chaves + fallback grátis |
 | ⬇️ **Downloader universal** | TikTok, Instagram, Pinterest, YouTube, X, Facebook, Threads, Reddit, Twitch, Vimeo e a cauda longa |
@@ -215,7 +215,7 @@ COBALT_INSTANCES=https://sua-instancia.cobalt,https://outra-instancia
 ## 🧪 Testes
 
 ```bash
-npm test          # 101 testes offline (lógica, roteamento, anti-delete, view once,
+npm test          # 102 testes offline (lógica, roteamento, anti-delete, view once,
                   # figurinhas WebP/EXIF, figurinha a partir de link, extratores de
                   # redes sociais e carregamento do .env)
 npm run doctor    # diagnóstico do ambiente

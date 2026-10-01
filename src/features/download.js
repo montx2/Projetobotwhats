@@ -7,6 +7,9 @@
 // Redes com extrator dedicado (métodos reais, comparados com bots em produção):
 //   TikTok · Instagram · Pinterest · YouTube · X/Twitter · Facebook
 //   Threads · Reddit · Twitch · Vimeo
+//
+// Quem consome isto além do `.dl`: o `.s <link>` (stickerlink.js), que usa o
+// mesmo `resolveDownload` para transformar um link em figurinha pronta.
 
 import { SYM, ok, warn, fail, wait } from '../core/ui.js';
 import { cfg } from '../core/config.js';

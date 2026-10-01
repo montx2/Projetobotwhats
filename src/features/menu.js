@@ -104,6 +104,11 @@ export function downloadMenu() {
       ['.tw <link>', 'X/Twitter'],
       ['.face <link>', 'Facebook']
     ]),
+    section('Figurinha direto do link', [
+      kvLine('.s <link>', 'baixa o link e já monta a figurinha'),
+      kvLine('.sfundo <link>', 'baixa e remove o fundo com IA'),
+      kvLine('.s <link1> <link2>', 'até 3 links de uma vez')
+    ], { note: 'Vale para Pinterest, TikTok, Instagram, YouTube, GIFs e qualquer link de mídia' }),
     section('Qualidade', [
       kvLine('melhor', 'padrão'),
       kvLine('alta', 'ótima e mais leve'),
@@ -124,9 +129,11 @@ function kvLine(name, desc) {
 }
 
 export function stickerMenu() {
+  // No menu dedicado, o `.s <link>` fica na seção própria (abaixo) — evita repetir a linha.
+  const createItems = STICKER_ITEMS.filter(([cmd]) => !/^\.s <link>$/i.test(cmd));
   return card([
     header('Figurinhas', 'crie em segundos'),
-    section('Criar', STICKER_ITEMS),
+    section('Criar', createItems),
     section('Direto de um link (novo)', [
       kvLine('.s <link>', 'baixa e já monta a figurinha'),
       kvLine('.s inteira <link>', 'imagem completa, sem esticar'),

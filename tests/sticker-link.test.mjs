@@ -31,6 +31,7 @@ import {
   stickerSourcesForCommand
 } from '../src/features/stickerlink.js';
 import { parseFit } from '../src/features/sticker.js';
+import { publicMenu, ownerMenu, stickerMenu, downloadMenu } from '../src/features/menu.js';
 import { isAnimatedWebp, isWebp, readStickerExif } from '../src/util/webp.js';
 import { detectMediaExt } from '../src/util/ffmpeg.js';
 import { handleMessage } from '../src/features/router.js';
@@ -456,6 +457,18 @@ test('fluxo: ".s" com link e modo de enquadramento junto (".s inteira <link>")',
   });
 
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('menus do bot anunciam a figurinha de link (descoberta do usuário)', () => {
+  for (const [nome, texto] of [
+    ['público', publicMenu()],
+    ['dono', ownerMenu()],
+    ['figurinhas', stickerMenu()],
+    ['downloads', downloadMenu()]
+  ]) {
+    assert.match(texto, /\.s <link>/i, `menu ${nome} deve mostrar ".s <link>"`);
+  }
+  assert.match(stickerMenu(), /\.sfundo <link>/i);
 });
 
 test('parseFit continua funcionando junto com o link', () => {

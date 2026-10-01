@@ -1,5 +1,9 @@
 // 🖼️ STICKER ENGINE — figurinhas de imagem, vídeo, GIF e outras figurinhas,
 // com remoção de fundo por IA (.sfundo). O pack/autor são fixos (config.js).
+//
+// A mídia vem de duas origens: anexada/citada no WhatsApp (extractStickerSource)
+// ou baixada de um LINK pelo `stickerlink.js` — as duas chegam aqui no mesmo
+// formato `{ buffer, type, node }`, então o motor não precisa saber a diferença.
 
 import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
 import { cfg } from '../core/config.js';
