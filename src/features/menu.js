@@ -12,9 +12,10 @@ import { SYM, header, section, cmd, footer, card, kv } from '../core/ui.js';
 
 const STICKER_ITEMS = [
   ['.s', 'foto, vídeo ou GIF vira figurinha'],
+  ['.s <link>', 'baixa o link e já monta a figurinha'],
   ['.s inteira', 'mantém a imagem inteira, sem esticar'],
   ['.s cortar', 'preenche o quadrado sem esticar'],
-  ['.sfundo', 'figurinha sem fundo (IA)'],
+  ['.sfundo', 'figurinha sem fundo (IA) — funciona com link também'],
   ['.fundo', 'remove o fundo e envia em PNG']
 ];
 
@@ -52,7 +53,7 @@ export function publicMenu() {
       ['.ping', 'testa a velocidade'],
       ['.info', 'status do bot']
     ]),
-    footer('Envie uma mídia com .s  ·  Cole um link e eu baixo')
+    footer('Envie uma mídia com .s  ·  Mande .s <link> e eu já monto a figurinha')
   ]);
 }
 
@@ -126,12 +127,18 @@ export function stickerMenu() {
   return card([
     header('Figurinhas', 'crie em segundos'),
     section('Criar', STICKER_ITEMS),
+    section('Direto de um link (novo)', [
+      kvLine('.s <link>', 'baixa e já monta a figurinha'),
+      kvLine('.s inteira <link>', 'imagem completa, sem esticar'),
+      kvLine('.sfundo <link>', 'baixa e remove o fundo com IA'),
+      kvLine('.s <link1> <link2>', 'até 3 links de uma vez')
+    ], { note: 'Pinterest, TikTok, Instagram, YouTube, X, Facebook, Threads, Reddit, GIFs e mais' }),
     section('Modos de enquadramento', [
       kvLine('.s', 'preenche o quadrado todo'),
       kvLine('.s inteira', 'imagem completa, sem esticar'),
       kvLine('.s cortar', 'preenche sem esticar, corta as bordas')
     ]),
-    footer('Envie a mídia com a legenda .s ou responda a ela com .s')
+    footer('Envie a mídia com a legenda .s, responda a ela com .s ou mande só o link')
   ]);
 }
 

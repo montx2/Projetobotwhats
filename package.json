@@ -8,7 +8,7 @@
     "start": "node src/main.js",
     "pair": "node scripts/pair.mjs",
     "doctor": "node scripts/doctor.mjs",
-    "test": "node --test tests/unit.test.mjs tests/integration.test.mjs tests/downloaders.test.mjs tests/freshness.test.mjs tests/sticker-fit.test.mjs tests/env-loading.test.mjs tests/bgremoval.test.mjs",
+    "test": "node --test tests/unit.test.mjs tests/integration.test.mjs tests/downloaders.test.mjs tests/freshness.test.mjs tests/sticker-fit.test.mjs tests/sticker-link.test.mjs tests/env-loading.test.mjs tests/bgremoval.test.mjs",
     "env": "node scripts/env-report.mjs"
   },
   "engines": {

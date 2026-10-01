@@ -17,7 +17,8 @@ import { messageCache, isBotSent, markBotSent } from '../wa/cache.js';
 import { extractAnyText, isIgnored, normalizeIgnoreTarget, handleDelete, statusText } from './antidelete.js';
 import { SYM, header, section, card, footer, ok, fail, warn, wait, usage, kv, toggle } from '../core/ui.js';
 import { isViewOnce, onViewOnceMessage, onViewOnceReply, unwrapViewOnce } from './viewonce.js';
-import { extractStickerSource, makeSticker, packInfo, isAnimatedWebp, parseFit } from './sticker.js';
+import { makeSticker, packInfo, isAnimatedWebp, parseFit } from './sticker.js';
+import { stickerSourcesForCommand } from './stickerlink.js';
 import { removeBackground, bgStatus, bgPools } from './bgremoval.js';
 import { aiChat, aiImage, aiVoice, aiTranslate, aiSummary, resetChatMemory, aiStatus } from './ai.js';
 import { resolveDownload, sendDownload, parseQuality, autoDownload, isKnownSocialUrl } from './download.js';
@@ -256,6 +257,39 @@ async function sendStickerMessage(sock, jid, webp, quotedMsg) {
   );
   if (sent?.key?.id) markBotSent(sent.key.id);
   return sent;
+}
+
+/**
+ * Fontes da figurinha do comando: mídia anexada/citada OU — novidade — um link
+ * no próprio comando (ou na mensagem citada), baixado pelo downloader universal.
+ * Se nada for encontrado devolve listas vazias; se o link falhar, avisa e devolve null.
+ *
+ * @returns {Promise<{sources: Array, failures: string[], skipped: number}|null>}
+ */
+async function stickerSourcesOrReply({ sock, msg, args, allowViewOnce, reply }) {
+  try {
+    return await stickerSourcesForCommand({ sock, msg, args, allowViewOnce, onProgress: reply });
+  } catch (error) {
+    log.warn(`figurinha por link falhou: ${error.message}`);
+    await reply(
+      fail(
+        'Não consegui criar a figurinha',
+        `${String(error.message || error).slice(0, 260)}\n` +
+          `${SYM.item} Confira se o link abre no navegador  ${SYM.detail}  ou baixe antes com \`.dl <link>\``
+      )
+    );
+    return null;
+  }
+}
+
+/** Rodapé discreto do "figurinha pronta": de onde veio, o que falhou e o que sobrou. */
+function stickerSourceNote(sources, failures = [], skipped = 0) {
+  const origins = [...new Set(sources.map((s) => s.via).filter(Boolean))];
+  const note = [];
+  if (origins.length) note.push(origins.join(' · '));
+  if (failures.length) note.push(`${SYM.warn} ${truncate(failures[0], 140)}${failures.length > 1 ? ` (+${failures.length - 1})` : ''}`);
+  if (skipped > 0) note.push(`_+${skipped} link(s) ignorado(s) — envio até 3 por vez_`);
+  return truncate(note.join('\n'), 300);
 }
 
 /**
@@ -573,31 +607,57 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'sticker':
     case 'stiker':
     case 'figurinha': {
-      const source = await extractStickerSource(sock, msg, { onProgress: reply, allowViewOnce: inOwnerPrivate });
-      if (!source) return reply(usage('.s', null, 'Envie ou responda uma imagem, vídeo ou GIF com o comando.'));
-      const webp = await makeSticker(source, { ...packInfo(), fit: parseFit(args), onProgress: reply });
-      await reply(wait('Enviando figurinha'));
-      await sendStickerMessage(sock, jid, webp, msg);
-      return reply(ok('Figurinha pronta'));
+      // Mídia anexada/citada tem prioridade; sem mídia, os links do texto viram figurinha.
+      const got = await stickerSourcesOrReply({ sock, msg, args, allowViewOnce: inOwnerPrivate, reply });
+      if (!got) return;
+      const { sources, failures, skipped } = got;
+      if (!sources.length) {
+        return reply(usage('.s', '.s https://br.pinterest.com/pin/123/', 'Envie/responda uma imagem, vídeo ou GIF — ou mande o link que eu baixo e monto a figurinha.'));
+      }
+      let done = 0;
+      for (let i = 0; i < sources.length; i++) {
+        const webp = await makeSticker(sources[i], { ...packInfo(), fit: parseFit(args), onProgress: reply });
+        await reply(wait(sources.length > 1 ? `Enviando figurinha ${i + 1}/${sources.length}` : 'Enviando figurinha'));
+        await sendStickerMessage(sock, jid, webp, msg);
+        done++;
+      }
+      return reply(
+        ok(done > 1 ? `${done} figurinhas prontas` : 'Figurinha pronta', stickerSourceNote(sources, failures, skipped))
+      );
     }
 
     case 'sfundo':
     case 'stickerfundo':
     case 'sfundinho': {
-      const source = await extractStickerSource(sock, msg, { onProgress: reply, allowViewOnce: inOwnerPrivate });
-      if (!source) return reply(usage('.sfundo', null, 'Envie ou responda uma imagem com o comando.'));
-      const webp = await makeSticker(source, { ...packInfo(), removeBg: true, fit: parseFit(args), onProgress: reply });
-      await reply(wait('Enviando figurinha sem fundo'));
-      await sendStickerMessage(sock, jid, webp, msg);
-      return reply(ok('Figurinha sem fundo pronta'));
+      const got = await stickerSourcesOrReply({ sock, msg, args, allowViewOnce: inOwnerPrivate, reply });
+      if (!got) return;
+      const { sources, failures, skipped } = got;
+      if (!sources.length) {
+        return reply(usage('.sfundo', '.sfundo https://br.pinterest.com/pin/123/', 'Envie/responda uma imagem — ou mande o link — que eu removo o fundo.'));
+      }
+      let done = 0;
+      for (let i = 0; i < sources.length; i++) {
+        const webp = await makeSticker(sources[i], { ...packInfo(), removeBg: true, fit: parseFit(args), onProgress: reply });
+        await reply(wait(sources.length > 1 ? `Enviando figurinha sem fundo ${i + 1}/${sources.length}` : 'Enviando figurinha sem fundo'));
+        await sendStickerMessage(sock, jid, webp, msg);
+        done++;
+      }
+      return reply(
+        ok(done > 1 ? `${done} figurinhas sem fundo prontas` : 'Figurinha sem fundo pronta', stickerSourceNote(sources, failures, skipped))
+      );
     }
 
     case 'fundo':
     case 'removefundo':
     case 'rmbg':
     case 'removebg': {
-      const source = await extractStickerSource(sock, msg, { onProgress: reply, allowViewOnce: inOwnerPrivate });
-      if (!source) return reply(usage('.fundo', null, 'Envie ou responda uma imagem com o comando.'));
+      const got = await stickerSourcesOrReply({ sock, msg, args, allowViewOnce: inOwnerPrivate, reply });
+      if (!got) return;
+      const source = got.sources[0];
+      if (!source) return reply(usage('.fundo', '.fundo https://br.pinterest.com/pin/123/', 'Envie/responda uma imagem — ou mande o link — que eu removo o fundo.'));
+      if (source.kind && source.kind !== 'image') {
+        throw new Error('Remoção de fundo funciona só com *imagens* — o link que você mandou é de vídeo/animação.');
+      }
       await reply(wait('Removendo o fundo com IA'));
       const { buffer, via } = await removeBackground(source.buffer);
       await reply(wait('Enviando PNG sem fundo'));
