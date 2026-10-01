@@ -87,6 +87,28 @@ async function byPlatform(url, platform, quality, audioOnly) {
   }
 }
 
+/**
+ * Baixa a mídia de um item; se a rendição escolhida não existir mais (clássico
+ * em `/originals/` de pin antigo), tenta as alternativas do extrator antes de
+ * desistir — é o mesmo cuidado que o `.s <link>` usa para não devolver nada.
+ */
+async function downloadItemWithAlternates(item, alternates, onProgress, maxBytes) {
+  try {
+    return await downloadMedia(item.url, onProgress, maxBytes);
+  } catch (error) {
+    for (const alt of alternates || []) {
+      if (!alt?.url) continue;
+      try {
+        await onProgress?.(wait('Essa versão não está mais no ar — tentando outra'));
+        return await downloadMedia(alt.url, onProgress, maxBytes);
+      } catch {
+        /* tenta a próxima */
+      }
+    }
+    throw error;
+  }
+}
+
 /** Baixa os buffers de resultados que vieram só com URLs. */
 async function withBuffers(result, onProgress, maxBytes) {
   if (result.buffers?.length) return result;
@@ -97,7 +119,11 @@ async function withBuffers(result, onProgress, maxBytes) {
     if (items.length > 1) {
       await onProgress?.(wait(`Baixando mídia ${i + 1}/${items.length}`));
     }
-    buffers.push(await downloadMedia(items[i].url, onProgress, maxBytes));
+    buffers.push(
+      i === 0
+        ? await downloadItemWithAlternates(items[i], result.alternates, onProgress, maxBytes)
+        : await downloadMedia(items[i].url, onProgress, maxBytes)
+    );
   }
   return { ...result, buffers };
 }
@@ -218,6 +244,10 @@ function normalize(result, platform) {
     kind: result.kind || (result.media?.[0]?.type === 'image' ? 'image' : 'video'),
     media: result.media || [],
     buffers: result.buffers || [],
+    // Rendições extras (mesma mídia em outro tamanho) e flags de confiança que
+    // o extrator marcou: o `.s <link>` usa isso para tentar outra versão quando
+    // a primeira não passa na validação de conteúdo.
+    alternates: result.alternates || [],
     audioBuffer: result.audioBuffer || null
   };
 }

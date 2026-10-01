@@ -198,7 +198,7 @@ test('link direto de mídia: baixa o arquivo sem passar pelos extratores', async
 
 test('link de página (Pinterest): usa o extrator da rede e baixa a imagem do pin', async () => {
   const pin = 'https://br.pinterest.com/pin/12345/';
-  const image = 'https://i.pinimg.com/originals/ab/cd/pin.jpg';
+  const image = 'https://i.pinimg.com/originals/ab/cd/ef/0123456789abcdef0123456789abcdef.jpg';
   await withMockFetch(
     [
       ['widgets.pinterest.com', jsonResponse({ data: [{ grid_title: 'Pin legal', images: { orig: { url: image, width: 1200, height: 1600 } } }] })],
@@ -212,6 +212,118 @@ test('link de página (Pinterest): usa o extrator da rede e baixa a imagem do pi
       assert.ok(requested.some((r) => r.url.includes('widgets.pinterest.com')));
     }
   );
+});
+
+test('Pinterest: link compartilhado (/sent/) NÃO vira figurinha de outro pin', async () => {
+  // Caso real do bug: `.s https://pin.it/1Obiyee9V`. O Pinterest recebe o link
+  // curto, manda a página de link compartilhado — que traz SÓ sugestões de busca
+  // e um gradiente de marca — e o extrator antigo baixava esse asset colorido.
+  const hash = 'e681f482b3f43f1e4bf0b921d7759f4e';
+  const real = `https://i.pinimg.com/originals/e6/81/f4/${hash}.jpg`;
+  const rendicao = `https://i.pinimg.com/564x/e6/81/f4/${hash}.jpg`;
+  const marca = 'https://i.pinimg.com/originals/d5/3b/01/d53b014d86a6b6761bf649a0ed813cff.jpg';
+  const outroPin = 'https://i.pinimg.com/564x/aa/bb/cc/aabbccddeeff00112233445566778899.jpg';
+  const sentUrl = 'https://www.pinterest.com/pin/429530883237169819/sent/?invite_code=abc&sender=1&sfo=1';
+  const paginaSent = `<html><head><meta property="og:image" content="${marca}">
+    <script id="__PWS_DATA__" type="application/json">${JSON.stringify({
+      props: {
+        initialReduxState: {
+          pins: { 111: { id: '111', images: { '564x': { url: outroPin, width: 564, height: 564 } } } }
+        }
+      }
+    })}</script></head><body>sugestões de busca</body></html>`;
+  const widget = {
+    data: [
+      {
+        id: '429530883237169819',
+        grid_title: 'Flamengo memes | Flamengo ganhou',
+        pinner: { username: 'dessalobato' },
+        images: {
+          '236x': { url: `https://i.pinimg.com/236x/e6/81/f4/${hash}.jpg`, width: 236, height: 236 },
+          '564x': { url: rendicao, width: 514, height: 514 }
+        }
+      }
+    ]
+  };
+  const fotoDoPin = Buffer.concat([PNG_1PX, Buffer.from('PIN-CERTO')]);
+  const fotoDeOutroPin = Buffer.concat([PNG_1PX, Buffer.from('OUTRO-PIN')]);
+  const gradienteDeMarca = Buffer.concat([PNG_1PX, Buffer.from('GRADIENTE-DE-MARCA')]);
+
+  await withMockFetch(
+    [
+      ['pin.it/1Obiyee9V', () => ({ ...htmlResponse(paginaSent), url: sentUrl })],
+      ['widgets.pinterest.com', () => jsonResponse(widget)],
+      [real, () => bufferResponse(fotoDoPin)],
+      [marca, () => bufferResponse(gradienteDeMarca)],
+      [outroPin, () => bufferResponse(fotoDeOutroPin)]
+    ],
+    async (requested) => {
+      const source = await downloadStickerSource('https://pin.it/1Obiyee9V', { onProgress: () => {} });
+      assert.equal(source.buffer.equals(fotoDoPin), true, 'a figurinha sai da imagem do pin pedido');
+      assert.equal(source.title, 'Flamengo memes | Flamengo ganhou');
+      assert.equal(source.via, 'via Pinterest');
+      assert.ok(
+        requested.some((r) => r.url.includes('pin_ids=429530883237169819')),
+        'consulta o widget API pelo id numérico extraído do redirect'
+      );
+      assert.equal(
+        requested.some((r) => r.url.includes(marca) || r.url.includes(outroPin)),
+        false,
+        'nunca baixa o gradiente de marca nem o pin sugerido'
+      );
+    }
+  );
+});
+
+test('Pinterest: quando só existe o gradiente de marca, recusa em vez de enganar', async () => {
+  const marca = 'https://i.pinimg.com/originals/d5/3b/01/d53b014d86a6b6761bf649a0ed813cff.jpg';
+  const pagina = `<html><head><meta property="og:image" content="${marca}"></head><body>login</body></html>`;
+  await withMockFetch(
+    [
+      ['widgets.pinterest.com', () => jsonResponse({ status: 'success', code: 0, data: [] })],
+      ['pin.it/', () => htmlResponse(pagina)],
+      [/pinterest\.com\/pin\//, () => htmlResponse(pagina)],
+      [marca, () => bufferResponse(Buffer.concat([PNG_1PX, Buffer.from('GRADIENTE')]))]
+    ],
+    async () => {
+      await assert.rejects(
+        () => downloadStickerSource('https://pin.it/1Obiyee9V', { onProgress: () => {} }),
+        /não encontrei a mídia real|não consegui confirmar|Pinterest/i
+      );
+    }
+  );
+});
+
+test('asset liso/gradiente de página genérica NÃO vira figurinha', { skip: !hasFfmpeg }, async () => {
+  // O outro lado do bug: quando só existe um asset sintético (banner/gradiente
+  // de marca) marcado como não confiável, a figurinha é recusada em vez de sair
+  // colorida sem sentido.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stickerlink-flat-'));
+  const assetPath = path.join(dir, 'asset.jpg');
+  const base = ['-loglevel', 'error', '-y', '-f', 'lavfi'];
+  const gradiente =
+    spawnSync('ffmpeg', [...base, '-i', 'gradients=s=600x600:c0=0xff00ff:c1=0xffd400', '-frames:v', '1', assetPath]).status === 0 ||
+    spawnSync('ffmpeg', [...base, '-i', 'color=c=0xff00ff:size=600x600', '-frames:v', '1', assetPath]).status === 0;
+  if (!gradiente) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return;
+  }
+  const asset = fs.readFileSync(assetPath);
+  const pageUrl = 'https://exemplo.com/post/1';
+  const pagina = `<html><head><meta property="og:image" content="https://cdn.exemplo.com/asset.jpg"></head></html>`;
+  await withMockFetch(
+    [
+      [pageUrl, () => htmlResponse(pagina)],
+      ['cdn.exemplo.com/asset.jpg', () => bufferResponse(asset, { contentType: 'image/jpeg' })]
+    ],
+    async () => {
+      await assert.rejects(
+        () => downloadStickerSource(pageUrl, { onProgress: () => {} }),
+        /mídia real|gradiente|uma cor só|confirmar/i
+      );
+    }
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('extrator que devolve capa JPEG em vez do vídeo → figurinha estática', async () => {

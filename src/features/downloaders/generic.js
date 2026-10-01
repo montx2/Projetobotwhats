@@ -216,12 +216,23 @@ export async function downloadByPageScrape(url) {
   }
   const image = metaContent(html, 'og:image');
   if (image) {
+    // `og:image` de página genérica pode ser o preview/banner do próprio site
+    // (gradiente de marca, logo) em vez do post: marcado como não confiável, o
+    // motor de figurinha confere o conteúdo antes de usar.
     return base('Web', {
       kind: /\.gif(\?|$)/i.test(image) ? 'gif' : 'image',
       title: metaContent(html, 'og:title') || '',
       author: metaContent(html, 'og:site_name') || '',
       thumbnail: image,
-      media: [{ type: /\.gif(\?|$)/i.test(image) ? 'gif' : 'image', url: image, label: 'og:image' }]
+      media: [
+        {
+          type: /\.gif(\?|$)/i.test(image) ? 'gif' : 'image',
+          url: image,
+          label: 'og:image',
+          trusted: false,
+          hint: 'og-image'
+        }
+      ]
     });
   }
   return null;

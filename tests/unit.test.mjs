@@ -23,7 +23,107 @@ import {
   buildRiff
 } from '../src/util/webp.js';
 import { makeSticker } from '../src/features/sticker.js';
+import {
+  gradeImageSamples,
+  isRealImage,
+  isUsableImageSize,
+  looksLikeServerError,
+  sniffImage
+} from '../src/util/imageinfo.js';
 import { DEFAULT_CONFIG } from '../src/core/config.js';
+
+// ── inspeção de imagem (cabeçalho + conteúdo) ────────────────
+
+test('sniffImage lê formato e dimensões dos cabeçalhos (PNG/JPEG/GIF/WebP)', () => {
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+  const pngFull = Buffer.concat([png, Buffer.from([0, 0, 1, 44, 0, 0, 2, 88, 8, 6, 0, 0, 0])]);
+  assert.deepEqual(sniffImage(pngFull), { format: 'png', width: 300, height: 600, animated: false });
+
+  // SOI + APP0 (16 bytes) + SOF0 com 480x640
+  const jpeg = Buffer.concat([
+    Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]),
+    Buffer.from('JFIF\0', 'ascii'),
+    Buffer.from([0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]),
+    Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01])
+  ]);
+  const jpegInfo = sniffImage(jpeg);
+  assert.equal(jpegInfo.format, 'jpeg');
+  assert.equal(jpegInfo.width, 640);
+  assert.equal(jpegInfo.height, 480);
+
+  const gif = Buffer.concat([Buffer.from('GIF89a', 'ascii'), Buffer.from([0x40, 0x01, 0xf0, 0x00, 0x00])]);
+  assert.deepEqual(sniffImage(gif), { format: 'gif', width: 320, height: 240, animated: true });
+
+  const webp = Buffer.concat([
+    Buffer.from('RIFF', 'ascii'),
+    Buffer.from([0x24, 0x00, 0x00, 0x00]),
+    Buffer.from('WEBPVP8X', 'ascii'),
+    Buffer.from([0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x01, 0x00, 0xff, 0x01, 0x00])
+  ]);
+  assert.deepEqual(sniffImage(webp), { format: 'webp', width: 512, height: 512, animated: false });
+
+  assert.equal(sniffImage(Buffer.from('<!DOCTYPE html>')), null);
+  assert.equal(isRealImage(Buffer.from('nao sou imagem')), false);
+});
+
+test('isUsableImageSize barra miniatura e aceita o que serve de figurinha', () => {
+  assert.equal(isUsableImageSize({ width: 1200, height: 630 }), true);
+  assert.equal(isUsableImageSize({ width: 30, height: 30 }), false);
+  assert.equal(isUsableImageSize({ width: 600, height: 40 }), false);
+  assert.equal(isUsableImageSize(null), false);
+});
+
+test('looksLikeServerError reconhece XML de erro do CDN e HTML', () => {
+  const xml = Buffer.from('<?xml version="1.0"?><Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>');
+  assert.equal(looksLikeServerError(xml), true);
+  assert.equal(looksLikeServerError(Buffer.from('<!DOCTYPE html><html><body>oi</body></html>')), true);
+  assert.equal(looksLikeServerError(Buffer.from('{"erro":"x"}')), true);
+  // PNG de verdade nunca é "erro de servidor"
+  assert.equal(looksLikeServerError(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')), false);
+});
+
+test('gradeImageSamples: gradiente/chapado reprovam, conteúdo com detalhe aprova', () => {
+  const W = 32;
+  const H = 32;
+  const make = (fn) => {
+    const buf = Buffer.alloc(W * H * 3);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const [r, g, b] = fn(x, y);
+        const i = (y * W + x) * 3;
+        buf[i] = r;
+        buf[i + 1] = g;
+        buf[i + 2] = b;
+      }
+    }
+    return buf;
+  };
+
+  // Gradiente diagonal perfeito — o "asset de marca" que aparecia como figurinha.
+  const gradient = gradeImageSamples(make((x, y) => [x * 8, y * 8, 128]), { width: W, height: H });
+  assert.equal(gradient.verdict, 'smooth');
+  assert.equal(gradient.smooth, true);
+  assert.ok(gradient.edge < 0.012, `borda baixa (${gradient.edge})`);
+
+  // Cor chapada — placeholder de "carregando".
+  const solid = gradeImageSamples(make(() => [40, 120, 40]), { width: W, height: H });
+  assert.equal(solid.verdict, 'solid');
+  assert.equal(solid.solid, true);
+
+  // Padrão com estrutura (xadrez + ruído) — tem cara de imagem de verdade.
+  const detailed = gradeImageSamples(
+    make((x, y) => {
+      const checker = (x >> 1) % 2 === (y >> 1) % 2 ? 200 : 30;
+      const noise = ((x * 7 + y * 13) % 17) * 4;
+      return [Math.min(255, checker + noise), (checker + noise) % 200, 90];
+    }),
+    { width: W, height: H }
+  );
+  assert.equal(detailed.verdict, 'detail');
+  assert.equal(detailed.smooth, false);
+  assert.equal(detailed.solid, false);
+  assert.ok(detailed.edge > 0.05, `borda alta (${detailed.edge})`);
+});
 
 // ── KeyPool ──────────────────────────────────────────────────
 test('KeyPool gira em round-robin', () => {

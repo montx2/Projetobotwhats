@@ -1,21 +1,39 @@
-// 📌 Pinterest — extração em cascata:
-//   1) Widget API pública (a mesma que o script de incorporação chama):
-//      https://widgets.pinterest.com/v3/pidgets/pins/info/?pin_ids=<id>
-//      → responde o pin como JSON, com todas as rendições de vídeo e imagem.
-//      É o método que os bots reais usam hoje: a página do pin é 1 MB de
-//      markup renderizado por JS e não tem a mídia dentro.
-//   2) Payload SSR `__PWS_DATA__` da página do pin (quando a API falha).
-//   3) savepin.app (scrape) — reserva comunitária.
-//   4) Cobalt.
+// 📌 Pinterest — extração em cascata, agora com uma regra dura:
+// **só mídia do PIN PEDIDO**. Nunca "a primeira imagem que aparecer na página".
 //
-// Aceita links curtos pin.it (resolvidos antes de tudo).
+// Por que essa regra existe (bug real, corrigido aqui): quando o Pinterest não
+// entrega o pin — link compartilhado `/sent/`, página de login, CAPTCHA — a
+// página que chega traz só *sugestões de busca* e assets de marca. O extrator
+// antigo pegava "o primeiro pin do estado" e "o primeiro /originals/ do HTML",
+// então o bot baixava um gradiente colorido da Pinterest e o usuário recebia
+// uma figurinha colorida sem nada a ver com o post.
+//
+// Cascata:
+//   1) Widget API pública (a mesma do script de incorporação), consultada PELO
+//      ID NUMÉRICO do pin → mídia confiável, todas as rendições.
+//   2) Payload SSR `__PWS_DATA__` da página do pin — aceito SOMENTE quando o
+//      pin do estado tem o mesmo id pedido.
+//   3) og:video / og:image da página canônica (`/pin/<id>/`, sem o lixo de
+//      `?invite_code=…`) — marcados como NÃO confiáveis: o motor de figurinha
+//      confere o conteúdo antes de usar (gradiente de marca é descartado).
+//   4) savepin.app (scrape) e Cobalt — últimos recursos.
+//
+// Aceita links curtos (`pin.it/abc`): o id numérico só aparece depois do
+// redirect, e é ele que destrava o caminho confiável (1).
 
-import { httpGet, resolveRedirect, fetchJson } from '../../core/http.js';
+import { httpGet, resolveRedirect, BROWSER_PAGE_HEADERS } from '../../core/http.js';
 import { log } from '../../core/logger.js';
 import { cobaltDownload } from './cobalt.js';
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+
+/** URL de conteúdo do pinimg: /<tamanho>/<a>/<b>/<c>/<hash>.<ext> */
+const PINIMG_CONTENT =
+  /^https?:\/\/i\.pinimg\.com\/(?:originals|\d+x\d*|\d{2,4}x)\/([0-9a-f]{2})\/([0-9a-f]{2})\/([0-9a-f]{2})\/([0-9a-f]+)\.(jpe?g|png|gif|webp)/i;
+
+/** Assets que o Pinterest usa na própria interface (nunca são o post). */
+const PINIMG_ASSET = /(?:s\.pinimg\.com|\/upload\/|\/images\/|_board_thumbnail_|\/avatars?\/)/i;
 
 export function isPinterestUrl(url) {
   return /(pinterest\.[a-z.]+|pin\.it)/i.test(url);
@@ -23,6 +41,46 @@ export function isPinterestUrl(url) {
 
 export function extractPinId(url) {
   return String(url).match(/\/pin\/(?:[\w-]+\/)?(\d+)/i)?.[1] || String(url).match(/pin\.it\/([\w-]+)/i)?.[1] || null;
+}
+
+/** Id de pin de verdade é numérico; `pin.it/<slug>` devolve um slug curto. */
+export function isNumericPinId(id) {
+  return /^\d{5,}$/.test(String(id || ''));
+}
+
+/** https://…/pin/<id>/sent/?invite_code=… → https://…/pin/<id>/ */
+export function canonicalPinUrl(url, pinId) {
+  if (!pinId) return url;
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}/pin/${pinId}/`;
+  } catch {
+    return `https://www.pinterest.com/pin/${pinId}/`;
+  }
+}
+
+/** Hash do arquivo de conteúdo do pinimg (a "identidade" da imagem do pin). */
+export function pinimgHash(url) {
+  const m = PINIMG_CONTENT.exec(String(url || ''));
+  return m ? m[4].toLowerCase() : null;
+}
+
+/** Troca o tamanho da URL do pinimg (`/564x/` → `/originals/`, `/736x/` …). */
+export function pinimgWithSize(url, size) {
+  const target = String(size || '').replace(/^\/|\/$/g, '');
+  const s = String(url || '');
+  if (!s || PINIMG_ASSET.test(s)) return s;
+  if (!/^https?:\/\/i\.pinimg\.com\/(?:originals|\d+x\d*)\//i.test(s)) return s;
+  return s.replace(
+    /^(https?:\/\/i\.pinimg\.com\/)(?:originals|\d+x\d*|\d{2,4}x)\//i,
+    `$1${target}/`
+  );
+}
+
+/** URL de conteúdo do pinimg com formato esperado (e não asset de interface)? */
+export function isPinContentUrl(url) {
+  const s = String(url || '');
+  return Boolean(PINIMG_CONTENT.test(s)) && !PINIMG_ASSET.test(s);
 }
 
 function baseResult(extra = {}) {
@@ -34,6 +92,7 @@ function baseResult(extra = {}) {
     thumbnail: '',
     kind: 'image',
     media: [],
+    alternates: [],
     audioOnly: null,
     ...extra
   };
@@ -61,13 +120,111 @@ function bestVideo(pin) {
   return null;
 }
 
-function bestImage(pin) {
-  const images = pin.images || {};
-  if (images.orig?.url) return images.orig;
-  return tallestFile(images);
+function dimLabel(size) {
+  return size?.width && size?.height ? `${size.width}x${size.height}` : '';
 }
 
-/** 1) Widget API — o caminho principal. */
+/**
+ * Todas as rendições de imagem do pin, da maior para a menor, com as versões
+ * boas conhecidas (`originals`, `736x`) na frente — o Pinterest gera qualquer
+ * largura a partir do arquivo original, então a família toda funciona.
+ */
+export function imageRenditions(pin) {
+  const images = pin?.images || {};
+  const list = [];
+  const seenApiUrls = new Set();
+  for (const value of Object.values(images)) {
+    const url = typeof value === 'string' ? value : value?.url;
+    if (!url || !isPinContentUrl(url) || seenApiUrls.has(url)) continue;
+    seenApiUrls.add(url);
+    list.push({ url, width: value?.width || 0, height: value?.height || 0 });
+  }
+  list.sort((a, b) => b.width * b.height - a.width * a.height);
+
+  const out = [];
+  const seenUrls = new Set();
+  const push = (url, size) => {
+    const hash = pinimgHash(url);
+    if (!hash || !url || seenUrls.has(url)) return;
+    seenUrls.add(url);
+    out.push({ url, width: size?.width || 0, height: size?.height || 0, hash });
+  };
+  const best = list[0];
+  if (best) push(pinimgWithSize(best.url, 'originals'), best);
+  for (const item of list) {
+    push(item.url, item); // a URL exatamente como a API entregou (existe sempre)
+    push(pinimgWithSize(item.url, '736x'), item);
+  }
+  return out;
+}
+
+/** Converte um pin do Pinterest (widget ou SSR) no resultado do downloader. */
+function pinResult(pin) {
+  const video = bestVideo(pin);
+  const images = imageRenditions(pin);
+  if (!video && !images.length) return null;
+
+  const media = [];
+  if (video) {
+    media.push({
+      type: 'video',
+      url: video.url,
+      label: `${video.width || ''}x${video.height || ''}`.trim(),
+      trusted: true,
+      hint: 'video'
+    });
+  }
+  for (const img of images) {
+    media.push({
+      type: /\.gif(\?|$)/i.test(img.url) ? 'gif' : 'image',
+      url: img.url,
+      label: dimLabel(img),
+      trusted: true,
+      hint: pinimgHash(img.url)
+    });
+  }
+
+  const primary = media[0];
+  return baseResult({
+    kind: media.some((m) => m.type === 'video') ? 'video' : primary.type === 'gif' ? 'gif' : 'image',
+    title: String(pin.grid_title || pin.title || pin.grid_description || pin.description || 'Pin do Pinterest')
+      .trim()
+      .slice(0, 100),
+    author: pin.pinner?.username || '',
+    thumbnail: images[0]?.url || '',
+    media: [primary],
+    alternates: media.slice(1)
+  });
+}
+
+/** Pega o pin certo dentro do estado SSR — SÓ se o id bater com o pedido. */
+export function findPinInState(html, pinId) {
+  const raw = html?.match(/<script id="__PWS_DATA__" type="application\/json">(.*?)<\/script>/s)?.[1];
+  if (!raw) return null;
+  let state;
+  try {
+    state = JSON.parse(raw)?.props?.initialReduxState;
+  } catch {
+    return null;
+  }
+  if (!state) return null;
+
+  const wanted = pinId ? String(pinId) : null;
+  const pools = [];
+  if (state.pin && typeof state.pin === 'object') pools.push(state.pin);
+  if (Array.isArray(state.pins)) pools.push(...state.pins);
+  else if (state.pins && typeof state.pins === 'object') pools.push(...Object.values(state.pins));
+  if (wanted && state.pins?.[wanted]) pools.unshift(state.pins[wanted]);
+
+  const usable = (p) => p && typeof p === 'object' && (p.images || p.videos);
+  // Sem id pedido, NUNCA pega "o primeiro pin da página": em página de preview,
+  // login ou CAPTCHA essa lista é de sugestões — foi assim que uma figurinha
+  // colorida sem nada a ver saiu no lugar do pin do Flamengo.
+  if (!wanted) return null;
+  return pools.find((p) => usable(p) && String(p.id || '') === wanted) || null;
+}
+
+/** 1) Widget API — o caminho confiável (consultado pelo id do pin). */
 async function viaWidgetApi(pinId) {
   const res = await httpGet(`https://widgets.pinterest.com/v3/pidgets/pins/info/?pin_ids=${pinId}`, {
     headers: { 'user-agent': BROWSER_UA, accept: 'application/json' },
@@ -77,82 +234,93 @@ async function viaWidgetApi(pinId) {
   if (!res.ok || !res.data) return null;
   const pin = res.data?.data?.[0] || res.data?.data?.pins?.[0];
   if (!pin) return null;
-
-  const video = bestVideo(pin);
-  const image = bestImage(pin);
-  if (!video && !image) return null;
-
-  return baseResult({
-    kind: video ? 'video' : /\.gif(\?|$)/i.test(image.url) ? 'gif' : 'image',
-    title: String(pin.grid_title || pin.description || 'Pin do Pinterest').trim().slice(0, 100),
-    author: pin.pinner?.username || '',
-    thumbnail: image?.url || '',
-    media: [
-      video
-        ? { type: 'video', url: video.url, label: `${video.width || ''}x${video.height || ''}`.trim() }
-        : {
-            type: /\.gif(\?|$)/i.test(image.url) ? 'gif' : 'image',
-            url: image.url,
-            label: `${image.width || ''}x${image.height || ''}`.trim()
-          }
-    ]
-  });
+  return pinResult(pin);
 }
 
-/** 2) Payload SSR da página do pin. */
-async function viaPageScrape(finalUrl) {
-  const res = await httpGet(finalUrl, {
-    headers: { 'user-agent': BROWSER_UA, accept: 'text/html,application/xhtml+xml' },
-    timeoutMs: 25_000
-  });
-  if (!res.ok || !res.text) return null;
-  const html = res.text;
+/**
+ * 2/3) Página do pin: SSR do PRÓPRIO pin, senão og:video, senão og:image.
+ * Tudo que não vier do pin (id conferido) sai marcado como `trusted: false`
+ * para o motor de figurinha validar o conteúdo antes de usar.
+ */
+async function viaPageScrape(finalUrl, { pinId, html: preloadedHtml } = {}) {
+  let html = preloadedHtml;
+  if (!html) {
+    const res = await httpGet(finalUrl, {
+      headers: { 'user-agent': BROWSER_UA, accept: 'text/html,application/xhtml+xml' },
+      timeoutMs: 25_000
+    });
+    if (!res.ok || !res.text) return null;
+    html = res.text;
+  }
+  const pageMentionsPin = Boolean(pinId) && html.includes(String(pinId));
 
-  // __PWS_DATA__ (estado Redux server-side renderizado)
-  try {
-    const raw = html.match(/<script id="__PWS_DATA__" type="application\/json">(.*?)<\/script>/s)?.[1];
-    if (raw) {
-      const state = JSON.parse(raw)?.props?.initialReduxState;
-      const pins = state?.pins && typeof state.pins === 'object' ? Object.values(state.pins) : [];
-      const pin = (state?.pin && (state.pin.images || state.pin.videos) && state.pin) ||
-        pins.find((p) => p && (p.images || p.videos));
-      if (pin) {
-        const video = bestVideo(pin);
-        const image = bestImage(pin);
-        if (video || image) {
-          return baseResult({
-            kind: video ? 'video' : /\.gif(\?|$)/i.test(image.url) ? 'gif' : 'image',
-            title: String(pin.title || pin.grid_description || pin.description || '').slice(0, 100),
-            author: pin.pinner?.username || '',
-            thumbnail: image?.url || '',
-            media: [video ? { type: 'video', url: video.url } : { type: 'image', url: image.url }]
-          });
-        }
-      }
-    }
-  } catch { /* segue para as tags og */ }
+  const pin = findPinInState(html, pinId);
+  if (pin) {
+    const found = pinResult(pin);
+    if (found?.media?.length) return found;
+  }
 
   const ogVideo = html.match(/property="og:video(?::url)?"\s+content="([^"]+)"/)?.[1];
-  if (ogVideo) return baseResult({ kind: 'video', media: [{ type: 'video', url: ogVideo }], thumbnail: ogVideo });
+  if (ogVideo && !isPinContentUrl(ogVideo)) {
+    const url = ogVideo.replace(/&amp;/g, '&');
+    return baseResult({
+      kind: 'video',
+      title: metaTitle(html),
+      thumbnail: html.match(/property="og:image"\s+content="([^"]+)"/)?.[1]?.replace(/&amp;/g, '&') || '',
+      media: [{ type: 'video', url, label: 'og:video', trusted: false, hint: 'og-video' }]
+    });
+  }
 
-  const ogImage = html.match(/property="og:image"\s+content="([^"]+)"/)?.[1];
-  if (ogImage) {
-    const url = ogImage.replace(/\/\d+x\d*\//, '/originals/');
-    return baseResult({ kind: 'image', thumbnail: url, media: [{ type: 'image', url }] });
+  const ogImage = html.match(/property="og:image"\s+content="([^"]+)"/)?.[1]?.replace(/&amp;/g, '&');
+  // Sem provar que a página é DO pin pedido, `og:image` é o que a Pinterest usa
+  // como preview genérico (gradiente de marca). Preferimos não entregar nada.
+  if (ogImage && isPinContentUrl(ogImage) && pageMentionsPin) {
+    const alternates = imageRenditions({
+      images: {
+        a: { url: pinimgWithSize(ogImage, '736x') },
+        b: { url: pinimgWithSize(ogImage, '564x') },
+        c: { url: pinimgWithSize(ogImage, '236x') }
+      }
+    }).filter((i) => i.url !== ogImage);
+    return baseResult({
+      kind: 'image',
+      title: metaTitle(html),
+      thumbnail: ogImage,
+      media: [
+        {
+          type: 'image',
+          url: ogImage,
+          label: 'og:image',
+          // Asset de marca (gradiente de página de login) NUNCA entra confiável:
+          // o motor de figurinha confere o conteúdo antes de usar.
+          trusted: false,
+          pinScoped: true,
+          hint: 'og-image'
+        }
+      ],
+      alternates
+    });
   }
 
   const vids = [...html.matchAll(/https:\/\/v1\.pinimg\.com\/videos\/[^"\\\s]+\.mp4/g)].map((m) => m[0]);
-  if (vids.length) {
-    return baseResult({ kind: 'video', media: [{ type: 'video', url: vids.sort((a, b) => b.length - a.length)[0] }] });
-  }
-  const imgs = [...html.matchAll(/https:\/\/i\.pinimg\.com\/originals\/[^"\\\s]+\.(?:jpg|png|gif)/gi)].map((m) => m[0]);
-  if (imgs.length) {
-    return baseResult({ kind: 'image', thumbnail: imgs[0], media: [{ type: 'image', url: imgs[0] }] });
+  if (vids.length && pageMentionsPin) {
+    return baseResult({
+      kind: 'video',
+      media: [{ type: 'video', url: vids.sort((a, b) => b.length - a.length)[0], trusted: false, hint: 'html-video' }]
+    });
   }
   return null;
 }
 
-/** 3) savepin.app — reserva comunitária. */
+function metaTitle(html) {
+  return (
+    html.match(/property="og:title"\s+content="([^"]+)"/)?.[1]?.replace(/&amp;/g, '&') ||
+    html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] ||
+    ''
+  ).slice(0, 100);
+}
+
+/** 4) savepin.app — reserva comunitária (resultado não confiável, mas útil). */
 async function viaSavePin(finalUrl) {
   const res = await httpGet(
     `https://www.savepin.app/download.php?url=${encodeURIComponent(finalUrl)}&lang=en&type=redirect`,
@@ -171,14 +339,43 @@ async function viaSavePin(finalUrl) {
   const videos = [...html.matchAll(/href="([^"]*(?:pinimg\.com|media\.savepin)[^"]*\.(?:mp4)[^"]*)"/gi)]
     .map((m) => m[1].replace(/&amp;/g, '&'));
   if (videos.length) {
-    return baseResult({ kind: 'video', media: [{ type: 'video', url: videos[0] }] });
+    return baseResult({
+      kind: 'video',
+      media: [{ type: 'video', url: videos[0], trusted: false, hint: 'savepin' }]
+    });
   }
-  const images = [...html.matchAll(/href="([^"]*pinimg\.com\/originals\/[^"]*\.(?:jpg|jpeg|png|gif)[^"]*)"/gi)]
-    .map((m) => m[1].replace(/&amp;/g, '&'));
+  const images = [...html.matchAll(/href="([^"]*pinimg\.com\/(?:originals|\d+x)\/[^"]*\.(?:jpg|jpeg|png|gif)[^"]*)"/gi)]
+    .map((m) => m[1].replace(/&amp;/g, '&'))
+    .filter(isPinContentUrl);
   if (images.length) {
-    return baseResult({ kind: 'image', thumbnail: images[0], media: [{ type: 'image', url: images[0] }] });
+    return baseResult({
+      kind: 'image',
+      thumbnail: images[0],
+      media: [{ type: 'image', url: images[0], trusted: false, hint: 'savepin' }],
+      alternates: imageRenditions({ images: { a: { url: images[0] } } }).slice(1)
+    });
   }
   return null;
+}
+
+/**
+ * Descobre o id numérico do pin e a URL canônica que vale a pena raspar.
+ * Links curtos (`pin.it/abc`) só revelam o id depois do redirect — e usa-se GET
+ * (não HEAD): o pin.it responde 200 ao HEAD sem Location, o que já fez o bot
+ * tratar um slug como id e cair na página errada.
+ */
+export async function resolvePinterestTarget(url) {
+  const direct = extractPinId(url);
+  if (isNumericPinId(direct)) {
+    return { id: direct, pageUrl: canonicalPinUrl(url, direct), html: null, finalUrl: url };
+  }
+  const res = await httpGet(url, { headers: BROWSER_PAGE_HEADERS, timeoutMs: 20_000 }).catch(() => null);
+  const finalUrl = res?.finalUrl || (await resolveRedirect(url).catch(() => url));
+  const id = extractPinId(finalUrl);
+  if (isNumericPinId(id)) {
+    return { id, pageUrl: canonicalPinUrl(finalUrl, id), html: null, finalUrl };
+  }
+  return { id: null, pageUrl: finalUrl || url, html: res?.text || null, finalUrl: finalUrl || url };
 }
 
 /**
@@ -187,9 +384,10 @@ async function viaSavePin(finalUrl) {
  */
 export async function downloadPinterest(url, quality = 'melhor') {
   const errors = [];
-  const finalUrl = await resolveRedirect(url).catch(() => url);
-  const pinId = extractPinId(finalUrl) || extractPinId(url);
+  const target = await resolvePinterestTarget(url).catch(() => ({ id: null, pageUrl: url, html: null }));
+  const pinId = target.id;
 
+  // 1) Caminho confiável: widget API pelo id numérico do pin.
   if (pinId) {
     try {
       const found = await viaWidgetApi(pinId);
@@ -198,18 +396,24 @@ export async function downloadPinterest(url, quality = 'melhor') {
     } catch (error) {
       errors.push(`widget api: ${String(error.message).slice(0, 60)}`);
     }
+  } else {
+    errors.push('não consegui identificar o id do pin (o link curto não resolveu)');
   }
 
+  // 2/3) Página canônica do pin (`/pin/<id>/`, sem invite_code/sender do /sent/).
+  // Se o GET do redirect já trouxe exatamente essa página, reaproveita o HTML.
   try {
-    const found = await viaPageScrape(finalUrl);
+    const reuse = target.html && target.finalUrl === target.pageUrl ? target.html : null;
+    const found = await viaPageScrape(target.pageUrl, { pinId, html: reuse });
     if (found?.media?.length) return found;
-    errors.push('scraping: sem mídia');
+    errors.push('página do pin: sem mídia do pin');
   } catch (error) {
-    errors.push(`scraping: ${String(error.message).slice(0, 60)}`);
+    errors.push(`página do pin: ${String(error.message).slice(0, 60)}`);
   }
 
+  // 4) Reservas.
   try {
-    const found = await viaSavePin(finalUrl);
+    const found = await viaSavePin(target.pageUrl);
     if (found?.media?.length) return found;
   } catch (error) {
     errors.push(`savepin: ${String(error.message).slice(0, 60)}`);
@@ -217,7 +421,7 @@ export async function downloadPinterest(url, quality = 'melhor') {
 
   log.dl('pinterest: tentando via cobalt…');
   try {
-    const { buffers, audioBuffer, ...rest } = await cobaltDownload(finalUrl, quality);
+    const { buffers, audioBuffer, ...rest } = await cobaltDownload(target.pageUrl, quality);
     if (buffers?.length) return baseResult({ ...rest, buffers, audioBuffer });
     errors.push('cobalt: sem buffer');
   } catch (error) {
