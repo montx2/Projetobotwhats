@@ -1,0 +1,35 @@
+{
+  "nomeBot": "MontxBOT",
+  "nomePack": "MontxBOT",
+  "autorPack": "×by ꧁montx2_꧂",
+  "prefixos": [
+    ".",
+    "!",
+    "/",
+    "#"
+  ],
+  "modoPrivado": true,
+  "autorizados": [],
+  "viewOnce": {
+    "auto": true,
+    "destinoAuto": "dono",
+    "resposta": "dono"
+  },
+  "antiDelete": {
+    "ativo": true,
+    "restaurarNoChat": false,
+    "avisarDono": true,
+    "ignorar": []
+  },
+  "autoDownload": true,
+  "qualidadePadrao": "melhor",
+  "maxMB": 90,
+  "ia": {
+    "modeloImagem": "flux",
+    "vozPadrao": "nova",
+    "sistema": "Você é o MontxBOT, um assistente de WhatsApp claro, direto e cordial. Responda sempre em português do Brasil, de forma curta e útil. Use emojis com muita moderação."
+  },
+  "soDonoConfigura": true,
+  "responderDesconhecido": false,
+  "_schemaVersion": 2
+}

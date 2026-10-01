@@ -1,0 +1,944 @@
+{
+  "5511900000000@s.whatsapp.net": [
+    {
+      "id": "MSGsttobwguv4",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSGly04usp9dim",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".ping"
+      }
+    },
+    {
+      "id": "MSG40s7alu4ink",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": "!menu"
+      }
+    },
+    {
+      "id": "R1",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Dono",
+      "ts": 1790855990000,
+      "message": {
+        "extendedTextMessage": {
+          "text": "baixa aí",
+          "contextInfo": {
+            "stanzaId": "VO1",
+            "quotedMessage": {
+              "viewOnceMessageV2": {
+                "message": {
+                  "imageMessage": {
+                    "url": "fake",
+                    "mimetype": "image/jpeg"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "MSGkle30wl567p",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": "oi tudo bem?"
+      }
+    },
+    {
+      "id": "MSG6kpjxqz6thf",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": "olha https://example.com/arquivo"
+      }
+    },
+    {
+      "id": "MSGl66njg3yevq",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".antidelete ignorar grupos"
+      }
+    },
+    {
+      "id": "MSG2l6o57b2jpr",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".antidelete remover grupos"
+      }
+    },
+    {
+      "id": "MSG5xkwxmenhjy",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".s"
+      }
+    },
+    {
+      "id": "MSGjve1nb9wyd",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".ia"
+      }
+    },
+    {
+      "id": "MSGu27868gvau",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".xyzzy"
+      }
+    },
+    {
+      "id": "APPEND1",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "DUP1",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".ping"
+      }
+    },
+    {
+      "id": "MSGsnjvg3cs5s",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSGi02vcyyca5",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".ping"
+      }
+    },
+    {
+      "id": "MSGdhjcxudk28e",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": "!menu"
+      }
+    },
+    {
+      "id": "MSGypqdlv8jx3",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": "oi tudo bem?"
+      }
+    },
+    {
+      "id": "MSGcmjjoosd1v6",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": "olha https://example.com/arquivo"
+      }
+    },
+    {
+      "id": "MSGjfqlggdsb",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".antidelete ignorar grupos"
+      }
+    },
+    {
+      "id": "MSGwktkdxnhmmp",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".antidelete remover grupos"
+      }
+    },
+    {
+      "id": "MSGp2n6smwzk6r",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".s"
+      }
+    },
+    {
+      "id": "MSGuxep7m6bl3",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".ia"
+      }
+    },
+    {
+      "id": "MSGww8kc1erxbb",
+      "jid": "5511900000000@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".xyzzy"
+      }
+    }
+  ],
+  "grupo-aleatorio@g.us": [
+    {
+      "id": "FOTO1",
+      "jid": "grupo-aleatorio@g.us",
+      "fromMe": false,
+      "pushName": "Membro",
+      "ts": 1790855990000,
+      "message": {
+        "imageMessage": {
+          "url": "https://mmg.whatsapp.net/foto.jpg",
+          "mimetype": "image/jpeg"
+        }
+      }
+    },
+    {
+      "id": "MSGgd51r5ixiwb",
+      "jid": "grupo-aleatorio@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "extendedTextMessage": {
+          "text": "que foto legal",
+          "contextInfo": {
+            "stanzaId": "FOTO1",
+            "quotedMessage": {
+              "imageMessage": {
+                "url": "https://mmg.whatsapp.net/foto.jpg",
+                "mimetype": "image/jpeg"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "MSG8ajzo5n1hxo",
+      "jid": "grupo-aleatorio@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": "https://vm.tiktok.com/ZM123456/"
+      }
+    },
+    {
+      "id": "MSGfq0xeh1ssx",
+      "jid": "grupo-aleatorio@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSGj745so8fn2q",
+      "jid": "grupo-aleatorio@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "extendedTextMessage": {
+          "text": ".s",
+          "contextInfo": {
+            "stanzaId": "FOTO1",
+            "quotedMessage": {
+              "imageMessage": {
+                "url": "https://mmg.whatsapp.net/foto.jpg",
+                "mimetype": "image/jpeg"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "MSGujw85iljsa9",
+      "jid": "grupo-aleatorio@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "extendedTextMessage": {
+          "text": "que foto legal",
+          "contextInfo": {
+            "stanzaId": "FOTO1",
+            "quotedMessage": {
+              "imageMessage": {
+                "url": "https://mmg.whatsapp.net/foto.jpg",
+                "mimetype": "image/jpeg"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "MSGd4s31q0cky9",
+      "jid": "grupo-aleatorio@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": "https://vm.tiktok.com/ZM123456/"
+      }
+    },
+    {
+      "id": "MSGqf9dxncdfwb",
+      "jid": "grupo-aleatorio@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSGkmlqrxttwma",
+      "jid": "grupo-aleatorio@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "extendedTextMessage": {
+          "text": ".s",
+          "contextInfo": {
+            "stanzaId": "FOTO1",
+            "quotedMessage": {
+              "imageMessage": {
+                "url": "https://mmg.whatsapp.net/foto.jpg",
+                "mimetype": "image/jpeg"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "5511988887777@s.whatsapp.net": [
+    {
+      "id": "MSGzq7yixamre",
+      "jid": "5511988887777@s.whatsapp.net",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSGc3sg15rmev",
+      "jid": "5511988887777@s.whatsapp.net",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": "https://vm.tiktok.com/ZM123456/"
+      }
+    },
+    {
+      "id": "MSGt3ucucu5cgr",
+      "jid": "5511988887777@s.whatsapp.net",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSGf6k0rd34krl",
+      "jid": "5511988887777@s.whatsapp.net",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": "https://vm.tiktok.com/ZM123456/"
+      }
+    }
+  ],
+  "grupo-amigos@g.us": [
+    {
+      "id": "MSGkjtcgcqc5nc",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSGopc5gcee0b",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".s"
+      }
+    },
+    {
+      "id": "MSG2n47ven29l6",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ". ativar"
+      }
+    },
+    {
+      "id": "MSG9q1ya0if3mr",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSGom4798aw4wb",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".s"
+      }
+    },
+    {
+      "id": "MSG6h72mfohhs2",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".ia"
+      }
+    },
+    {
+      "id": "MSGpp73fhwv4zp",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".vo"
+      }
+    },
+    {
+      "id": "MSGeck2groh2o8",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".antidelete"
+      }
+    },
+    {
+      "id": "MSG6l5euiuq779",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".config"
+      }
+    },
+    {
+      "id": "MSG34jse30v9gr",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ". desativar"
+      }
+    },
+    {
+      "id": "MSG2ullt3r70a",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSGuamuatsl238",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSGbp576p2ki2",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".s"
+      }
+    },
+    {
+      "id": "MSGcvhegmc3sn4",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ". ativar"
+      }
+    },
+    {
+      "id": "MSGv1iko4vlybo",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".menu"
+      }
+    },
+    {
+      "id": "MSG3we54zidgzv",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".s"
+      }
+    },
+    {
+      "id": "MSGkv2oxkh8hvo",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".ia"
+      }
+    },
+    {
+      "id": "MSGhe1ypnimt6",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".vo"
+      }
+    },
+    {
+      "id": "MSGy53u8qvw95b",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".antidelete"
+      }
+    },
+    {
+      "id": "MSGraafhzn0rml",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".config"
+      }
+    },
+    {
+      "id": "MSG8ycdla5iiml",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ". desativar"
+      }
+    },
+    {
+      "id": "MSGz2csfa2mp37",
+      "jid": "grupo-amigos@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".menu"
+      }
+    }
+  ],
+  "grupo-teste@g.us": [
+    {
+      "id": "ORIG1",
+      "jid": "grupo-teste@g.us",
+      "fromMe": false,
+      "pushName": "Fofoqueiro",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": "mensagem secreta 🤫"
+      }
+    },
+    {
+      "id": "REV1",
+      "jid": "grupo-teste@g.us",
+      "fromMe": false,
+      "pushName": null,
+      "ts": 1790855990000,
+      "message": {
+        "protocolMessage": {
+          "type": 0,
+          "key": {
+            "remoteJid": "grupo-teste@g.us",
+            "id": "ORIG1"
+          }
+        }
+      }
+    }
+  ],
+  "grupo2@g.us": [
+    {
+      "id": "ORIG2",
+      "jid": "grupo2@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": "segredo do grupo"
+      }
+    },
+    {
+      "id": "REV2",
+      "jid": "grupo2@g.us",
+      "fromMe": false,
+      "pushName": null,
+      "ts": 1790855990528,
+      "message": {
+        "protocolMessage": {
+          "type": "REVOKE",
+          "key": {
+            "remoteJid": "grupo2@g.us",
+            "id": "ORIG2"
+          }
+        }
+      }
+    }
+  ],
+  "5533@s.whatsapp.net": [
+    {
+      "id": "ORIG3",
+      "jid": "5533@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": "minha msg"
+      }
+    },
+    {
+      "id": "REV3",
+      "jid": "5533@s.whatsapp.net",
+      "fromMe": true,
+      "pushName": null,
+      "ts": 1790855990528,
+      "message": {
+        "protocolMessage": {
+          "type": 0,
+          "key": {
+            "remoteJid": "5533@s.whatsapp.net",
+            "id": "ORIG3"
+          }
+        }
+      }
+    }
+  ],
+  "5560@s.whatsapp.net": [
+    {
+      "id": "REVUPD1",
+      "jid": "5560@s.whatsapp.net",
+      "fromMe": false,
+      "pushName": null,
+      "ts": 1790855990538,
+      "message": {
+        "protocolMessage": {
+          "type": 0,
+          "key": {
+            "remoteJid": "5560@s.whatsapp.net",
+            "id": "REVUPD1",
+            "fromMe": false
+          }
+        }
+      }
+    }
+  ],
+  "5563@s.whatsapp.net": [
+    {
+      "id": "REVUPD2",
+      "jid": "5563@s.whatsapp.net",
+      "fromMe": false,
+      "pushName": null,
+      "ts": 1790855990538,
+      "message": {
+        "protocolMessage": {
+          "type": 0,
+          "key": {
+            "remoteJid": "5563@s.whatsapp.net",
+            "id": "REVUPD2",
+            "fromMe": false
+          }
+        }
+      }
+    }
+  ],
+  "grupo-dl@g.us": [
+    {
+      "id": "MSGqtwb257egug",
+      "jid": "grupo-dl@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": ".tiktok https://vm.tiktok.com/ZM123456/"
+      }
+    },
+    {
+      "id": "MSG668yacigc0x",
+      "jid": "grupo-dl@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": ".tiktok https://vm.tiktok.com/ZM123456/"
+      }
+    }
+  ],
+  "grupo-fechado@g.us": [
+    {
+      "id": "MSGjr61t9rr4oa",
+      "jid": "grupo-fechado@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "conversation": "https://vm.tiktok.com/ZM999999/"
+      }
+    },
+    {
+      "id": "MSGap1la3hj3xo",
+      "jid": "grupo-fechado@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "conversation": "https://vm.tiktok.com/ZM999999/"
+      }
+    }
+  ],
+  "grupo-vo@g.us": [
+    {
+      "id": "MSGomkejpqkz0t",
+      "jid": "grupo-vo@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855891000,
+      "message": {
+        "extendedTextMessage": {
+          "text": ".s",
+          "contextInfo": {
+            "stanzaId": "VO1",
+            "quotedMessage": {
+              "viewOnceMessageV2": {
+                "message": {
+                  "imageMessage": {
+                    "url": "https://mmg.whatsapp.net/vo.jpg",
+                    "mimetype": "image/jpeg",
+                    "mediaKey": {
+                      "type": "Buffer",
+                      "data": [
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "MSG367blpue6vc",
+      "jid": "grupo-vo@g.us",
+      "fromMe": false,
+      "pushName": "Tester",
+      "ts": 1790855990000,
+      "message": {
+        "extendedTextMessage": {
+          "text": ".s",
+          "contextInfo": {
+            "stanzaId": "VO1",
+            "quotedMessage": {
+              "viewOnceMessageV2": {
+                "message": {
+                  "imageMessage": {
+                    "url": "https://mmg.whatsapp.net/vo.jpg",
+                    "mimetype": "image/jpeg",
+                    "mediaKey": {
+                      "type": "Buffer",
+                      "data": [
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7,
+                        7
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
