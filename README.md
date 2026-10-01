@@ -149,6 +149,9 @@ Crie quantas contas grátis quiser em <https://www.remove.bg/api> (50 créditos/
 ```env
 REMOVE_BG_KEYS=chave_da_conta1,chave_da_conta2,chave_da_conta3
 ```
+> ⚠️ O `.env` fica **na raiz do bot** (a mesma pasta do `package.json`) e é lido na
+> **inicialização**: depois de colar as chaves, reinicie o bot. Confira o que ele
+> enxergou com **`.pools`** no WhatsApp ou **`npm run env`** no terminal.
 Alternativas:
 ```env
 REMOVE_BG_URLS=https://sua-api-própria/removebg   # POST multipart campo "image"
@@ -174,6 +177,8 @@ COBALT_INSTANCES=https://sua-instancia.cobalt,https://outra-instancia
 ```
 
 > 📊 Veja a saúde dos pools no WhatsApp: **`.pools`** (dono) e **`.info`**
+> 🩺 No terminal: **`npm run env`** mostra o caminho do `.env` e quantas chaves de
+> cada tipo o bot encontrou; **`.doctor`** / `npm run doctor` faz o diagnóstico completo.
 
 ---
 
@@ -192,9 +197,10 @@ COBALT_INSTANCES=https://sua-instancia.cobalt,https://outra-instancia
 ## 🧪 Testes
 
 ```bash
-npm test          # 68 testes offline (lógica, roteamento, anti-delete, view once,
-                  # figurinhas WebP/EXIF e todos os extratores de redes sociais)
+npm test          # 81 testes offline (lógica, roteamento, anti-delete, view once,
+                  # figurinhas WebP/EXIF, extratores de redes sociais e carregamento do .env)
 npm run doctor    # diagnóstico do ambiente
+npm run env       # mostra o que o bot leu do .env (chaves, caminhos, contagens)
 ```
 
 ## 🩺 Problemas comuns
@@ -205,7 +211,8 @@ npm run doctor    # diagnóstico do ambiente
 | Código de pareamento não aparece | Confira o número: só dígitos, com DDI (ex. 55…) |
 | Loop de 405 ao conectar | O bot já faz cache da versão do WA Web; se persistir: `WA_VERSION_OVERRIDE=2,3000,REVISAO` |
 | Figurinha não sai | Falta FFmpeg: `pkg install ffmpeg` / `apt install ffmpeg` / `winget install ffmpeg` |
-| `.sfundo` pede configuração | Coloque chaves em `REMOVE_BG_KEYS` no `.env` |
+| `.fundo` / `.sfundo` diz "Nenhum provedor configurado" | Confira se o `.env` está **na raiz do bot** e reinicie. Veja o que o bot enxerga com `.pools` (dono) ou `npm run env` |
+| Coloquei a chave e nada mudou | O `.env` só é lido na **inicialização** — depois de salvar, reinicie (`./bot.sh stop` + `./bot.sh start`) |
 | Download falha em alguma rede | O bot tenta em cascata (extrator da rede → Cobalt → yt-dlp → scraping). Tente de novo ou use `.dl <link>` |
 | Download do Instagram falha | IG bloqueia muitos IPs; o bot tenta incorporação → visão de crawler → Cobalt |
 | Áudio do YouTube não sai | Instale o yt-dlp (`pip install -U yt-dlp`) para destravar o modo turbo |

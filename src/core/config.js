@@ -3,8 +3,13 @@
 // MODO PRIVADO ESTRITO POR PADRÃO: o bot só funciona no privado do dono
 // e ninguém mais tem acesso a menos que o dono autorize explicitamente (.autorizar).
 
+import fs from 'node:fs';
 import { readJson, writeJsonNow, writeJsonDebounced } from './store.js';
-import { envList, envBool } from './env.js';
+import { envList, envBool, loadDotEnv, ENV_FILE } from './env.js';
+
+// Garante o .env carregado ANTES de qualquer leitura de process.env abaixo.
+// (src/core/env.js já carrega no import — isto é reforço extra e idempotente.)
+loadDotEnv();
 
 export const DEFAULT_CONFIG = {
   nomeBot: 'MontxBOT',
@@ -150,22 +155,66 @@ function deepMerge(base, extra) {
 
 export const cfg = new Config();
 
-/** Configurações vindas do ambiente (.env). */
-export const ENV = {
-  ownerNumbers: envList('OWNER_NUMBERS'),
-  pairingNumber: (process.env.PAIRING_NUMBER || '').replace(/\D/g, ''),
-  removeBgKeys: envList('REMOVE_BG_KEYS'),
-  removeBgUrls: envList('REMOVE_BG_URLS'),
-  localRembg: envBool('LOCAL_REMBG', false),
-  geminiKeys: envList('GEMINI_KEYS'),
-  openaiKeys: envList('OPENAI_KEYS'),
-  openaiBase: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-  groqKeys: envList('GROQ_KEYS'),
-  aiBase: process.env.AI_BASE_URL || '',
-  aiKeys: envList('AI_KEYS'),
-  aiModel: process.env.AI_MODEL || '',
-  pollinationsKeys: envList('POLLINATIONS_KEYS'),
-  cobaltInstances: envList('COBALT_INSTANCES'),
-  tiktokApi: envList('TIKTOK_API'),
-  waVersionOverride: process.env.WA_VERSION_OVERRIDE || ''
+/**
+ * Configurações vindas do ambiente (.env).
+ *
+ * ATENÇÃO: isto é um Proxy LAZY de propósito. Cada acesso (ENV.removeBgKeys,
+ * ENV.cobaltInstances…) lê o process.env naquele instante. Antes era um objeto
+ * "congelado" no carregamento do módulo — como os `import` do ESM rodam antes
+ * do corpo do main.js, o ENV saía VAZIO e o .env era ignorado (bug do
+ * "remove.bg sem chaves"). Se você criar um pool dentro de uma função ou quiser
+ * recarregar o .env em runtime, agora funciona.
+ */
+const ENV_SCHEMA = {
+  ownerNumbers: () => envList('OWNER_NUMBERS'),
+  pairingNumber: () => (process.env.PAIRING_NUMBER || '').replace(/\D/g, ''),
+  removeBgKeys: () => envList('REMOVE_BG_KEYS'),
+  removeBgUrls: () => envList('REMOVE_BG_URLS'),
+  localRembg: () => envBool('LOCAL_REMBG', false),
+  geminiKeys: () => envList('GEMINI_KEYS'),
+  openaiKeys: () => envList('OPENAI_KEYS'),
+  openaiBase: () => process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+  groqKeys: () => envList('GROQ_KEYS'),
+  aiBase: () => process.env.AI_BASE_URL || '',
+  aiKeys: () => envList('AI_KEYS'),
+  aiModel: () => process.env.AI_MODEL || '',
+  pollinationsKeys: () => envList('POLLINATIONS_KEYS'),
+  cobaltInstances: () => envList('COBALT_INSTANCES'),
+  cobaltApiKey: () => process.env.COBALT_API_KEY || '',
+  tiktokApi: () => envList('TIKTOK_API'),
+  waVersionOverride: () => process.env.WA_VERSION_OVERRIDE || ''
 };
+
+export const ENV = new Proxy(
+  {},
+  {
+    get(_target, prop) {
+      const getter = ENV_SCHEMA[prop];
+      return getter ? getter() : undefined;
+    },
+    has: (_target, prop) => prop in ENV_SCHEMA,
+    ownKeys: () => Object.keys(ENV_SCHEMA),
+    getOwnPropertyDescriptor: (_target, prop) =>
+      prop in ENV_SCHEMA ? { enumerable: true, configurable: true, value: undefined } : undefined
+  }
+);
+
+/**
+ * Resumo do .env para diagnóstico (usado no boot, no .doctor e no .pools).
+ * Mostra ONDE o bot procurou o arquivo e QUANTAS chaves de cada tipo achou —
+ * é isso que denuncia ".env no lugar errado" ou "variável com nome errado".
+ */
+export function envSummary() {
+  return {
+    file: ENV_FILE,
+    loaded: fs.existsSync(ENV_FILE),
+    removeBgKeys: ENV.removeBgKeys.length,
+    removeBgUrls: ENV.removeBgUrls.length,
+    localRembg: ENV.localRembg,
+    geminiKeys: ENV.geminiKeys.length,
+    openaiKeys: ENV.openaiKeys.length,
+    groqKeys: ENV.groqKeys.length,
+    pollinationsKeys: ENV.pollinationsKeys.length,
+    cobaltInstances: ENV.cobaltInstances.length
+  };
+}

@@ -13,7 +13,8 @@ import { platformBanner, isTermux } from './core/platform.js';
 import { startClient, stopClient } from './wa/client.js';
 import { handleMessage } from './features/router.js';
 import { hasFfmpeg } from './util/ffmpeg.js';
-import { bgStatus } from './features/bgremoval.js';
+import { bgStatus, warnIfBgUnconfigured } from './features/bgremoval.js';
+import { envSummary } from './core/config.js';
 import { isGroup } from './util/text.js';
 
 ensureDirs();
@@ -25,8 +26,13 @@ banner([
   isTermux() ? '▸ Termux: pareamento por código (sem QR)' : '▸ Desktop: QR Code habilitado',
   '▸ Modo privado: exclusivo do dono (.ativar libera um chat)',
   `▸ Remoção de fundo: ${bgStatus()[0]}`,
+  `▸ Config .env: ${envSummary().loaded ? envSummary().file : `não encontrado em ${envSummary().file}`}`,
   hasFfmpeg() ? '▸ FFmpeg: ok' : '⚠ FFmpeg ausente (figurinhas não funcionarão)'
 ]);
+
+// Avisa JÁ no boot (em vez de só quando alguém usar .fundo) se o .env não trouxe
+// chave nenhuma de remoção de fundo — foi exatamente o sintoma do bug do ENV vazio.
+warnIfBgUnconfigured();
 
 if (!hasFfmpeg()) {
   log.warn('Instale o FFmpeg para figurinhas: pkg install ffmpeg (Termux) · apt install ffmpeg (Linux) · winget install ffmpeg (Windows)');
