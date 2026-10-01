@@ -9,7 +9,13 @@ import assert from 'node:assert/strict';
 
 import { parseYouTubeId, downloadYouTube } from '../src/features/downloaders/youtube.js';
 import { downloadTikTok, tiktokVideoId } from '../src/features/downloaders/tiktok.js';
-import { downloadPinterest, extractPinId } from '../src/features/downloaders/pinterest.js';
+import {
+  canonicalPinUrl,
+  downloadPinterest,
+  extractPinId,
+  findPinInState,
+  imageRenditions
+} from '../src/features/downloaders/pinterest.js';
 import {
   downloadInstagram,
   instagramShortcode,
@@ -370,6 +376,174 @@ test('Pinterest: widget API devolve o vídeo na maior rendição', async () => {
     assert.equal(r.author, 'ana');
     assert.equal(r.title, 'Ideia legal');
   });
+});
+
+test('Pinterest: link curto (pin.it) resolve o id e consulta o widget pelo id NUMÉRICO', async () => {
+  // Caso real: `.s https://pin.it/1Obiyee9V` → /pin/429530883237169819/sent/…
+  const hash = 'e681f482b3f43f1e4bf0b921d7759f4e';
+  const pin = {
+    data: [
+      {
+        id: '429530883237169819',
+        grid_title: 'Flamengo memes',
+        pinner: { username: 'dessalobato' },
+        images: {
+          '236x': { url: `https://i.pinimg.com/236x/e6/81/f4/${hash}.jpg`, width: 236, height: 236 },
+          '564x': { url: `https://i.pinimg.com/564x/e6/81/f4/${hash}.jpg`, width: 514, height: 514 }
+        }
+      }
+    ]
+  };
+  const sentUrl =
+    'https://www.pinterest.com/pin/429530883237169819/sent/?invite_code=abc&sender=1&sfo=1';
+  const consulted = [];
+  await mockFetch(
+    [
+      [
+        'pin.it/1Obiyee9V',
+        () => ({ ...htmlResponse('<html><body>preview</body></html>'), url: sentUrl })
+      ],
+      [
+        'widgets.pinterest.com',
+        (u) => {
+          consulted.push(u);
+          // Só o id numérico tem dados: com o slug, a API devolve vazio.
+          return jsonResponse(u.includes('429530883237169819') ? pin : { status: 'success', data: [] });
+        }
+      ],
+      [/i\.pinimg\.com/, () => bufferResponse(Buffer.from('IMG'))]
+    ],
+    async () => {
+      const r = await downloadPinterest('https://pin.it/1Obiyee9V', 'melhor');
+      assert.equal(consulted.length, 1);
+      assert.match(consulted[0], /pin_ids=429530883237169819/);
+      assert.match(consulted[0], /pin_ids=\d{5,}/, 'nunca consulta a API com o slug do link curto');
+      // A maior rendição vira a versão original (mesmo hash do pin).
+      assert.equal(r.kind, 'image');
+      assert.equal(r.media[0].url, `https://i.pinimg.com/originals/e6/81/f4/${hash}.jpg`);
+      assert.equal(r.media[0].trusted, true);
+      assert.ok(
+        r.alternates.some((a) => a.url === `https://i.pinimg.com/564x/e6/81/f4/${hash}.jpg`),
+        'guarda as rendições menores como alternativa'
+      );
+    }
+  );
+});
+
+test('canonicalPinUrl: link compartilhado vira a página do pin e host curto cai no pinterest.com', () => {
+  assert.equal(
+    canonicalPinUrl(
+      'https://www.pinterest.com/pin/429530883237169819/sent/?invite_code=abc&sender=1&sfo=1',
+      '429530883237169819'
+    ),
+    'https://www.pinterest.com/pin/429530883237169819/'
+  );
+  assert.equal(canonicalPinUrl('https://br.pinterest.com/pin/123/qualquer', '123'), 'https://br.pinterest.com/pin/123/');
+  assert.equal(canonicalPinUrl('https://pin.it/abc', '123'), 'https://www.pinterest.com/pin/123/');
+});
+
+test('Pinterest: código curto só de dígitos é resolvido, não confundido com id', async () => {
+  const hash = 'e681f482b3f43f1e4bf0b921d7759f4e';
+  const consultas = [];
+  await mockFetch(
+    [
+      [
+        'pin.it/1234567890',
+        () => ({
+          ...htmlResponse('<html><body>preview</body></html>'),
+          url: 'https://www.pinterest.com/pin/429530883237169819/'
+        })
+      ],
+      [
+        'widgets.pinterest.com',
+        (u) => {
+          consultas.push(u);
+          return jsonResponse({
+            data: [
+              {
+                id: '429530883237169819',
+                grid_title: 'Flamengo memes',
+                pinner: { username: 'dessalobato' },
+                images: { '564x': { url: `https://i.pinimg.com/564x/e6/81/f4/${hash}.jpg`, width: 514, height: 514 } }
+              }
+            ]
+          });
+        }
+      ],
+      [/i\.pinimg\.com/, () => bufferResponse(Buffer.from('IMG'), { contentType: 'image/jpeg' })]
+    ],
+    async () => {
+      const r = await downloadPinterest('https://pin.it/1234567890', 'melhor');
+      assert.match(consultas[0], /pin_ids=429530883237169819/);
+      assert.doesNotMatch(consultas[0], /pin_ids=1234567890/);
+      assert.equal(r.media[0].url, `https://i.pinimg.com/originals/e6/81/f4/${hash}.jpg`);
+    }
+  );
+});
+
+test('Pinterest: página sem o pin (link compartilhado /sent/) não entrega mídia', async () => {
+  const outro = 'https://i.pinimg.com/564x/aa/bb/cc/aabbccddeeff00112233445566778899.jpg';
+  const marca = 'https://i.pinimg.com/originals/d5/3b/01/d53b014d86a6b6761bf649a0ed813cff.jpg';
+  const sentHtml = `<html><head>
+    <meta property="og:title" content="Pinterest">
+    <meta property="og:image" content="${marca}">
+    <script id="__PWS_DATA__" type="application/json">${JSON.stringify({
+      props: {
+        initialReduxState: {
+          pins: {
+            111: { id: '111', images: { '564x': { url: outro, width: 564, height: 564 } } }
+          }
+        }
+      }
+    })}</script></head><body>sugestões de busca</body></html>`;
+  await mockFetch(
+    [
+      ['widgets.pinterest.com', () => jsonResponse({ status: 'success', code: 0, data: [] })],
+      [/pinterest\.com\/pin\/429530883237169819/, () => htmlResponse(sentHtml)],
+      ['pin.it/', () => htmlResponse(sentHtml)],
+      [/./, () => jsonResponse({ status: 'error', error: { code: 'error.api.link.invalid' } }, { status: 400 })]
+    ],
+    async () => {
+      const erro = await downloadPinterest('https://pin.it/1Obiyee9V', 'melhor').then(
+        () => null,
+        (e) => e
+      );
+      assert.ok(erro, 'deve falhar em vez de devolver asset de marca/pin de outro assunto');
+      assert.doesNotMatch(String(erro.message), /d53b014d|aabbccdd/);
+    }
+  );
+});
+
+test('findPinInState: só aceita o pin dono do id pedido', () => {
+  const html = `<script id="__PWS_DATA__" type="application/json">${JSON.stringify({
+    props: {
+      initialReduxState: {
+        pins: {
+          111: { id: '111', images: { '564x': { url: 'https://i.pinimg.com/564x/aa/bb/cc/aabbccddeeff00112233445566778899.jpg' } } },
+          429530883237169819: { id: '429530883237169819', images: { orig: { url: 'https://i.pinimg.com/originals/e6/81/f4/e681f482b3f43f1e4bf0b921d7759f4e.jpg' } } }
+        }
+      }
+    }
+  })}</script>`;
+  assert.equal(findPinInState(html, '999'), null, 'pin de outro id nunca é aceito');
+  assert.equal(findPinInState(html, null), null, 'sem id pedido não escolhe "o primeiro pin da página"');
+  assert.equal(findPinInState(html, '429530883237169819').id, '429530883237169819');
+});
+
+test('imageRenditions: original na frente, rendições exatas depois, sem duplicar hash', () => {
+  const hash = 'e681f482b3f43f1e4bf0b921d7759f4e';
+  const list = imageRenditions({
+    images: {
+      '236x': { url: `https://i.pinimg.com/236x/e6/81/f4/${hash}.jpg`, width: 236, height: 236 },
+      '564x': { url: `https://i.pinimg.com/564x/e6/81/f4/${hash}.jpg`, width: 514, height: 514 },
+      // Sem hash de conteúdo: é asset de interface, não entra.
+      banner: { url: 'https://i.pinimg.com/upload/123_board_thumbnail_2026.jpg' }
+    }
+  });
+  assert.equal(list[0].url, `https://i.pinimg.com/originals/e6/81/f4/${hash}.jpg`);
+  assert.equal(list[1].url, `https://i.pinimg.com/564x/e6/81/f4/${hash}.jpg`);
+  assert.equal(new Set(list.map((i) => i.hash)).size, 1, 'mesma imagem, um hash só');
+  assert.equal(list.some((i) => i.url.includes('_board_thumbnail_')), false);
 });
 
 test('Pinterest: widget fora do ar → cai no scraping do HTML (og:video)', async () => {

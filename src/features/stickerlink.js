@@ -6,7 +6,10 @@
 // X/Twitter, Facebook, Threads, Reddit, Giphy/Tenor e o que mais o extrator
 // alcançar — sem o usuário precisar baixar nada antes.
 //
-// Três cuidados que fazem a figurinha sair certa de primeira:
+// Quatro cuidados que fazem a figurinha sair certa de primeira:
+//   0) CONTEÚDO CONFERIDO: extrator que devolve asset de marca (o gradiente que
+//      o Pinterest serve na página de login) não passa — a imagem é medida
+//      antes de virar figurinha (ver `inspectCandidate`).
 //   1) LINK DIRETO DE MÍDIA (termina em .jpg/.png/.gif/.webp/.mp4…) pula toda a
 //      cascata de extratores: baixa o arquivo e pronto. É o caso de boa parte
 //      dos links de Pinterest/Giphy/Tenor copiados no celular.
@@ -18,7 +21,8 @@
 import { fetchBuffer, formatBytes, mediaReferer, shortUrl } from '../core/http.js';
 import { wait } from '../core/ui.js';
 import { log } from '../core/logger.js';
-import { detectMediaExt } from '../util/ffmpeg.js';
+import { analyzeImageDetail, detectMediaExt } from '../util/ffmpeg.js';
+import { isUsableImageSize, sniffImage } from '../util/imageinfo.js';
 import { isWebp, isAnimatedWebp } from '../util/webp.js';
 import { extractUrls } from '../util/text.js';
 import { extractAnyText } from './antidelete.js';
@@ -138,18 +142,161 @@ export function quotedStickerText(msg) {
 }
 
 /**
- * Qual mídia do resultado vira figurinha.
+ * Ordem em que os candidatos do extrator são considerados.
  * Carrossel/slideshow: prefere a primeira FOTO (um story de 1 s como figurinha
- * quase sempre decepciona); nos demais, a mídia principal.
+ * quase sempre decepciona); nos demais, a mídia principal e depois as rendições
+ * alternativas (mesma imagem em outro tamanho).
  */
-function pickMediaIndex(result) {
+function candidateList(result) {
   const media = result.media || [];
-  if (!media.length) return 0;
+  const buffers = result.buffers || [];
+  const order = media.map((_, i) => i);
   if (result.kind === 'carrossel' || result.kind === 'slideshow') {
-    const i = media.findIndex((m) => m?.type === 'image' || m?.type === 'gif');
-    if (i >= 0) return i;
+    order.sort((a, b) => {
+      const photo = (i) => (media[i]?.type === 'image' || media[i]?.type === 'gif' ? 0 : 1);
+      return photo(a) - photo(b) || a - b;
+    });
   }
-  return 0;
+  const out = order.map((i) => ({
+    item: media[i] || {},
+    buffer: buffers[i] || null,
+    url: media[i]?.url || '',
+    // Mídia que o extrator marcou como NÃO confiável (og:image de página que
+    // pode não ser o post, scrape genérico) precisa passar na validação de
+    // conteúdo antes de virar figurinha.
+    trusted: media[i]?.trusted !== false
+  }));
+  for (const alt of result.alternates || []) {
+    if (!alt?.url) continue;
+    out.push({ item: alt, buffer: null, url: alt.url, trusted: alt.trusted !== false });
+  }
+  if (!out.some((c) => c.buffer?.length || c.url) && buffers[0]?.length) {
+    out.push({ item: { type: result.kind }, buffer: buffers[0], url: '', trusted: true });
+  }
+  return out;
+}
+
+/**
+ * O buffer é mesmo a mídia do post?
+ *
+ * Confiança declarada pelo extrator passa direto (ele consultou o post pelo id);
+ * o que veio de página/scrape precisa de prova: ser imagem de verdade, ter
+ * tamanho de imagem e CONTEÚDO de imagem — gradiente/chapado é o asset de
+ * "rascunho" que as redes servem quando escondem o post do bot (foi assim que
+ * uma figurinha colorida sem sentido saiu no lugar do pin do Flamengo).
+ */
+async function inspectCandidate(candidate) {
+  const { buffer, item } = candidate;
+  const kind = detectSourceKind(buffer, item?.type || '');
+  // Áudio tem erro próprio (o link é só som, não é asset errado).
+  if (kind === 'audio') return { ok: true, kind, reason: '' };
+
+  if (kind === 'image') {
+    const info = sniffImage(buffer);
+    if (!info) {
+      return { ok: false, kind, info: null, reason: 'não é uma imagem (o servidor devolveu outra coisa)' };
+    }
+    if (candidate.trusted) return { ok: true, kind, info, reason: '' };
+
+    if (!isUsableImageSize(info, { min: 64 })) {
+      return {
+        ok: false,
+        kind,
+        info,
+        reason: `imagem pequena demais (${info.width}x${info.height}) para ser o post`
+      };
+    }
+    const grade = await analyzeImageDetail(buffer).catch(() => null);
+    if (!grade) {
+      // Sem FFmpeg não há como olhar o conteúdo — e sem ele o motor de figurinha
+      // não roda de qualquer forma. Melhor recusar do que mandar asset de marca.
+      return {
+        ok: false,
+        kind,
+        info,
+        reason: 'não consegui confirmar que a imagem é do post (FFmpeg indisponível — veja `.doctor`)'
+      };
+    }
+    if (grade.smooth || grade.solid) {
+      return {
+        ok: false,
+        kind,
+        info,
+        grade,
+        reason: grade.solid
+          ? 'imagem de uma cor só (placeholder da rede social, não o post)'
+          : 'imagem lisa/gradiente (asset de marca da rede social, não o post)'
+      };
+    }
+    return { ok: true, kind, info, grade, reason: '' };
+  }
+
+  // Vídeo/GIF que o extrator NÃO garantiu ser do post: confere o 1º quadro
+  // (o FFmpeg decodifica igual) para não entregar vídeo de anúncio/banner.
+  if (!candidate.trusted) {
+    const grade = await analyzeImageDetail(buffer).catch(() => null);
+    if (grade?.smooth || grade?.solid) {
+      return {
+        ok: false,
+        kind,
+        grade,
+        reason: 'vídeo sem conteúdo de post (primeiro quadro é liso/chapado — asset de marca)'
+      };
+    }
+  }
+  return { ok: true, kind, reason: '' };
+}
+
+/**
+ * Escolhe o melhor candidato válido: usa o buffer já baixado pelo downloader ou
+ * baixa o da rendição alternativa. Candidato reprovado não derruba o processo —
+ * vai para a lista de recusas, que explica o erro quando nada sobra.
+ */
+async function pickStickerCandidate(result, { onProgress, maxBytes = MAX_STICKER_BYTES } = {}) {
+  const candidates = candidateList(result);
+  const rejections = [];
+  for (const candidate of candidates) {
+    let buffer = candidate.buffer;
+    if (!buffer?.length) {
+      if (!candidate.url) continue;
+      try {
+        const referer = mediaReferer(candidate.url);
+        buffer = await fetchBuffer(candidate.url, {
+          timeoutMs: 120_000,
+          maxBytes,
+          headers: referer ? { Referer: referer, referer } : {}
+        });
+      } catch (error) {
+        rejections.push({ url: candidate.url, reason: String(error.message || error).slice(0, 90) });
+        continue;
+      }
+    }
+    if (looksLikeHtml(buffer)) {
+      rejections.push({ url: candidate.url || '(buffer)', reason: 'o servidor devolveu uma página em vez da mídia' });
+      continue;
+    }
+    const verdict = await inspectCandidate({ ...candidate, buffer });
+    if (verdict.ok) return { ...verdict, buffer, candidate };
+    log.warn(`figurinha: candidato recusado (${shortUrl(candidate.url || 'buffer')}): ${verdict.reason}`);
+    rejections.push({ url: candidate.url || '(buffer)', reason: verdict.reason });
+  }
+  return { ok: false, rejections };
+}
+
+/** Erro final explicado: o que foi recusado e o que fazer. */
+function noUsableMediaError(url, rejections = []) {
+  const first = rejections[0];
+  const detail = first ? `${shortUrl(first.url)}: ${first.reason}` : 'nenhum candidato utilizável';
+  const pinterest = /pinterest|pin\.it/i.test(String(url));
+  const err = new Error(
+    `não encontrei a mídia real desse link — ${detail}. ` +
+      (pinterest
+        ? 'O Pinterest costuma devolver só a página de login (com um gradiente da própria Pinterest) ' +
+          'quando esconde o pin; tente de novo em alguns segundos.'
+        : 'Tente de novo ou baixe antes com `.dl <link>` para ver o que o link devolve.')
+  );
+  err.rejections = rejections;
+  return err;
 }
 
 /**
@@ -196,18 +343,19 @@ export async function downloadStickerSource(url, { onProgress, maxBytes = MAX_ST
   const result = await resolveDownload(url, 'melhor', { onProgress, maxBytes }).catch((error) => {
     throw rewordDownloadError(error, maxBytes);
   });
-  const index = pickMediaIndex(result);
-  const buffer = result.buffers?.[index] || result.buffers?.[0];
-  if (!buffer?.length) throw new Error('o link não devolveu mídia para a figurinha');
 
-  const declared = result.media?.[index]?.type || result.kind;
-  const info = stickerSourceFromBuffer(buffer, declared === 'carrossel' || declared === 'slideshow' ? 'image' : declared);
+  const picked = await pickStickerCandidate(result, { onProgress, maxBytes });
+  if (!picked.ok) throw noUsableMediaError(url, picked.rejections);
+
+  const buffer = picked.buffer;
+  const info = stickerSourceFromBuffer(buffer, picked.kind);
   if (info.kind === 'audio') {
     throw new Error('esse link é só áudio — não dá para virar figurinha. Para baixar o áudio use `.dl <link>`.');
   }
 
   const platform = result.platform || hostOf(url);
-  log.dl(`figurinha de link: ${shortUrl(url)} → ${platform} (${formatBytes(buffer.length)}, ${info.kind})`);
+  const check = picked.grade ? ` · conferido (${picked.grade.verdict})` : '';
+  log.dl(`figurinha de link: ${shortUrl(url)} → ${platform} (${formatBytes(buffer.length)}, ${info.kind}${check})`);
   return {
     ...info,
     platform,
@@ -263,7 +411,7 @@ export async function stickerSourcesForCommand({
       sources.push({ ...source, link: targets[i] });
     } catch (error) {
       log.warn(`figurinha do link ${shortUrl(targets[i])} falhou: ${error.message}`);
-      failures.push(`${shortUrl(targets[i])}: ${String(error.message || error).slice(0, 120)}`);
+      failures.push(`${shortUrl(targets[i])}: ${String(error.message || error).slice(0, 200)}`);
     }
   }
 

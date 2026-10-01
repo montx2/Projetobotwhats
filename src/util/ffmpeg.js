@@ -7,6 +7,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { isWebp, isAnimatedWebp } from './webp.js';
+import { gradeImageSamples } from './imageinfo.js';
 
 let ffmpegPath = null;
 
@@ -59,6 +60,37 @@ function runFfmpeg(args, { timeoutMs = 120_000 } = {}) {
     proc.on('close', (code) => {
       clearTimeout(timer);
       if (code === 0) resolve();
+      else reject(new Error(`ffmpeg saiu com código ${code}: ${stderr.slice(-300)}`));
+    });
+  });
+}
+
+/** Igual ao runFfmpeg, mas devolve o stdout (usado para ler frames crus). */
+function runFfmpegCapture(args, { timeoutMs = 60_000, maxBytes = 8 * 1024 * 1024 } = {}) {
+  return new Promise((resolve, reject) => {
+    const bin = findFfmpeg();
+    if (!bin) return reject(new Error('FFmpeg não encontrado'));
+    const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const chunks = [];
+    let total = 0;
+    let stderr = '';
+    const timer = setTimeout(() => proc.kill('SIGKILL'), timeoutMs);
+    proc.stdout.on('data', (d) => {
+      total += d.length;
+      if (total <= maxBytes) chunks.push(d);
+      else proc.kill('SIGKILL');
+    });
+    proc.stderr.on('data', (d) => {
+      stderr += d.toString();
+      if (stderr.length > 8000) stderr = stderr.slice(-8000);
+    });
+    proc.on('error', (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(Buffer.concat(chunks));
       else reject(new Error(`ffmpeg saiu com código ${code}: ${stderr.slice(-300)}`));
     });
   });
@@ -201,6 +233,47 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = 8, e
   } finally {
     fs.rmSync(inFile, { force: true });
     fs.rmSync(outFile, { force: true });
+  }
+}
+
+/**
+ * Olha o CONTEÚDO da imagem (não o rótulo do extrator) para separar foto de
+ * asset sintético. Decodifica para uma amostra 32×32 crua pelo FFmpeg — o único
+ * jeito de saber se aquele JPEG é o post ou um gradiente de "rascunho" da rede.
+ *
+ * @param {Buffer} input arquivo de imagem
+ * @returns {Promise<object|null>} estatísticas de gradeImageSamples, ou null
+ *   quando não dá para julgar (sem FFmpeg, imagem quebrada…).
+ */
+export async function analyzeImageDetail(input, { size = 32, ext = '.jpg' } = {}) {
+  if (!hasFfmpeg()) return null;
+  const realExt = detectMediaExt(input, ext);
+  const inFile = tmpFile(realExt);
+  fs.writeFileSync(inFile, input);
+  try {
+    const raw = await runFfmpegCapture(
+      [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-i',
+        inFile,
+        '-vf',
+        `scale=${size}:${size}:flags=area,format=rgb24`,
+        '-frames:v',
+        '1',
+        '-f',
+        'rawvideo',
+        '-'
+      ],
+      { timeoutMs: 30_000 }
+    );
+    if (raw.length < size * size * 3) return null;
+    return gradeImageSamples(raw, { width: size, height: size });
+  } catch {
+    return null;
+  } finally {
+    fs.rmSync(inFile, { force: true });
   }
 }
 
