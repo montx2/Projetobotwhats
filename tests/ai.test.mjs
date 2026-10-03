@@ -24,6 +24,11 @@ test('memória da IA é isolada por remetente e pode ser apagada por chat', asyn
   const aliceElsewhere = 'outro-grupo@g.us:alice@s.whatsapp.net';
 
   await aiChat(alice, 'segredo da Alice');
+  const systemPrompt = requests[0].messages.find((message) => message.role === 'system')?.content || '';
+  assert.match(systemPrompt, /RESENHA TOTAL/);
+  assert.match(systemPrompt, /duplo sentido/i);
+  assert.match(systemPrompt, /Lá ele/i);
+  assert.match(systemPrompt, /foda pra caralho/i);
   await aiChat(bob, 'pergunta do Bob');
   await aiChat(aliceElsewhere, 'pergunta em outro grupo');
   await aiChat(alice, 'continuação da Alice');
