@@ -9,15 +9,19 @@ import {
   chooseTicTacToeBotMove,
   clearChatGames,
   createMinesweeperGame,
+  createRussianRouletteDuel,
+  createRussianRouletteGame,
   evaluateWordGuess,
   getChatScoreboard,
   handleGameCommand,
   isGameCommand,
   isValidTermoWord,
   normalizeGameGuess,
+  pullRussianRoulette,
   renderDiceFace,
   renderHangmanBoard,
   renderMinesweeperBoard,
+  renderRevolver,
   renderNumberHistory,
   renderTermoBoard,
   renderTicTacToeBoard,
@@ -622,6 +626,146 @@ test('dados, moeda e roleta entregam respostas válidas', async () => {
   await handleGameCommand({ sock: {}, msg: makeMessage(jid, alice), name: 'roleta', args: ['pizza', '|', 'sushi', '|', 'massa'], reply: arcade.reply });
   assert.match(String(arcade.sent.at(-1)), /pizza|sushi|massa/i);
   clearChatGames(jid);
+});
+
+test('Roleta russa desenha o tambor em emoji e a bala nunca muda de câmara sem girar', () => {
+  const game = createRussianRouletteGame({ id: 'russa-unit@test', name: 'Russa' }, { bullets: 1, rng: () => 0 });
+  assertEmojiGrid(renderRevolver(game), { rows: 1, cells: 6 });
+  assert.equal(renderRevolver(game)[0], '🎯 ⬜ ⬜ ⬜ ⬜ ⬜');
+  assert.equal(game.drum.filter(Boolean).length, 1, 'uma bala por partida padrão');
+  assert.equal(game.drum[5], true, 'o sorteio com rng fixo é determinístico');
+
+  for (let pull = 1; pull <= 5; pull += 1) {
+    assert.equal(pullRussianRoulette(game).status, 'empty', `a ${pull}ª puxada é vazia`);
+    assert.equal(game.cursor, pull, 'o tambor não gira: a próxima câmara é sempre a seguinte');
+  }
+  assert.equal(renderRevolver(game)[0], '⚫ ⚫ ⚫ ⚫ ⚫ 🎯');
+  assert.equal(pullRussianRoulette(game).status, 'bang');
+  assert.equal(game.hit, 5);
+  assert.equal(renderRevolver(game)[0], '⚫ ⚫ ⚫ ⚫ ⚫ 💥', 'no fim do jogo as balas aparecem no tambor');
+  assert.equal(pullRussianRoulette(game).status, 'over', 'jogo encerrado não aceita outra puxada');
+
+  const duel = createRussianRouletteDuel([{ id: 'a@test', name: 'A' }, { id: 'b@test', name: 'B' }], { bullets: 2, rng: () => 0 });
+  assertEmojiGrid(renderRevolver(duel), { rows: 1, cells: 6 });
+  assert.equal(duel.drum.filter(Boolean).length, 2);
+  assert.equal(duel.players.length, 2);
+});
+
+test('roleta russa solo aceita parar (vitória com bônus) e puxar até encontrar a bala (derrota)', async () => {
+  const jid = 'russa-solo-test@s.whatsapp.net';
+  const player = '551100000093@s.whatsapp.net';
+  const replies = createReplyCollector();
+  const realRandom = Math.random;
+  const msg = () => makeMessage(jid, player, { pushName: 'Duda' });
+  const play = async (args, name = 'russa') => {
+    await handleGameCommand({ sock: {}, msg: msg(), name, args, reply: replies.reply });
+    return String(replies.sent.at(-1));
+  };
+  try {
+    Math.random = () => 0; // tambor fixo: a bala fica na última câmara
+    const start = await play([], 'roletarussa');
+    assert.match(start, /Roleta russa/);
+    assert.match(start, /🎯 ⬜ ⬜ ⬜ ⬜ ⬜/);
+    assert.match(start, /risco agora: \*17%\*/, '1 bala em 6 câmaras é 17% de risco');
+
+    const afterPull = await play(['puxar']);
+    assert.match(afterPull, /Clique seco na câmara 1/);
+    assert.match(afterPull, /⚫ 🎯 ⬜ ⬜ ⬜ ⬜/);
+    assert.match(afterPull, /Parar agora garante \*3 pontos\*/);
+
+    const win = await play(['parar'], 'rr');
+    assert.match(win, /vitória · 1 puxada/);
+    assert.match(win, /A bala estava na câmara 6/);
+    assert.match(win, /\+3 pontos/);
+    assert.equal(getChatScoreboard(jid)[0].wins, 1);
+
+    const risk = await play(['balas', '3'], 'roletarussa');
+    assert.match(risk, /3 bala\(s\) em 6 câmaras/);
+    assert.match(risk, /Puxadas: \*0\/3\*/);
+    assert.match(risk, /risco agora: \*50%\*/, '3 balas em 6 câmaras é 50% de risco');
+    assert.match(await play([], 'encerrar'), /Partida encerrada/, 'a partida de roleta russa aceita .encerrar');
+
+    await play([], 'roletarussa');
+    for (let pull = 1; pull <= 4; pull += 1) {
+      assert.match(await play(['puxar']), /Clique seco/, `a ${pull}ª puxada é vazia`);
+    }
+    const ladder = await play(['puxar']);
+    assert.match(ladder, /Puxadas: \*5\/5\*/, 'a última câmara segura é alcançável');
+    assert.match(ladder, /Parar agora garante \*8 pontos\*/, 'o bônus máximo vale 8 pontos');
+    const loss = await play(['puxar']);
+    assert.match(loss, /fim de jogo/);
+    assert.match(loss, /💥 A câmara 6 tinha a bala/);
+    assert.match(loss, /Puxadas sobrevividas: \*5\*/);
+    const score = getChatScoreboard(jid)[0];
+    assert.deepEqual({ wins: score.wins, losses: score.losses, points: score.points }, { wins: 1, losses: 1, points: 3 });
+
+    assert.match(await play(['balas', '9'], 'roletarussa'), /Como usar/, 'fora de 1–5 balas só devolve o modo de usar');
+    assert.match(await play([], 'rr'), /Roleta russa/, 'o jogo continua limpo depois do comando inválido');
+    clearChatGames(jid);
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+test('duelo de roleta russa só começa após o aceite e alterna as puxadas até alguém encontrar a bala', async () => {
+  const jid = 'russa-duel-test@g.us';
+  const turnJid = 'russa-duel-turn@g.us';
+  const alice = '551100000094@s.whatsapp.net';
+  const bob = '551100000095@s.whatsapp.net';
+  const outsider = '551100000096@s.whatsapp.net';
+  const replies = createReplyCollector();
+  const lastText = () => String(replies.sent.at(-1)?.text ?? replies.sent.at(-1));
+  const pull = (jid, who, text = 'puxar') => tryHandleDirectGameMove({}, makeMessage(jid, who, { text }), text, { reply: replies.reply, authorized: true });
+  const mention = (jid, who, who2, pushName = 'Alice') => GROUP_MENTION(jid, who, who2, `.roletarussa @${who2.split('@')[0]}`, { pushName });
+  const realRandom = Math.random;
+  try {
+    // 0.9 em todo o sorteio não embaralha nada: a bala fica na primeira câmara.
+    Math.random = () => 0.9;
+    await handleGameCommand({ sock: {}, msg: mention(jid, alice, bob), name: 'roletarussa', args: [`@${bob.split('@')[0]}`], reply: replies.reply });
+    assert.match(lastText(), /Desafio de \*Alice\* para/);
+    assert.deepEqual(replies.sent.at(-1).mentions, [bob]);
+
+    assert.equal(await pull(jid, outsider), false);
+    assert.match(lastText(), /Desafio de \*Alice\* para/, 'quem não está no duelo não move o gatilho');
+    assert.equal(await pull(jid, alice), true);
+    assert.match(lastText(), /Aguarde o aceite do desafio/, 'ninguém puxa antes do aceite');
+
+    await handleGameCommand({ sock: {}, msg: makeMessage(jid, bob, { pushName: 'Bob' }), name: 'russa', args: ['aceitar'], reply: replies.reply });
+    assert.match(lastText(), /aceitou o desafio/);
+
+    assert.equal(await pull(jid, bob), true);
+    assert.match(lastText(), /Não é a sua vez/, 'a vez é de quem desafiou');
+    assert.equal(await pull(jid, alice), true);
+    const end = lastText();
+    assert.match(end, /fim do duelo/);
+    assert.match(end, /💥 A câmara 1 tinha a bala/);
+    assert.match(end, /Vitória de \*Bob\*/);
+
+    const score = getChatScoreboard(jid);
+    assert.equal(score.find((row) => row.name === 'Bob')?.wins, 1);
+    assert.equal(score.find((row) => row.name === 'Alice')?.losses, 1);
+
+    // 0 em todo o sorteio joga a bala para a última câmara: dá para ver a vez trocando.
+    Math.random = () => 0;
+    await handleGameCommand({ sock: {}, msg: mention(turnJid, alice, bob), name: 'rr', args: [`@${bob.split('@')[0]}`], reply: replies.reply });
+    await handleGameCommand({ sock: {}, msg: makeMessage(turnJid, bob, { pushName: 'Bob' }), name: 'russa', args: ['aceitar'], reply: replies.reply });
+
+    await pull(turnJid, alice);
+    assert.match(lastText(), /Clique seco na câmara 1/);
+    assert.match(lastText(), /⚫ 🎯 ⬜ ⬜ ⬜ ⬜/);
+    assert.deepEqual(replies.sent.at(-1).mentions, [bob], 'quem continua vivo chama o próximo');
+    await pull(turnJid, bob);
+    assert.match(lastText(), /Clique seco na câmara 2/);
+    assert.match(lastText(), /Vez de \*Alice\*/);
+
+    await handleGameCommand({ sock: {}, msg: makeMessage(turnJid, alice, { pushName: 'Alice' }), name: 'russa', args: ['parar'], reply: replies.reply });
+    assert.match(lastText(), /No duelo não dá para parar/, 'parar não existe no duelo');
+
+    clearChatGames(jid);
+    clearChatGames(turnJid);
+  } finally {
+    Math.random = realRandom;
+  }
 });
 
 test('os comandos de Termo, Forca e Campo minado mostram tabuleiros validados e aceitam dicas/bandeiras', async () => {

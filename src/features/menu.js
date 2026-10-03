@@ -44,6 +44,7 @@ const GAME_ITEMS = [
   ['.minado', 'campo minado 5×5 · coordenadas A1–E5 · flag A1'],
   ['.anagrama / .quiz', 'palavras embaralhadas e perguntas rápidas'],
   ['.adivinhe / .ppt', 'número secreto ou Jokenpô'],
+  ['.roletarussa [balas 1-5]', 'roleta russa solo · puxar ou parar · @oponente para duelar'],
   ['.dado [NdM] / .moeda / .roleta', 'rolagens rápidas'],
   ['.placar', 'ranking deste chat · .placar reset (admin/dono)'],
   ['.encerrar', 'finaliza a partida ativa neste chat']

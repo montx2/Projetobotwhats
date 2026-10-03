@@ -162,6 +162,8 @@ Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.
 .adivinhe / .numero               → encontre o número de 1 a 100
 .ppt pedra|papel|tesoura          → Jokenpô contra o bot, na hora (conta sequência de vitórias 🔥)
 .ppt @oponente [1|3|5]            → Jokenpô PvP SECRETO, melhor de 3 por padrão; aceite com .ppt aceitar
+.roletarussa [balas 1-5]          → roleta russa solo: puxe o gatilho ou pare para garantir os pontos
+.roletarussa @oponente            → duelo de roleta russa; aceite com .roletarussa aceitar
 .dado / .dado 3d20                → D6 em emoji ou rolagem de vários dados
 .moeda / .caraoucoroa             → cara ou coroa
 .roleta pizza | sushi | massa     → escolhe entre opções separadas por |
@@ -169,9 +171,11 @@ Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.
 .placar reset                     → zera o ranking (admin do grupo ou dono)
 ```
 
+**Roleta russa.** `.roletarussa` carrega o tambor com 1 bala em 6 câmaras (`.roletarussa 3 balas` aumenta o risco, até 5). A cada mensagem o jogador escolhe entre **puxar o gatilho** (`.roletarussa puxar`, ou só `puxar` sem prefixo) e **parar** (`.roletarussa parar`): quem para sai vivo e leva a vitória, com bônus que cresce a cada clique seco sobrevivido — 1 puxada vale 3 pontos, 3 puxadas 5 pontos, e chegar até a última câmara segura rende a insígnia de *Lenda do tambor*. A bala não muda de lugar sozinha: cada câmara vazia deixa a próxima mais perigosa, e o cartão sempre mostra o risco da próxima puxada. No duelo (`.roletarussa @oponente`), os dois alternam as puxadas apontando para a própria cabeça, cada um com 3 das 6 câmaras, e quem encontra a bala perde — o desafiado aceita com `.roletarussa aceitar` ou recusa com `.roletarussa recusar`. O tambor é desenhado em emoji (🎯 câmara da vez · ⬜ coberta · ⚫ já puxada · 💥 bala) e a partida entra no placar do chat como as demais.
+
 **Jokenpô PvP secreto.** Se a jogada fosse digitada no grupo, quem joga por último veria a do outro e ganharia sempre. Por isso, depois do `.ppt aceitar`, o bot **chama os dois no privado**: cada um responde `1` 🪨, `2` 📄 ou `3` ✂️ (ou `pedra`, `papel`, `tesoura`, `.ppt pedra`) e o bot só **revela no grupo quando os dois já travaram a jogada** — com suspense de *JO... KEN... PÔ!*. Empate repete a rodada sem contar; quem não joga em 2 minutos perde por W.O.; o convite expira em 3 minutos; jogar no grupo não vale. O dono joga pelo próprio chat "Você". Se o bot não conseguir chamar alguém, o grupo é avisado e a pessoa pode chamar o número do bot e mandar `1`, `2` ou `3`. Cada pessoa só participa de uma série por vez.
 
-Os tabuleiros são desenhados com **emoji** (❌ ⭕ 🟩🟨⬛ 🟦 🚩 💣 🔴), que ocupam sempre a mesma largura no WhatsApp — por isso a grade nunca desalinha, em Android, iOS ou Web. Caracteres de desenho de caixa (`┌─┬┐│`) não são usados porque o WhatsApp os renderiza com fontes diferentes. Só a forca usa um bloco monoespaçado, em ASCII puro e sem moldura. O Termo usa visual minimalista (apenas o cabeçalho e a grade de 6 linhas) e valida cada palpite contra um dicionário de palavras reais de 5 letras em português, rejeitando sequências aleatórias como `abcde`. Os nomes de perfil nunca entram nas grades. Partidas em andamento ficam em memória; o ranking fica persistente em `data/games-score.json`, separado por chat. `.desativar` remove a partida e o placar daquele chat.
+Os tabuleiros são desenhados com **emoji** (❌ ⭕ 🟩🟨⬛ 🟦 🚩 💣 🔴 🎯 ⚫ 💥), que ocupam sempre a mesma largura no WhatsApp — por isso a grade nunca desalinha, em Android, iOS ou Web. Caracteres de desenho de caixa (`┌─┬┐│`) não são usados porque o WhatsApp os renderiza com fontes diferentes. Só a forca usa um bloco monoespaçado, em ASCII puro e sem moldura. O Termo usa visual minimalista (apenas o cabeçalho e a grade de 6 linhas) e valida cada palpite contra um dicionário de palavras reais de 5 letras em português, rejeitando sequências aleatórias como `abcde`. Os nomes de perfil nunca entram nas grades. Partidas em andamento ficam em memória; o ranking fica persistente em `data/games-score.json`, separado por chat. `.desativar` remove a partida e o placar daquele chat.
 
 Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Faça downloads somente de conteúdo que você tem direito e autorização para acessar.
 
