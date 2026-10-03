@@ -2,7 +2,7 @@
 
 O bot exige Node.js 22+ e FFmpeg. A sessão e a configuração ficam em `data/` e não devem ser compartilhadas: o diretório contém credenciais do WhatsApp e, se habilitado, cache privado.
 
-O FFmpeg é obrigatório para figurinhas e recomendado para voz e imagem: sem ele o `.voz` ainda fala (as vozes do catálogo perdem só os efeitos), o `.criar --hd` não amplia e o áudio vai como arquivo de áudio em vez de mensagem de voz (PTT).
+O FFmpeg é obrigatório para figurinhas e recomendado para voz e imagem: sem ele o `.voz` ainda fala e o tom (`.voz grossa`, `--tom -30`) continua valendo nos motores `edge` e `espeak` (só os efeitos opcionais `--fx` ficam de fora), o `.criar --hd` não amplia e o áudio vai como arquivo de áudio em vez de mensagem de voz (PTT).
 
 A voz é **100% grátis**: nenhum serviço pago, nenhuma chave. O motor principal (Edge "Ler em voz alta") é online e sem cadastro. O `espeak` é opcional e deixa o `.voz` funcionando também **offline**, direto do aparelho — o instalador tenta instalar sozinho (`pkg install espeak`).
 

@@ -23,7 +23,8 @@
 //
 // VOZ (`.voz`): 100% GRÁTIS — nenhum provedor pago, nenhuma chave obrigatória.
 // Motor principal: Edge (grátis, sem chave, WebSocket nativo do Node 22) sobre
-// o catálogo de vozes de `voices.js` — `.voz bob`, `.voz lula`, `.voz narrador`.
+// o catálogo de vozes de `voices.js` — `.voz masculina grossa`, `.voz --tom -30`.
+// Quem manda no timbre é você: voz + tom (grossa ⇄ fina) + velocidade.
 // Se o Edge falhar (bloqueio de IP, 403, internet caída) a cascata segue com
 // provedores grátis sem chave (StreamElements, Google, Pollinations) e, por
 // último, os motores LOCAIS e OFFLINE (`tts-local.js`: piper/espeak-ng), que
@@ -42,11 +43,12 @@ import { applyAudioFilter, upscaleImage } from '../util/ffmpeg.js';
 import {
   buildPitchSpeedFilter,
   buildVoiceFxChain,
+  describeSpec,
   parseCustomVoices,
   pct,
-  resolveVoice
+  resolveVoiceSpec
 } from './voices.js';
-import { edgeStatus, edgeTts, isEdgeSupported } from './tts-edge.js';
+import { edgeStatus, edgeTts, edgeVoices, isEdgeSupported } from './tts-edge.js';
 import { espeakTts, isFeminineVoice, localStatus, piperTts } from './tts-local.js';
 import {
   convertCurrency,
@@ -1057,9 +1059,9 @@ export function aiImageStatus() {
 // ── Voz (TTS 100% grátis) ───────────────────────────────────
 //
 // Motor principal: Edge (o mesmo "Ler em voz alta" do Microsoft Edge) — vozes
-// neurais boas, GRÁTIS e sem chave. Sobre ele funcionam as vozes do catálogo
-// (.voz bob, .voz lula, .voz narrador…), que usam tom/velocidade no SSML e
-// efeitos de FFmpeg.
+// neurais boas, GRÁTIS e sem chave. É nele que o tom (grossa ⇄ fina), a
+// velocidade e o volume são aplicados de verdade, pelo SSML:
+// `<prosody pitch='-25%' rate='-10%'>`. Sem FFmpeg e sem efeito "de desenho".
 //
 // NENHUM provedor pago participa: sem ElevenLabs, sem OpenAI TTS, sem chave
 // obrigatória em lugar nenhum.
@@ -1262,6 +1264,44 @@ async function applyVoiceEffects(buffer, spec, engineName) {
 }
 
 /**
+ * Voz do Edge para uma especificação do catálogo.
+ *
+ * A voz principal pode sumir da lista do serviço de um dia para o outro (a
+ * Microsoft renomeia/aposenta vozes): por isso cada voz do catálogo tem
+ * `alts`. Aqui a escolha é — na ordem — a voz pedida, a primeira reserva que o
+ * serviço ainda anuncia, e por fim qualquer voz do mesmo idioma e gênero.
+ * Sem lista (offline) vai a voz pedida mesmo: se ela não existir mais, o
+ * próprio serviço reclama e a cascata de reserva resolve.
+ *
+ * ⚠️ Sem esta função o `.voz` NUNCA usava o Edge: a chamada quebrava com
+ * ReferenceError e o áudio saía sempre de uma reserva (Polly/Google), que é
+ * bem mais simples — e era isso que fazia o tom configurado soar estranho.
+ */
+export async function edgeVoiceFor(spec) {
+  const wanted = String(spec.voice || '').trim();
+  const alts = Array.isArray(spec.alts) ? spec.alts : [];
+  let voices = [];
+  try {
+    voices = await edgeVoices({ timeoutMs: 8_000 });
+  } catch {
+    return wanted;
+  }
+  if (!Array.isArray(voices) || !voices.length) return wanted;
+  const names = new Set(voices.map((entry) => entry.shortName));
+  if (!wanted || names.has(wanted)) return wanted;
+  for (const alt of alts) if (names.has(alt)) return alt;
+  // Última cartada: mesma língua e mesmo gênero da voz pedida.
+  const [lang, region] = String(wanted).split('-');
+  const gender = /-(Ana|Brenda|Camila|Dalia|Elza|Emma|Ava|Francisca|Giovanna|Jenny|Leila|Leticia|Manuela|Thalita|Yara|Vitoria|Nova)/i.test(wanted)
+    ? 'Female'
+    : 'Male';
+  const sameLocale = voices.find(
+    (entry) => entry.locale === `${lang}-${region}` && entry.gender === gender
+  );
+  return sameLocale?.shortName || wanted;
+}
+
+/**
  * Lista de motores na ordem de preferência, já sabendo qual voz usar.
  * Nada aqui é pago: Edge, reservas grátis sem chave e motores locais/offline.
  */
@@ -1270,9 +1310,9 @@ function voiceProviders(text, spec) {
   const lang = spec.lang || cfg.get().ia?.idiomaVoz || 'pt-BR';
   const edgeProvider = () => [
     'edge',
-    () =>
+    async () =>
       edgeTts(text, {
-        voice: edgeVoiceFor(spec),
+        voice: await edgeVoiceFor(spec),
         pitch: pct(spec.pitchPct),
         rate: pct(spec.speedPct),
         volume: pct(spec.volumePct),
@@ -1328,21 +1368,22 @@ function voiceProviders(text, spec) {
 }
 
 /**
- * Gera a voz e devolve também COMO ela foi feita (motor, voz, efeitos) — é o
- * que o `.voz` mostra na legenda.
+ * Gera a voz e devolve também COMO ela foi feita (motor, voz, tom) — é o que o
+ * `.voz` mostra na legenda.
  *
  * @param {string} text texto falado
- * @param {string} [voiceName] nome no catálogo (bob, lula, antonio…)
+ * @param {string} [recipe] configuração: nome da voz e/ou ajustes
+ *   (`"masculina grossa"`, `"--tom -30 --vel -10"`). Vazio = a voz do chat.
  * @param {{jid?: string}} [options]
  */
-export async function aiVoiceFull(text, voiceName, { jid } = {}) {
+export async function aiVoiceFull(text, recipe, { jid } = {}) {
   text = String(text || '').trim();
   if (!text) throw new Error('escreva o texto para transformar em áudio');
   if (text.length > 1_500) throw new Error('texto longo demais para áudio (máximo 1.500 caracteres)');
 
   const extra = voiceExtraList();
-  const requested = voiceName || voiceForChat(jid);
-  const spec = resolveVoice(requested, { extra });
+  const requested = String(recipe || '').trim() || voiceForChat(jid);
+  const spec = resolveVoiceSpec(requested, { extra });
   const errors = [];
   let lastError = null;
   const startedAt = Date.now();
@@ -1359,7 +1400,7 @@ export async function aiVoiceFull(text, voiceName, { jid } = {}) {
       const raw = await run();
       const { buffer, effects } = await applyVoiceEffects(raw, spec, name);
       markProviderSuccess(name);
-      log.ai(`voz gerada via ${name}${spec.id ? ` (${spec.id})` : ''}${effects ? ' + efeitos' : ''}`);
+      log.ai(`voz gerada via ${name} (${describeSpec(spec)})${effects ? ' + efeitos' : ''}`);
       return {
         buffer,
         engine: name,
@@ -1367,6 +1408,8 @@ export async function aiVoiceFull(text, voiceName, { jid } = {}) {
         offline: local,
         voiceId: spec.id,
         voiceLabel: spec.label || spec.id,
+        settings: spec,
+        settingsLabel: describeSpec(spec),
         effects,
         fallback: name !== spec.engine
       };
@@ -1383,8 +1426,8 @@ export async function aiVoiceFull(text, voiceName, { jid } = {}) {
   throw new Error(`nenhum motor de voz respondeu · ${errors.join(' | ')}${hint}`, { cause: lastError });
 }
 
-export async function aiVoice(text, voice) {
-  const result = await aiVoiceFull(text, voice);
+export async function aiVoice(text, recipe) {
+  const result = await aiVoiceFull(text, recipe);
   return result.buffer;
 }
 
@@ -1406,6 +1449,7 @@ export function aiVoiceStatus() {
       : 'piper (offline, grátis): opcional — PIPER_MODEL=/caminho/voz.onnx'
   );
   rows.push('streamelements · google · pollinations: reservas grátis, sem chave');
+  rows.push('configuração: .voz <voz> <tom> <texto> · .vozpadrao salva no chat · .vozes ajuda');
   if (ENV.vozLocal) rows.push('VOZ_LOCAL=1 — o motor offline é tentado primeiro');
   return rows;
 }

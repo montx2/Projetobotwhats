@@ -18,8 +18,9 @@
 //                           macOS  : brew install espeak-ng
 //                           Windows: winget install espeak-ng
 //
-// Tom, velocidade e volume saem NATIVOS no espeak (sem FFmpeg). Os efeitos de
-// personagem (`fx`: eco, robô, grave…) continuam no FFmpeg quando ele existe.
+// Tom, velocidade e volume saem NATIVOS no espeak (sem FFmpeg): o `--tom` do
+// usuário vale aqui também. Os efeitos opcionais (`fx`: eco, rádio…) continuam
+// no FFmpeg quando ele existe.
 
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';

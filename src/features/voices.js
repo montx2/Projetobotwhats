@@ -1,34 +1,27 @@
-// 🎭 VOZES — catálogo com NOME em português para cada voz do bot.
+// 🎙️ VOZ — escolha a voz, o tom (grossa ⇄ fina) e a velocidade.
 //
-// Ideia: em vez de decorar `pt-BR-AntonioNeural` ou `en-US-EmmaMultilingualNeural`,
-// você escreve o que quer:
+// Sem personagem e sem imitação: são vozes brasileiras naturais mais DOIS
+// controles que qualquer pessoa entende de primeira — TOM e VELOCIDADE.
+// Quem usa é que decide como a voz sai:
 //
-//     .voz bob querido diário, hoje eu descobri uma coisa
-//     .voz lula o povo brasileiro merece respeito
-//     .voz narrador e no episódio de hoje...
-//     .voz antonio boa tarde, pessoal
+//   .voz bom dia, pessoal           → fala com a voz configurada neste chat
+//   .voz grossa boa noite           → tom grave só nesta mensagem
+//   .voz feminina fina bom dia      → voz + tom na mesma frase
+//   .voz --tom -30 --vel -10 oi     → ajuste fino, número por número
+//   .vozpadrao masculina grossa     → salva a configuração neste chat
 //
-// TRÊS FAMÍLIAS DE VOZ:
-//  1. `pt`          vozes brasileiras naturais (motor grátis Edge, sem chave).
-//  2. `personagens` vozes de personagem/paródia: a voz base + tom (pitch) e
-//     velocidade (rate) no SSML — e, quando o FFmpeg está instalado, também
-//     efeitos (eco, vibrato, grave, "robô").
-//  3. `idiomas`     vozes de fora falando português (gringo, gringa, mexicano).
+// ONDE O TOM É APLICADO (o áudio nunca "quebra" por falta de efeito):
+//   edge    → SSML `<prosody pitch=…>` — nativo do serviço, sem FFmpeg
+//   espeak  → parâmetro `-p` do próprio binário
+//   piper e reservas online → FFmpeg: muda a taxa de amostragem e compensa a
+//             duração com `atempo`, então só o timbre muda (não acelera).
 //
-// SOBRE OS PERSONAGENS: são IMITAÇÕES/paródias feitas com efeitos de voz, não as
-// vozes originais de ninguém (clonar voz de pessoa real exige autorização e os
-// serviços que fazem isso são pagos — o bot não usa nenhum). Servem para
-// zoeira no grupo, e funcionam com qualquer motor, inclusive os grátis
-// offline (`tts-local.js`).
-//
-// MOTORES (todos grátis, nenhum pede pagamento):
-//   edge     — "Ler em voz alta" do Microsoft Edge (online, sem chave) — padrão.
-//   espeak   — espeak-ng, offline, sem internet (Termux: pkg install espeak).
-//   piper    — voz neural offline (opcional; precisa de modelo .onnx).
+// MOTORES — todos grátis, nenhum pede chave:
+//   edge (online) · espeak/piper (offline) · streamelements · google · pollinations
 
-// ── Efeitos de áudio (aplicados pelo FFmpeg, quando instalado) ────────
-// Cada efeito é um pedaço de filtro do FFmpeg. Se o FFmpeg não estiver
-// instalado, a voz sai igual, só sem o efeito — nunca falha por causa disso.
+// ── Efeitos de áudio (FFmpeg, quando instalado) ─────────────────────
+// Opcionais: entram por `--fx eco` ou por `VOZES_EXTRA` no .env. Se o FFmpeg
+// não estiver instalado a voz sai igual, só sem o efeito — nunca falha.
 export const VOICE_FX = Object.freeze({
   vibrato: 'vibrato=f=6.5:d=0.45',
   vibratoLeve: 'vibrato=f=5:d=0.25',
@@ -46,12 +39,38 @@ export const VOICE_FX = Object.freeze({
   distorcao: 'acrusher=bits=6:mode=lin:aa=1,volume=0.9'
 });
 
+const FX_BY_KEY = Object.freeze(
+  Object.fromEntries(Object.entries(VOICE_FX).map(([key, value]) => [key.toLowerCase(), value]))
+);
+
 /** Junta os efeitos pedidos numa cadeia de filtros (`-af`). */
 export function buildVoiceFxChain(fx) {
   const list = (Array.isArray(fx) ? fx : [fx])
-    .map((item) => VOICE_FX[item] || (typeof item === 'string' && item.includes('=') ? item : null))
+    .map((item) => FX_BY_KEY[String(item || '').toLowerCase()] || (typeof item === 'string' && item.includes('=') ? item : null))
     .filter(Boolean);
   return list.join(',');
+}
+
+/**
+ * Efeitos pedidos no comando (`--fx ecoCurto+radio`): nomes conferidos, com
+ * erro claro quando o efeito não existe (efeito desconhecido seria ignorado em
+ * silêncio e o usuário acharia que aplicou).
+ */
+export function resolveFxList(value) {
+  const wanted = String(value || '')
+    .split(/[+\s,]+/)
+    .filter(Boolean);
+  if (!wanted.length) throw new Error('escreva o nome do efeito depois de --fx (ex.: --fx ecoCurto)');
+  const known = [];
+  for (const item of wanted) {
+    const key = String(item).toLowerCase();
+    const canonical = Object.keys(VOICE_FX).find((name) => name.toLowerCase() === key);
+    if (!canonical) {
+      throw new Error(`efeito "${item}" não existe — disponíveis: ${Object.keys(VOICE_FX).join(', ')}`);
+    }
+    known.push(canonical);
+  }
+  return known;
 }
 
 /**
@@ -81,7 +100,7 @@ export function pct(value) {
   return `${n >= 0 ? '+' : ''}${Math.round(n)}%`;
 }
 
-/** " +35% " → 35 (aceita também `+0.3st`? não — só porcentagem). */
+/** " +35% " → 35 (aceita também `+35`, `35`, `-12%`). */
 export function parsePct(value) {
   if (typeof value === 'number') return value;
   const match = /^\s*([+-]?\d+(?:[.,]\d+)?)\s*%?\s*$/.exec(String(value ?? ''));
@@ -89,119 +108,112 @@ export function parsePct(value) {
   return Number(match[1].replace(',', '.')) || 0;
 }
 
-// ── Catálogo ────────────────────────────────────────────────────────
-// `voice` é o nome no motor (voz principal) e `alts` são as reservas usadas
-// quando a principal não existe mais na lista do serviço.
-const PT_BR = {
-  masculina: { voice: 'pt-BR-AntonioNeural', alts: ['pt-BR-DonatoNeural', 'pt-BR-ValerioNeural'] },
-  feminina: { voice: 'pt-BR-FranciscaNeural', alts: ['pt-BR-ThalitaNeural', 'pt-BR-LeilaNeural'] }
-};
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
 
-export const VOICE_CATALOG = Object.freeze([
-  // ── Brasileiras naturais ──────────────────────────────────────────
-  { id: 'auto', label: 'Automática', category: 'pt', voice: PT_BR.feminina.voice, alts: [...PT_BR.feminina.alts, PT_BR.masculina.voice],
-    desc: 'o bot escolhe a melhor voz disponível', aliases: ['padrao', 'padrão', 'automatico', 'automático'] },
-  { id: 'antonio', label: 'Antônio (masculina)', category: 'pt', voice: 'pt-BR-AntonioNeural',
-    alts: PT_BR.masculina.alts, desc: 'voz brasileira natural, boa para recados', aliases: ['masculina', 'masc', 'homem'] },
-  { id: 'francisca', label: 'Francisca (feminina)', category: 'pt', voice: 'pt-BR-FranciscaNeural',
-    alts: PT_BR.feminina.alts, desc: 'voz brasileira natural, clara e calma', aliases: ['feminina', 'fem', 'mulher'] },
-  { id: 'thalita', label: 'Thalita (feminina jovem)', category: 'pt', voice: 'pt-BR-ThalitaNeural',
-    alts: PT_BR.feminina.alts, desc: 'mais leve e moderna', aliases: ['thalia', 'jovem'] },
-  { id: 'leila', label: 'Leila (feminina madura)', category: 'pt', voice: 'pt-BR-LeilaNeural',
-    alts: PT_BR.feminina.alts, desc: 'mais séria e experiente' },
-  { id: 'yara', label: 'Yara (feminina narradora)', category: 'pt', voice: 'pt-BR-YaraNeural',
-    alts: PT_BR.feminina.alts, desc: 'boa para leitura de textos' },
-  { id: 'julio', label: 'Júlio (masculino narrador)', category: 'pt', voice: 'pt-BR-JulioNeural',
-    alts: PT_BR.masculina.alts, desc: 'locução limpa, estilo rádio' },
-  { id: 'valerio', label: 'Valério (masculino grave)', category: 'pt', voice: 'pt-BR-ValerioNeural',
-    alts: PT_BR.masculina.alts, desc: 'mais grave e imponente' },
-  { id: 'nicolau', label: 'Nicolau (masculino calmo)', category: 'pt', voice: 'pt-BR-NicolauNeural',
-    alts: PT_BR.masculina.alts, desc: 'tom tranquilo, bom para explicações' },
+// ── Tom: de muito grossa a muito fina ───────────────────────────────
+// Percentual de pitch. Negativo = mais grossa, positivo = mais fina.
+export const TONE_MIN = -60;
+export const TONE_MAX = 60;
+export const SPEED_MIN = -60;
+export const SPEED_MAX = 60;
 
-  // ── Personagens e paródias (voz base + efeitos) ───────────────────
-  { id: 'bob', label: 'Bob Esponja (paródia)', category: 'personagens',
-    voice: 'en-US-EmmaMultilingualNeural', alts: ['pt-BR-FranciscaNeural', 'pt-BR-ThalitaNeural'],
-    pitch: 38, rate: 8, fx: ['nasal', 'vibratoLeve'],
-    desc: 'fininha, acelerada e irritante do jeito certo', aliases: ['bobesponja', 'bob-esponja', 'esponja', 'calcaquadrada'] },
-  { id: 'lula', label: 'Lula (paródia)', category: 'personagens',
-    voice: 'pt-BR-AntonioNeural', alts: PT_BR.masculina.alts,
-    pitch: -14, rate: -8, fx: ['meioGrave', 'ecoCurto'],
-    desc: 'grave, pausada e de palanque', aliases: ['presidente', 'politico', 'político'] },
-  { id: 'pato', label: 'Pato Donald (paródia)', category: 'personagens',
-    voice: 'en-US-GuyNeural', alts: PT_BR.masculina.alts,
-    pitch: 26, rate: 6, fx: ['nasal', 'vibrato'],
-    desc: 'patinho nervoso e engasgado', aliases: ['donald', 'pato-donald'] },
-  { id: 'robo', label: 'Robô', category: 'personagens',
-    voice: PT_BR.masculina.voice, alts: PT_BR.masculina.alts,
-    pitch: -6, rate: -4, fx: ['robotico', 'radio'],
-    desc: 'metálico, com eco de máquina' },
-  { id: 'monstro', label: 'Monstro', category: 'personagens',
-    voice: PT_BR.masculina.voice, alts: PT_BR.masculina.alts,
-    pitch: -32, rate: -14, fx: ['grave', 'ecoLongo'],
-    desc: 'voz cavernosa de vilão' },
-  { id: 'bebe', label: 'Bebê', category: 'personagens',
-    voice: 'en-US-AnaNeural', alts: ['pt-BR-ThalitaNeural', 'pt-BR-FranciscaNeural'],
-    pitch: 50, rate: -6, fx: ['brilho'],
-    desc: 'agudinha, fofa e um pouco boba' },
-  { id: 'anime', label: 'Anime', category: 'personagens',
-    voice: 'pt-BR-ThalitaNeural', alts: PT_BR.feminina.alts,
-    pitch: 20, rate: 6, fx: ['brilho'],
-    desc: 'dublagem alegre de desenho japonês' },
-  { id: 'narrador', label: 'Narrador de trailer', category: 'personagens',
-    voice: 'pt-BR-ValerioNeural', alts: PT_BR.masculina.alts,
-    pitch: -18, rate: -16, fx: ['teatro', 'meioGrave'],
-    desc: 'aquele "em um mundo..." épico' },
-  { id: 'velho', label: 'Velhinho', category: 'personagens',
-    voice: PT_BR.masculina.voice, alts: PT_BR.masculina.alts,
-    pitch: -10, rate: -22, fx: ['vibrato', 'radio'],
-    desc: 'lento, cansado e trêmulo' },
-  { id: 'fantasma', label: 'Fantasma', category: 'personagens',
-    voice: PT_BR.feminina.voice, alts: PT_BR.feminina.alts,
-    pitch: -8, rate: -18, fx: ['ecoFantasma', 'sussurro'],
-    desc: 'assombração com eco distante' },
-  { id: 'alien', label: 'Alienígena', category: 'personagens',
-    voice: PT_BR.masculina.voice, alts: PT_BR.masculina.alts,
-    pitch: -40, rate: -20, fx: ['robotico', 'ecoLongo'],
-    desc: 'gravíssimo e espacial' },
-  { id: 'tiktok', label: 'Voz de TikTok', category: 'personagens',
-    voice: 'en-US-AvaMultilingualNeural', alts: ['pt-BR-ThalitaNeural', 'pt-BR-FranciscaNeural'],
-    pitch: 14, rate: 12, fx: ['brilho'],
-    desc: 'animada e apressada, estilo vídeo curto' },
-  { id: 'dramatico', label: 'Dramático', category: 'personagens',
-    voice: PT_BR.masculina.voice, alts: PT_BR.masculina.alts,
-    pitch: -6, rate: -10, fx: ['teatro'],
-    desc: 'novela mexicana, com sofrimento' },
-  { id: 'bravo', label: 'Bravo', category: 'personagens',
-    voice: PT_BR.masculina.voice, alts: PT_BR.masculina.alts,
-    pitch: -4, rate: 14, fx: ['distorcao'],
-    desc: 'gritando, meio rouco' },
-  { id: 'anjo', label: 'Anjo / etéreo', category: 'personagens',
-    voice: PT_BR.feminina.voice, alts: PT_BR.feminina.alts,
-    pitch: 8, rate: -12, fx: ['ecoLongo', 'brilho'],
-    desc: 'suave, com eco celestial' },
-  { id: 'apresentador', label: 'Apresentador de TV', category: 'personagens',
-    voice: PT_BR.masculina.voice, alts: PT_BR.masculina.alts,
-    pitch: 4, rate: 8, fx: ['radio'],
-    desc: 'energia de auditório' },
-
-  // ── Outros idiomas falando português ─────────────────────────────
-  { id: 'gringo', label: 'Gringo', category: 'idiomas',
-    voice: 'en-US-BrianMultilingualNeural', alts: ['en-US-AndrewMultilingualNeural', PT_BR.masculina.voice],
-    rate: -4, desc: 'inglês tentando falar português', aliases: ['americano'] },
-  { id: 'gringa', label: 'Gringa', category: 'idiomas',
-    voice: 'en-US-EmmaMultilingualNeural', alts: ['en-US-AvaMultilingualNeural', PT_BR.feminina.voice],
-    rate: -4, desc: 'sotaque de fora, bem claro', aliases: ['americana'] },
-  { id: 'mexicano', label: 'Mexicano', category: 'idiomas',
-    voice: 'es-MX-JorgeNeural', alts: ['es-MX-DaliaNeural', PT_BR.masculina.voice],
-    rate: -6, desc: 'espanhol com jeitinho mexicano', aliases: ['espanhol', 'hermano'] }
+export const VOICE_TONES = Object.freeze([
+  { id: 'muitogrossa', label: 'Muito grossa', pitch: -45, aliases: ['grossissima', 'grossao', 'grave', 'profunda', 'cavernosa'] },
+  { id: 'grossa', label: 'Grossa', pitch: -25, aliases: ['meiogrossa', 'grossinha', 'baixa'] },
+  { id: 'normal', label: 'Normal', pitch: 0, aliases: ['medio', 'media', 'neutro', 'natural', 'original'] },
+  { id: 'fina', label: 'Fina', pitch: 25, aliases: ['meiofina', 'fininha', 'alta', 'aguda'] },
+  { id: 'muitofina', label: 'Muito fina', pitch: 45, aliases: ['finissima', 'agudissima', 'muitoaguda', 'esquilo'] }
 ]);
 
-export const VOICE_CATEGORIES = Object.freeze({
-  pt: 'Vozes brasileiras',
-  personagens: 'Personagens e paródias',
-  idiomas: 'Outros idiomas'
-});
+// ── Vozes ───────────────────────────────────────────────────────────
+// `voice` é o nome no motor (voz principal) e `alts` são as reservas usadas
+// quando a principal não existe mais na lista do serviço.
+const MASCULINAS = ['pt-BR-DonatoNeural', 'pt-BR-FabioNeural', 'pt-BR-HumbertoNeural'];
+const FEMININAS = ['pt-BR-BrendaNeural', 'pt-BR-LeilaNeural', 'pt-BR-GiovannaNeural'];
 
+export const VOICE_CATALOG = Object.freeze([
+  { id: 'auto', label: 'Automática', voice: 'pt-BR-FranciscaNeural', alts: [...FEMININAS, 'pt-BR-AntonioNeural'],
+    desc: 'o bot escolhe a melhor voz disponível', aliases: ['padrao', 'padrão', 'automatica', 'automática', 'automatico', 'automático'] },
+  { id: 'masculina', label: 'Masculina', voice: 'pt-BR-AntonioNeural', alts: MASCULINAS,
+    desc: 'voz de homem, natural', aliases: ['homem', 'masc', 'antonio', 'antônio'] },
+  { id: 'feminina', label: 'Feminina', voice: 'pt-BR-FranciscaNeural', alts: FEMININAS,
+    desc: 'voz de mulher, clara e calma', aliases: ['mulher', 'fem', 'francisca'] },
+  { id: 'narrador', label: 'Narrador', voice: 'pt-BR-ValerioNeural', alts: ['pt-BR-JulioNeural', 'pt-BR-NicolauNeural'],
+    desc: 'locução grave, estilo rádio', aliases: ['locutor', 'narracao', 'narração', 'valerio'] },
+  { id: 'jovem', label: 'Jovem', voice: 'pt-BR-ThalitaNeural', alts: ['pt-BR-GiovannaNeural', 'pt-BR-LeticiaNeural'],
+    desc: 'feminina leve e moderna', aliases: ['thalia', 'thalita', 'moderna'] }
+]);
+
+function normalizeName(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9-]+/g, '');
+}
+
+/** Encontra o preset de tom pelo nome/apelido. */
+export function findTone(value) {
+  const wanted = normalizeName(value);
+  if (!wanted) return null;
+  return VOICE_TONES.find((tone) => tone.id === wanted || (tone.aliases || []).some((alias) => normalizeName(alias) === wanted)) || null;
+}
+
+/** Nome do preset que corresponde exatamente a este percentual (ou `null`). */
+export function toneNameFor(pitch) {
+  const preset = VOICE_TONES.find((tone) => tone.pitch === Number(pitch));
+  return preset ? preset.id : null;
+}
+
+/** Rótulo curto do tom para a legenda: `-25% (grossa)`. */
+export function toneLabel(pitch) {
+  const id = toneNameFor(pitch);
+  const preset = VOICE_TONES.find((tone) => tone.id === id);
+  return preset ? preset.label.toLowerCase() : '';
+}
+
+/**
+ * Tom a partir de um token solto (sem flag): nome de preset ou número COM
+ * sinal (`-30`, `+20`). Devolve `null` quando o token não é um tom — assim
+ * `.voz hoje foi top` continua sendo texto.
+ */
+export function matchTone(token) {
+  const raw = String(token ?? '').trim();
+  if (!raw) return null;
+  if (/^[+-]\d{1,3}$/.test(raw)) {
+    const value = Number(raw);
+    return value >= TONE_MIN && value <= TONE_MAX ? value : null;
+  }
+  const preset = findTone(raw);
+  return preset ? preset.pitch : null;
+}
+
+/** Tom vindo de flag (`--tom grossa`, `--tom=-30`): erro claro se inválido. */
+export function resolveTone(value) {
+  const direct = matchTone(value);
+  if (direct !== null) return direct;
+  // Número fora do intervalo não é erro: prende no limite (é o que o usuário quis).
+  const number = /^[+-]?\d{1,3}$/.exec(String(value ?? '').trim());
+  if (number) return clamp(Number(number[0]), TONE_MIN, TONE_MAX);
+  throw new Error(
+    `tom "${value}" não existe — use ${VOICE_TONES.map((tone) => tone.id).join(', ')} ` +
+      `ou um número de ${TONE_MIN} a +${TONE_MAX} (ex.: --tom -30)`
+  );
+}
+
+/** Velocidade vinda de flag (`--vel -10`, `--velocidade +20`). */
+export function resolveSpeed(value) {
+  const raw = String(value ?? '').trim();
+  if (!/^[+-]?\d{1,3}\s*%?$/.test(raw)) {
+    throw new Error(`velocidade "${value}" não existe — use um número de ${SPEED_MIN} a +${SPEED_MAX} (ex.: --vel -10)`);
+  }
+  return clamp(Math.round(parsePct(raw)), SPEED_MIN, SPEED_MAX);
+}
+
+// ── Vozes extras do .env ────────────────────────────────────────────
 // Avisa uma vez por voz que ficou de fora (o catálogo é relido a cada comando).
 const warnedDropped = new Set();
 
@@ -213,15 +225,6 @@ function warnDroppedEngine(id, value) {
       'motores pagos (ElevenLabs/OpenAI TTS) foram removidos do bot. ' +
       'Use uma voz do Edge (ex.: pt-BR-ThalitaNeural) ou um motor grátis offline: espeak:/piper:.'
   );
-}
-
-function normalizeName(value) {
-  return String(value || '')
-    .trim()
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9-]+/g, '');
 }
 
 /**
@@ -273,36 +276,9 @@ export function parseCustomVoices(raw) {
   return entries;
 }
 
-/**
- * Resolve o nome digitado ("bob", "Bob Esponja", "lula") na definição completa.
- * Sempre devolve algo utilizável: nome desconhecido = erro claro.
- */
-export function resolveVoice(name, { extra = [] } = {}) {
-  const wanted = normalizeName(name);
-  if (!wanted) {
-    const fallback = VOICE_CATALOG.find((voice) => voice.id === 'auto');
-    return { ...fallback, pitch: 0, rate: 0, volume: 0, fx: [], engine: 'edge', lang: 'pt-BR', requested: '' };
-  }
-  const all = [...VOICE_CATALOG, ...extra];
-  for (const entry of all) {
-    const names = [entry.id, ...(entry.aliases || [])].map(normalizeName);
-    if (names.includes(wanted)) return decorate(entry);
-  }
-  // Nome direto do motor (ex.: pt-BR-AntonioNeural ou en-US-GuyNeural):
-  // quem sabe o nome técnico também pode usar.
-  if (/^[a-z]{2}-[A-Z]{2}-\w+Neural$/.test(String(name).trim())) {
-    return decorate({ id: normalizeName(name), label: String(name).trim(), category: 'custom', voice: String(name).trim(), alts: [] });
-  }
-  const similar = suggestVoice(name, { extra });
-  throw new Error(
-    `voz "${name}" não existe${similar ? ` — você quis dizer "${similar}"?` : ''} ` +
-      'Use .vozes para ver a lista (ex.: bob, lula, antonio, narrador, gringo) ' +
-      'ou cadastre a sua em VOZES_EXTRA no .env.'
-  );
-}
-
-function decorate(entry) {
-  return {
+// ── Resolução ───────────────────────────────────────────────────────
+function decorate(entry, { tone = null, speed = null, fx = null } = {}) {
+  const base = {
     engine: 'edge',
     lang: 'pt-BR',
     pitch: 0,
@@ -310,15 +286,56 @@ function decorate(entry) {
     volume: 0,
     fx: [],
     alts: [],
-    category: 'pt',
-    ...entry,
-    pitchPct: Number(entry.pitch) || 0,
-    speedPct: Number(entry.rate) || 0,
-    volumePct: Number(entry.volume) || 0
+    category: 'voz',
+    ...entry
+  };
+  // O tom/velocidade pedidos no comando têm prioridade sobre os da voz.
+  const pitchPct = tone !== null && tone !== undefined ? clamp(Math.round(tone), TONE_MIN, TONE_MAX) : Number(base.pitch) || 0;
+  const speedPct = speed !== null && speed !== undefined ? clamp(Math.round(speed), SPEED_MIN, SPEED_MAX) : Number(base.rate) || 0;
+  return {
+    ...base,
+    fx: Array.isArray(fx) && fx.length ? fx : base.fx || [],
+    pitchPct,
+    speedPct,
+    volumePct: Number(base.volume) || 0
   };
 }
 
-/** Ids/aliases válidos (para reconhecer `.voz bob <texto>`). */
+/**
+ * Resolve o nome digitado ("masculina", "narrador") na definição completa.
+ * `tone`, `speed` e `fx` vêm do comando e substituem os valores da voz.
+ */
+export function resolveVoice(name, { extra = [], tone = null, speed = null, fx = null } = {}) {
+  const wanted = normalizeName(name);
+  if (!wanted) {
+    const fallback = VOICE_CATALOG.find((voice) => voice.id === 'auto');
+    return { ...decorate(fallback, { tone, speed, fx }), requested: '' };
+  }
+  const all = [...VOICE_CATALOG, ...extra];
+  for (const entry of all) {
+    const names = [entry.id, ...(entry.aliases || [])].map(normalizeName);
+    if (names.includes(wanted)) return { ...decorate(entry, { tone, speed, fx }), requested: wanted };
+  }
+  // Nome direto do motor (ex.: pt-BR-AntonioNeural ou en-US-GuyNeural):
+  // quem sabe o nome técnico também pode usar.
+  if (/^[a-z]{2}-[A-Z]{2}-\w+Neural$/.test(String(name).trim())) {
+    return {
+      ...decorate({ id: normalizeName(name), label: String(name).trim(), voice: String(name).trim(), alts: [] }, { tone, speed, fx }),
+      requested: normalizeName(name)
+    };
+  }
+  const toneHint = findTone(name);
+  if (toneHint) {
+    throw new Error(`"${name}" é um tom, não uma voz — use .voz ${toneHint.id} <texto> (vozes: ${voiceNameList()})`);
+  }
+  const similar = suggestVoice(name, { extra });
+  throw new Error(
+    `voz "${name}" não existe${similar ? ` — você quis dizer "${similar}"?` : ''} ` +
+      `Vozes: ${voiceNameList()} · tons: ${VOICE_TONES.map((t) => t.id).join(', ')} · lista completa em .vozes`
+  );
+}
+
+/** Ids/aliases válidos (para reconhecer `.voz masculina <texto>`). */
 export function voiceNames({ extra = [] } = {}) {
   const names = new Set();
   for (const entry of [...VOICE_CATALOG, ...extra]) {
@@ -332,46 +349,7 @@ export function isVoiceName(token, { extra = [] } = {}) {
   return voiceNames({ extra }).has(normalizeName(token));
 }
 
-/**
- * Decide o que é voz e o que é texto no comando `.voz`.
- *   `.voz bob bom dia`        → voz=bob, texto="bom dia"
- *   `.voz bom dia`            → voz=null (usa a padrão), texto="bom dia"
- *   `.voz bob`                → voz=bob, texto=null (o bot manda uma amostra)
- *   `.voz "lula é o cara"`    → texto literal entre aspas
- *   `.voz olá --voz bob`      → voz=bob pelo marcador
- */
-export function parseVoiceRequest(args = [], { extra = [] } = {}) {
-  const list = Array.isArray(args) ? [...args] : String(args || '').split(/\s+/).filter(Boolean);
-  const joined = list.join(' ').trim();
-  let voice = null;
-
-  const flagMatch = /(?:^|\s)-{1,2}(?:voz|voice)\s*=?\s*(\S+)/i.exec(joined);
-  if (flagMatch) {
-    voice = flagMatch[1];
-    const cleaned = joined.replace(flagMatch[0], ' ').replace(/\s+/g, ' ').trim();
-    return { voice, text: cleaned || null, explicit: true };
-  }
-
-  if (list.length && isVoiceName(list[0], { extra })) {
-    voice = list[0];
-    const rest = list.slice(1).join(' ').trim();
-    if (!rest) return { voice, text: null, explicit: true };
-    // Aspas protegem um texto que começa com nome de voz.
-    const quoted = /^"([\s\S]*)"$/.exec(rest) || /^'([\s\S]*)'$/.exec(rest);
-    return { voice, text: quoted ? quoted[1].trim() : rest, explicit: true };
-  }
-
-  const quoted = /^"([\s\S]*)"$/.exec(joined) || /^'([\s\S]*)'$/.exec(joined);
-  return { voice: null, text: (quoted ? quoted[1] : joined).trim() || null, explicit: false };
-}
-
-/** Linhas do catálogo para o menu `.vozes`. */
-export function voiceCatalogLines({ category, extra = [] } = {}) {
-  const entries = [...VOICE_CATALOG, ...extra].filter((entry) => !category || entry.category === category);
-  return entries.map((entry) => [`.voz ${entry.id} <texto>`, entry.desc || entry.label]);
-}
-
-/** Nomes para preview/erro: "bob, lula, antonio…". */
+/** Nomes para ajuda/erro: "masculina, feminina, narrador, jovem". */
 export function voiceNameList({ limit = 8, extra = [] } = {}) {
   const ids = [...VOICE_CATALOG, ...extra].map((entry) => entry.id);
   return ids.length > limit ? `${ids.slice(0, limit).join(', ')}…` : ids.join(', ');
@@ -388,4 +366,142 @@ export function suggestVoice(name, { extra = [] } = {}) {
     }
   }
   return best;
+}
+
+// ── Comando: separar configuração de texto ──────────────────────────
+const FLAG_KEYS = Object.freeze({
+  voz: 'voz', voice: 'voz',
+  tom: 'tom', pitch: 'tom', ton: 'tom', altura: 'tom',
+  vel: 'vel', velocidade: 'vel', rate: 'vel', speed: 'vel',
+  fx: 'fx', efeito: 'fx', efeitos: 'fx'
+});
+
+function applyFlag(target, key, value) {
+  const text = String(value ?? '').trim();
+  if (!text) return;
+  if (key === 'voz') target.voice = text;
+  else if (key === 'tom') target.tone = resolveTone(text);
+  else if (key === 'vel') target.speed = resolveSpeed(text);
+  else if (key === 'fx') target.fx = resolveFxList(text);
+}
+
+/**
+ * Receita canônica de uma configuração: o texto que pode ser guardado no
+ * config e lido de volta (`masculina --tom grossa --vel -10`).
+ */
+export function voiceRecipe({ voice = null, tone = null, speed = null, fx = null } = {}) {
+  const parts = [];
+  if (voice) parts.push(String(voice));
+  if (tone !== null && tone !== undefined) parts.push(`--tom ${toneNameFor(tone) || `${tone > 0 ? '+' : ''}${tone}`}`);
+  if (speed !== null && speed !== undefined) parts.push(`--vel ${speed > 0 ? '+' : ''}${speed}`);
+  if (Array.isArray(fx) && fx.length) parts.push(`--fx ${fx.join('+')}`);
+  return parts.join(' ') || null;
+}
+
+/**
+ * Decide o que é configuração e o que é texto no comando `.voz`.
+ *   `.voz masculina grossa bom dia`  → voz=masculina, tom=-25, texto="bom dia"
+ *   `.voz bom dia`                   → nada configurado, texto="bom dia"
+ *   `.voz --tom -30 --vel -10 oi`    → ajuste fino por flags
+ *   `.voz masculina`                 → voz sem texto (o bot manda uma prévia)
+ *   `.voz "grossa é o nome"`         → aspas = texto literal
+ */
+export function parseVoiceRequest(args = [], { extra = [] } = {}) {
+  const list = (Array.isArray(args) ? [...args] : String(args || '').split(/\s+/))
+    .map((item) => String(item ?? ''))
+    .filter((item) => item.trim() !== '');
+
+  const result = { voice: null, tone: null, speed: null, fx: null, text: null, explicit: false, recipe: null };
+
+  // 1) Flags em qualquer posição: `--tom -30`, `--tom=-30`, `-tom grossa`.
+  const rest = [];
+  for (let i = 0; i < list.length; i++) {
+    const token = list[i];
+    const flag = /^-{1,2}([a-z]+)(?:=([\s\S]*))?$/i.exec(token);
+    const key = flag ? FLAG_KEYS[flag[1].toLowerCase()] : null;
+    if (!key) {
+      rest.push(token);
+      continue;
+    }
+    if (flag[2] !== undefined) {
+      applyFlag(result, key, flag[2]);
+      continue;
+    }
+    const value = list[i + 1];
+    if (value === undefined) continue; // flag sozinha no fim: ignora
+    applyFlag(result, key, value);
+    i += 1;
+  }
+
+  // 2) No começo, até dois tokens de configuração (voz e/ou tom, em qualquer ordem).
+  let index = 0;
+  for (let guard = 0; guard < 2 && index < rest.length; guard++) {
+    const token = rest[index];
+    if (result.voice === null && isVoiceName(token, { extra })) {
+      result.voice = token;
+      index += 1;
+      continue;
+    }
+    if (result.tone === null && matchTone(token) !== null) {
+      result.tone = matchTone(token);
+      index += 1;
+      continue;
+    }
+    break;
+  }
+
+  // 3) O que sobrou é o texto. Aspas protegem um texto que começa com voz/tom.
+  const joined = rest.slice(index).join(' ').trim();
+  const quoted = /^"([\s\S]*)"$/.exec(joined) || /^'([\s\S]*)'$/.exec(joined);
+  result.text = (quoted ? quoted[1] : joined).trim() || null;
+  result.explicit = result.voice !== null || result.tone !== null || result.speed !== null || result.fx !== null;
+  result.recipe = result.explicit ? voiceRecipe(result) : null;
+  return result;
+}
+
+/** Divide uma receita guardada (`"masculina --tom grossa"`) em tokens. */
+function splitRecipe(recipe) {
+  return String(recipe || '').split(/\s+/).filter(Boolean);
+}
+
+/** Receita (texto livre ou guardada no config) → especificação pronta para uso. */
+export function resolveVoiceSpec(recipe, { extra = [] } = {}) {
+  const parsed = parseVoiceRequest(splitRecipe(recipe), { extra });
+  return resolveVoice(parsed.voice || '', { extra, tone: parsed.tone, speed: parsed.speed, fx: parsed.fx });
+}
+
+/** Descrição curta para legendas e confirmações: "Masculina · tom -25% (grossa)". */
+export function describeSpec(spec = {}) {
+  const bits = [String(spec.label || spec.id || 'auto')];
+  const tone = Number(spec.pitchPct) || 0;
+  if (tone) {
+    const label = toneLabel(tone);
+    bits.push(`tom ${tone > 0 ? '+' : ''}${tone}%${label ? ` (${label})` : ''}`);
+  }
+  const speed = Number(spec.speedPct) || 0;
+  if (speed) bits.push(`velocidade ${speed > 0 ? '+' : ''}${speed}%`);
+  if (Array.isArray(spec.fx) && spec.fx.length) bits.push(`efeito ${spec.fx.join('+')}`);
+  return bits.join(' · ');
+}
+
+/** Descrição a partir da receita guardada no config. */
+export function describeRecipe(recipe, { extra = [] } = {}) {
+  try {
+    return describeSpec(resolveVoiceSpec(recipe, { extra }));
+  } catch {
+    return String(recipe || 'auto');
+  }
+}
+
+/** Linhas do card de ajuda: vozes. */
+export function voiceOptionLines({ extra = [] } = {}) {
+  return [...VOICE_CATALOG, ...extra].map((entry) => [`.voz ${entry.id} <texto>`, entry.desc || entry.label]);
+}
+
+/** Linhas do card de ajuda: tons. */
+export function toneOptionLines() {
+  return VOICE_TONES.map((tone) => [
+    `.voz ${tone.id} <texto>`,
+    `${tone.label.toLowerCase()} (${tone.pitch > 0 ? '+' : ''}${tone.pitch}%)`
+  ]);
 }

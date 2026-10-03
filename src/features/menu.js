@@ -8,7 +8,7 @@ import { cfg } from '../core/config.js';
 import { PLATFORM, PLATFORM_LABEL } from '../core/platform.js';
 import { hasYtDlp } from './downloaders/ytdlp.js';
 import { SYM, header, section, cmd, footer, card, kv } from '../core/ui.js';
-import { VOICE_CATEGORIES, voiceCatalogLines } from './voices.js';
+import { TONE_MAX, TONE_MIN, describeRecipe, toneOptionLines, voiceOptionLines } from './voices.js';
 
 const STICKER_ITEMS = [
   ['.s', 'foto, vídeo ou GIF vira figurinha'],
@@ -33,9 +33,9 @@ const AI_ITEMS = [
   ['.ia cotacao <valor> <origem> <destino>', 'conversão com taxa de referência'],
   ['.ia feriados [ano] [país]', 'consulta feriados nacionais'],
   ['.criar <ideia>', 'gera imagem (prompt otimizado) · `.menucriar` para os atalhos'],
-  ['.voz [voz] <texto>', 'texto em áudio · vozes de personagem'],
-  ['.vozes', 'lista as vozes (bob, lula, narrador…) · `.vozes bob` ouve'],
-  ['.vozpadrao <voz>', 'fixa a voz só neste chat'],
+  ['.voz <texto>', 'texto em áudio · `.voz grossa oi` muda o tom'],
+  ['.vozes', 'vozes, tons e como configurar (`.vozes grossa` ouve)'],
+  ['.vozpadrao <voz> <tom>', 'salva a voz só neste chat'],
   ['.traduz <idioma> <texto>', 'tradução instantânea'],
   ['.resumo <texto>', 'resume textos longos']
 ];
@@ -219,33 +219,35 @@ export function antiDeleteMenu() {
 }
 
 /**
- * Catálogo de vozes em cartão. O usuário escolhe pelo NOME (`.voz bob`), então
- * o menu mostra exatamente o que digitar — não o nome técnico da voz.
+ * Card da voz: mostra exatamente o que digitar para escolher VOZ, TOM
+ * (grossa ⇄ fina) e VELOCIDADE — e como salvar isso no chat.
+ * Curto de propósito: tudo o que o usuário precisa está aqui, sem catálogo de
+ * personagem para decorar.
  */
 export function voiceMenu({ extra = [], current = 'auto' } = {}) {
-  const blocos = (categoria) =>
-    section(VOICE_CATEGORIES[categoria] || categoria, voiceCatalogLines({ category: categoria, extra }));
-
-  const categorias = ['pt', 'personagens', 'idiomas'];
-  const custom = extra.length ? section('Suas vozes (VOZES_EXTRA)', voiceCatalogLines({ category: 'custom', extra })) : '';
-
   return card([
-    header(cfg.get().nomeBot, 'vozes · escolha pelo nome'),
-    kv('Voz deste chat', current),
-    ...categorias.map((categoria) => blocos(categoria)),
-    custom,
+    header(cfg.get().nomeBot, 'voz · você escolhe o tom'),
+    kv('Neste chat', describeRecipe(current, { extra })),
     section('Como usar', [
-      ['.voz <texto>', 'usa a voz padrão deste chat'],
-      ['.voz bob <texto>', 'fala com a voz escolhida'],
-      ['.voz bob', 'manda um exemplo da voz'],
-      ['.vozes bob', 'ouve o exemplo direto do catálogo'],
-      ['.vozpadrao bob', 'fixa a voz neste chat (auto volta ao padrão)'],
-      ['.voz "bob é o cara"', 'aspas = texto literal, sem trocar de voz']
+      ['.voz <texto>', 'fala com a voz deste chat'],
+      ['.voz grossa <texto>', 'tom só nesta mensagem'],
+      ['.voz feminina grossa oi', 'voz + tom na mesma frase'],
+      ['.vozpadrao masculina grossa', 'salva a configuração neste chat'],
+      ['.vozpadrao', 'mostra o que está salvo · `auto` volta ao padrão']
+    ]),
+    section('Voz', voiceOptionLines({ extra })),
+    section('Tom (grossa ⇄ fina)', toneOptionLines()),
+    section('Ajuste fino', [
+      [`--tom ${TONE_MIN} a +${TONE_MAX}`, 'negativo = mais grossa · positivo = mais fina'],
+      ['--vel -60 a +60', 'velocidade da fala'],
+      ['.voz masculina --tom -35 --vel -10 oi', 'exemplo: bem grave e devagar'],
+      ['--fx ecoCurto | radio | sussurro', 'efeito opcional (precisa de FFmpeg)'],
+      ['.voz "grossa é o nome"', 'aspas = texto literal, sem trocar nada']
     ]),
     footer(
       'Voz 100% grátis, sem chave: edge (online) e espeak/piper (offline, sem internet). ' +
-        'Personagens são paródias por efeitos de voz, não as vozes originais. ' +
-        'Crie as suas em VOZES_EXTRA no .env — veja o README.'
+        'O tom entra na própria síntese (SSML), não é efeito por cima. ' +
+        'Vozes próprias do .env: VOZES_EXTRA (veja o README).'
     )
   ]);
 }

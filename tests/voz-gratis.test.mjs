@@ -65,8 +65,10 @@ test('sem o motor online, o .voz cai no motor local offline (grátis) e não rep
     fs.rmSync(fake.dir, { recursive: true, force: true });
   });
 
-  const first = await aiVoiceFull('bom dia, pessoal', 'antonio');
+  const first = await aiVoiceFull('bom dia, pessoal', 'masculina grossa');
   assert.equal(first.engine, 'espeak');
+  // O tom configurado aparece na legenda mesmo no motor offline.
+  assert.match(first.settingsLabel, /tom -25% \(grossa\)/);
   assert.equal(first.offline, true);
   assert.ok(Buffer.isBuffer(first.buffer) && first.buffer.length > 0);
   assert.ok(calls.length > 0, 'as reservas online foram tentadas antes do motor local');
@@ -74,7 +76,7 @@ test('sem o motor online, o .voz cai no motor local offline (grátis) e não rep
   // Na segunda vez os motores que falharam estão em cooldown: o áudio sai na
   // hora pelo motor local, sem nenhuma chamada de rede.
   const callsBefore = calls.length;
-  const second = await aiVoiceFull('tudo bem?', 'antonio');
+  const second = await aiVoiceFull('tudo bem?', 'masculina grossa');
   assert.equal(second.engine, 'espeak');
   assert.equal(calls.length, callsBefore, 'não deve tentar de novo provedor que acabou de falhar');
 });

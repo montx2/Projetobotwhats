@@ -5,10 +5,11 @@
 // aviso, em vez de falharem por um motivo que não tem nada a ver com o código.
 //
 // O que é coberto:
-//   • `.vozes` mostra o catálogo com os personagens;
-//   • `.vozpadrao bob` grava a escolha só naquele chat e `.vozpadrao auto` limpa;
-//   • `.voz bob <texto>` usa a voz pedida e envia o áudio (rede de mentira);
-//   • `.voz` sem texto explica o uso em vez de gerar áudio à toa;
+//   • `.vozes` mostra o card com vozes, tons e como configurar;
+//   • `.vozpadrao masculina grossa` grava a escolha só naquele chat e
+//     `.vozpadrao auto` limpa;
+//   • `.voz masculina grossa <texto>` usa o que foi pedido e envia o áudio;
+//   • `.voz` sem texto mostra a ajuda em vez de gerar áudio à toa;
 //   • `.criar --formato 9:16 --hd` monta a legenda com o que foi usado.
 
 import test from 'node:test';
@@ -73,7 +74,7 @@ const deps = {
 
 const lastText = (sock) => String(sock.sent.at(-1)?.content?.text || '');
 
-test('roteador: .vozes lista o catálogo e .vozpadrao grava a voz do chat', { skip: skipReason }, async () => {
+test('roteador: .vozes explica a configuração e .vozpadrao salva voz + tom', { skip: skipReason }, async () => {
   const { DEFAULT_CONFIG, cfg } = await import('../src/core/config.js');
   Object.assign(cfg.get(), structuredClone(DEFAULT_CONFIG));
   const jid = OWNER; // privado do dono
@@ -81,14 +82,29 @@ test('roteador: .vozes lista o catálogo e .vozpadrao grava a voz do chat', { sk
 
   await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.vozes' }), deps);
   const menu = lastText(sock);
-  assert.match(menu, /PERSONAGENS E PARÓDIAS/i);
-  assert.match(menu, /\.voz bob <texto>/);
-  assert.match(menu, /\.voz lula <texto>/);
+  // O card ensina o caminho inteiro: voz, tom e ajuste fino.
+  assert.match(menu, /TOM \(GROSSA ⇄ FINA\)/i);
+  assert.match(menu, /\.voz masculina <texto>/);
+  assert.match(menu, /\.voz grossa <texto>/);
+  assert.match(menu, /--tom -60 a \+60/);
+  assert.match(menu, /\.vozpadrao masculina grossa/);
+  assert.doesNotMatch(menu, /personagem/i);
+  assert.doesNotMatch(menu, /\.voz bob/);
 
-  await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.vozpadrao bob' }), deps);
-  assert.match(lastText(sock), /Voz deste chat trocada/i);
-  assert.equal(cfg.get().ia.vozChats[jid], 'bob');
+  await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.vozpadrao masculina grossa' }), deps);
+  assert.match(lastText(sock), /Voz deste chat salva/i);
+  assert.match(lastText(sock), /tom -25% \(grossa\)/);
+  assert.equal(cfg.get().ia.vozChats[jid], 'masculina --tom grossa');
   assert.equal(cfg.get().ia.vozPadrao, 'auto');
+
+  // Ajustar só o tom mantém a voz que já estava salva.
+  await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.vozpadrao --tom -40' }), deps);
+  assert.equal(cfg.get().ia.vozChats[jid], 'masculina --tom -40');
+
+  // Sem argumento, mostra o que está salvo.
+  await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.vozpadrao' }), deps);
+  assert.match(lastText(sock), /Configuração atual/i);
+  assert.match(lastText(sock), /tom -40%/);
 
   await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.vozpadrao auto' }), deps);
   assert.match(lastText(sock), /padrão/i);
@@ -98,7 +114,7 @@ test('roteador: .vozes lista o catálogo e .vozpadrao grava a voz do chat', { sk
   assert.match(lastText(sock), /não existe/i);
 });
 
-test('roteador: .voz sem texto explica o uso; .voz bob envia áudio', { skip: skipReason }, async (t) => {
+test('roteador: .voz sem texto mostra a ajuda; .voz masculina grossa envia áudio', { skip: skipReason }, async (t) => {
   const { DEFAULT_CONFIG, cfg } = await import('../src/core/config.js');
   Object.assign(cfg.get(), structuredClone(DEFAULT_CONFIG));
   const originalFetch = globalThis.fetch;
@@ -129,15 +145,21 @@ test('roteador: .voz sem texto explica o uso; .voz bob envia áudio', { skip: sk
   const sock = makeSock(OWNER);
 
   await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.voz' }), deps);
-  assert.match(lastText(sock), /\.voz \[voz\] <texto>/);
+  assert.match(lastText(sock), /COMO USAR/i);
+  assert.match(lastText(sock), /\.voz grossa <texto>/);
 
-  await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.voz bob bom dia, pessoal' }), deps);
+  await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.voz masculina grossa bom dia, pessoal' }), deps);
   const audio = sock.sent.find((entry) => entry.content?.audio);
   assert.ok(audio, 'o áudio precisa ter sido enviado');
   assert.ok(audio.content.audio.length > 1000);
   assert.match(lastText(sock), /Áudio pronto/);
-  assert.match(lastText(sock), /Bob Esponja/);
+  // A legenda conta a configuração usada — é assim que o usuário confere o tom.
+  assert.match(lastText(sock), /Masculina · tom -25% \(grossa\)/);
   assert.ok(calls.some((url) => url.includes('streamelements.com')));
+
+  // Só o tom, sem trocar de voz e sem escrever texto: sai a prévia.
+  await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.voz fina' }), deps);
+  assert.match(lastText(sock), /tom \+25% \(fina\)/);
 
   // .criar com atalhos: a legenda conta o formato e o motor usados.
   await router.handleMessage(sock, makeMessage(jid, OWNER, { text: '.criar um dragão roxo --formato 9:16 --bruto --seed 5' }), deps);
@@ -153,7 +175,8 @@ test('roteador: .menuvoz e .menucriar respondem os cartões de ajuda', { skip: s
   Object.assign(cfg.get(), structuredClone(DEFAULT_CONFIG));
   const sock = makeSock(OWNER);
   await router.handleMessage(sock, makeMessage(OWNER, OWNER, { text: '.menuvoz' }), deps);
-  assert.match(lastText(sock), /VOZES BRASILEIRAS/i);
+  assert.match(lastText(sock), /AJUSTE FINO/i);
+  assert.match(lastText(sock), /\.voz feminina grossa oi/);
   await router.handleMessage(sock, makeMessage(OWNER, OWNER, { text: '.menucriar' }), deps);
   assert.match(lastText(sock), /ATALHOS DO \.CRIAR/i);
 });
