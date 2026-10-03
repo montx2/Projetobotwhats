@@ -33,6 +33,12 @@ import {
   sniffImage
 } from '../src/util/imageinfo.js';
 import { DEFAULT_CONFIG, normalizeConfig } from '../src/core/config.js';
+import {
+  findDisallowedLinks,
+  isBotGroupAdministrator,
+  isGroupAdministrator,
+  normalizeAllowDomain
+} from '../src/features/group-tools.js';
 
 test('logger oculta JIDs e valores de credenciais', () => {
   const originalLog = console.log;
@@ -301,8 +307,9 @@ test('recursos que copiam mensagens são opt-in e limitados por chat', () => {
   assert.deepEqual(DEFAULT_CONFIG.autorizados, []);
   assert.deepEqual(DEFAULT_CONFIG.viewOnce.autoChats, []);
   assert.deepEqual(DEFAULT_CONFIG.antiDelete.chats, []);
+  assert.deepEqual(DEFAULT_CONFIG.grupos, {});
   assert.equal(DEFAULT_CONFIG.autoDownload, false);
-  assert.equal(DEFAULT_CONFIG._schemaVersion, 3);
+  assert.equal(DEFAULT_CONFIG._schemaVersion, 4);
 });
 
 test('migração de config antiga desativa captura e auto-download sem apagar acesso', () => {
@@ -318,10 +325,57 @@ test('migração de config antiga desativa captura e auto-download sem apagar ac
   assert.deepEqual(clean.antiDelete.chats, []);
   assert.deepEqual(clean.antiDelete.ignorar, ['grupos']);
   assert.equal(clean.autoDownload, false);
-  assert.equal(clean._schemaVersion, 3);
+  assert.equal(clean._schemaVersion, 4);
+});
+
+test('configuração de grupo normaliza JID, defaults e allowlist com limites seguros', () => {
+  const clean = normalizeConfig({
+    _schemaVersion: 4,
+    grupos: {
+      '5511999999999:2@g.us': {
+        welcome: true,
+        goodbye: 'true',
+        antiLink: { enabled: true, allowlist: ['www.Example.com', 'example.com', '*.evil.test', 'bad host'] }
+      },
+      'contato@s.whatsapp.net': { welcome: true }
+    }
+  });
+  assert.deepEqual(clean.grupos, {
+    '5511999999999@g.us': {
+      welcome: true,
+      goodbye: false,
+      antiLink: { enabled: true, allowlist: ['example.com'] }
+    }
+  });
+});
+
+test('allowlist de anti-link aceita somente domínios e corresponde a subdomínios por limite de rótulo', () => {
+  assert.equal(normalizeAllowDomain('www.example.com'), 'example.com');
+  assert.equal(normalizeAllowDomain('*.example.com'), null);
+  assert.equal(normalizeAllowDomain('https://example.com/path'), null);
+  assert.equal(normalizeAllowDomain('127.0.0.1'), null);
+  assert.deepEqual(
+    findDisallowedLinks('https://example.com/a https://sub.example.com https://notexample.com', ['example.com']),
+    ['https://notexample.com']
+  );
+  assert.deepEqual(findDisallowedLinks('example.com www.example.com contato@example.com evil.test', ['example.com']), ['evil.test']);
+  const manyLinks = Array.from({ length: 17 }, (_, index) => `https://host${index}.test`).join(' ');
+  assert.ok(findDisallowedLinks(manyLinks, ['example.com']).includes('[excesso de links]'));
 });
 
 // ── Roteamento de plataformas ────────────────────────────────
+test('autorização de grupo compara IDs LID/PN e respeita isSuperAdmin do Baileys', () => {
+  const metadata = {
+    participants: [
+      { id: 'user-lid@lid', jid: '5531999991111@s.whatsapp.net', isSuperAdmin: true },
+      { id: 'bot-lid@lid', jid: '5531999992222@s.whatsapp.net', admin: 'admin' }
+    ]
+  };
+  assert.equal(isGroupAdministrator(metadata, { participantLid: 'user-lid@lid' }), true);
+  assert.equal(isGroupAdministrator(metadata, { participantPn: '5531999991111@s.whatsapp.net' }), true);
+  assert.equal(isBotGroupAdministrator(metadata, { user: { id: '5531999992222:1@s.whatsapp.net' } }), true);
+});
+
 test('detecta TikTok, Pinterest e Instagram', () => {
   assert.ok(isTikTokUrl('https://vm.tiktok.com/ZM123/'));
   assert.ok(isTikTokUrl('https://www.tiktok.com/@user/video/123'));

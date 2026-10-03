@@ -22,6 +22,9 @@ export const DEFAULT_CONFIG = {
   viewOnce: { autoChats: [] },
   antiDelete: { chats: [], ignorar: [] },
 
+  // Ferramentas de grupo são sempre opt-in e armazenadas separadas por JID.
+  grupos: {},
+
   autoDownload: false,
   qualidadePadrao: 'melhor',
   maxMB: 90,
@@ -33,7 +36,7 @@ export const DEFAULT_CONFIG = {
       'Responda sempre em português do Brasil, de forma curta e útil. Use emojis com muita moderação.'
   },
   responderDesconhecido: false,
-  _schemaVersion: 3
+  _schemaVersion: 4
 };
 
 const FILE = 'config.json';
@@ -63,6 +66,7 @@ export function normalizeConfig(saved) {
       chats: migrated ? [] : stringList(source.antiDelete?.chats),
       ignorar: stringList(source.antiDelete?.ignorar)
     },
+    grupos: normalizeGroupSettings(source.grupos),
     autoDownload: migrated ? false : source.autoDownload === true,
     qualidadePadrao: ['melhor', 'alta', 'media', 'baixa'].includes(source.qualidadePadrao)
       ? source.qualidadePadrao
@@ -74,7 +78,7 @@ export function normalizeConfig(saved) {
       sistema: typeof iaSystem === 'string' ? iaSystem.slice(0, 4000) : base.ia.sistema
     },
     responderDesconhecido: source.responderDesconhecido === true,
-    _schemaVersion: 3
+    _schemaVersion: 4
   };
 }
 
@@ -113,12 +117,12 @@ class Config {
   }
 
   save() {
-    this.data._schemaVersion = 3;
+    this.data._schemaVersion = 4;
     writeJsonNow(FILE, this.data);
   }
 
   saveDebounced() {
-    this.data._schemaVersion = 3;
+    this.data._schemaVersion = 4;
     writeJsonDebounced(FILE, this.data);
   }
 
@@ -132,6 +136,43 @@ function stringList(value) {
   return Array.isArray(value)
     ? [...new Set(value.map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 500)
     : [];
+}
+
+function normalizeGroupSettings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result = {};
+  for (const [rawJid, rawSettings] of Object.entries(value).slice(0, 500)) {
+    const jid = String(rawJid || '').trim().toLowerCase().replace(/:\d+@/, '@');
+    if (!jid.endsWith('@g.us') || jid.length > 180) continue;
+    const settings = rawSettings && typeof rawSettings === 'object' && !Array.isArray(rawSettings) ? rawSettings : {};
+    const antiLink = settings.antiLink && typeof settings.antiLink === 'object' && !Array.isArray(settings.antiLink)
+      ? settings.antiLink
+      : {};
+    result[jid] = {
+      welcome: settings.welcome === true,
+      goodbye: settings.goodbye === true,
+      antiLink: {
+        enabled: antiLink.enabled === true,
+        allowlist: normalizeDomainList(antiLink.allowlist)
+      }
+    };
+  }
+  return result;
+}
+
+function normalizeDomainList(value) {
+  if (!Array.isArray(value)) return [];
+  const domains = [];
+  for (const item of value) {
+    const domain = String(item || '').trim().toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+    const labels = domain.split('.');
+    const validLabel = (label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label);
+    const validTld = /^[a-z]{2,63}$|^xn--[a-z0-9-]{2,59}$/.test(labels.at(-1) || '');
+    if (labels.length < 2 || labels.some((label) => !validLabel(label)) || !validTld) continue;
+    if (!domains.includes(domain)) domains.push(domain);
+    if (domains.length >= 50) break;
+  }
+  return domains;
 }
 
 function clampNumber(value, min, max, fallback) {

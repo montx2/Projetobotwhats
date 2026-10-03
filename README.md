@@ -1,6 +1,6 @@
 # MontxBOT
 
-Bot de WhatsApp Multi-Device baseado em **Baileys 6.7.24**. Inclui figurinhas, downloads de links, utilitários de IA e funções de moderação/retensão **desativadas por padrão quando copiam mensagens**. Feito para Termux, Linux e Windows.
+Bot de WhatsApp Multi-Device baseado em **Baileys 6.7.24**. Inclui figurinhas, downloads de links, utilitários de IA e ferramentas de grupo opt-in: enquetes, boas-vindas/saída e proteção anti-link. Recursos que copiam ou retêm conteúdo pessoal começam desativados. Feito para Termux, Linux e Windows.
 
 > **Aviso importante:** Baileys é uma integração não oficial. O WhatsApp pode alterar o protocolo, limitar ou encerrar sessões. Use uma conta sob seu controle, respeite as regras do WhatsApp, a legislação local, direitos autorais e a privacidade/consentimento das pessoas. Este projeto não promete disponibilidade nem proteção contra bloqueios.
 
@@ -72,6 +72,25 @@ A retenção também é opt-in por chat. Mensagens recuperáveis são encaminhad
 
 **Retenção local:** até 24 horas, no máximo 100 mensagens por chat e 1.000 no total. A mídia do WhatsApp é lida em stream, limitada a 64 MiB. A persistência em `data/cache/messages.json` ocorre somente para chats com Anti-Delete habilitado; a configuração e os dados de runtime ficam em `data/`, ignorados pelo Git. Não coloque backups dessa pasta em local público.
 
+### Recursos de grupo (opt-in)
+
+O dono precisa liberar o grupo com `.ativar` antes. Boas-vindas, mensagem de saída e anti-link começam **desligados**; somente administradores do grupo (ou o dono do bot) podem alterar essas configurações. Ao usar `.desativar` no grupo, suas configurações locais também são removidas.
+
+```text
+.boasvindas                         → consulta o status
+.boasvindas on | off                → liga/desliga saudação de entrada
+.boasvindas saida on | off          → liga/desliga saudação de saída
+.antilink                           → consulta status e domínios permitidos
+.antilink on | off                  → liga/desliga a proteção de links
+.antilink permitir exemplo.com      → permite o domínio e seus subdomínios
+.antilink remover exemplo.com       → remove o domínio permitido
+.enquete pergunta | opção 1 | opção 2 → cria uma enquete de escolha única
+```
+
+A proteção de links considera URLs HTTP(S), links `www.` e domínios simples, ignora mensagens de administradores e só remove mensagens quando o próprio bot é administrador. Se perder essa permissão ou não conseguir confirmar os metadados, não tenta apagar; também não encaminha o link para comandos/downloads. A lista aceita até 50 domínios por grupo; não aceita URL completa, IP, porta ou curinga. Há limite de até 20 tentativas de remoção de links por grupo/minuto; acima disso a proteção bloqueia o processamento do link sem continuar apagando. Boas-vindas/saídas usam uma mensagem fixa e menções limitadas, sem guardar histórico de participantes (até 5 eventos anunciados por grupo/minuto). Enquetes aceitam de 2 a 12 opções, com limite de 2 por usuário a cada 5 minutos e 20 por grupo/hora.
+
+Esses controles ajudam a reduzir spam e links indesejados, mas **não são moderação completa e não garantem que ninguém publique ou use conteúdo ilegal**. Administradores continuam responsáveis por revisar as regras e as mensagens do grupo.
+
 ### IA e dados enviados a terceiros
 
 Os comandos de IA usam provedores externos configurados (ou Pollinations quando não há outras chaves). Perguntas, trechos citados, descrições de imagem e texto de voz podem ser enviados ao provedor escolhido para gerar a resposta. **Não envie senhas, dados de pagamento ou informações sensíveis.**
@@ -100,6 +119,7 @@ A memória de conversa é isolada por chat e remetente, fica apenas em RAM por a
 .voz <texto>                    → texto para áudio
 .traduz <idioma> <texto>        → tradução
 .resumo <texto>                 → resumo
+.enquete pergunta | opção 1 | opção 2 → enquete de escolha única no grupo
 ```
 
 Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Faça downloads somente de conteúdo que você tem direito e autorização para acessar.

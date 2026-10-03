@@ -11,6 +11,7 @@ setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
 
 const { DEFAULT_CONFIG, cfg } = await import('../src/core/config.js');
 const { handleMessage } = await import('../src/features/router.js');
+const { handleGroupParticipantsUpdate } = await import('../src/features/group-tools.js');
 const { messageCache } = await import('../src/wa/cache.js');
 
 beforeEach(() => {
@@ -30,6 +31,7 @@ function makeSock() {
       sent.push(entry);
       return { key: { id: `SENT${sent.length}`, remoteJid: jid } };
     },
+    groupMetadata: async (jid) => ({ id: jid, participants: [] }),
     updateMediaMessage: async () => {
       throw new Error('sem mídia no mock');
     }
@@ -147,6 +149,8 @@ test('autorização: ". ativar" libera TUDO no grupo/privado, MENOS View Once e 
   assert.match(publicReply, /FIGURINHAS/i, 'menu público mostra figurinhas');
   assert.match(publicReply, /DOWNLOADS/i, 'menu público mostra downloads');
   assert.match(publicReply, /INTELIG/i, 'menu público mostra IA');
+  assert.match(publicReply, /\.antilink/i, 'menu público apresenta as novas ferramentas de grupo');
+  assert.match(publicReply, /\.enquete/i, 'menu público apresenta enquetes');
   assert.ok(!/VIEW ONCE/i.test(publicReply), 'menu público NUNCA deve mostrar View Once');
   assert.ok(!/ANTI-DELETE/i.test(publicReply), 'menu público NUNCA deve mostrar Anti-Delete');
 
@@ -169,6 +173,228 @@ test('autorização: ". ativar" libera TUDO no grupo/privado, MENOS View Once e 
   const afterDeactivate = sock.sent.length;
   await handleMessage(sock, textMsg(groupJid, '.menu', { from: friendJid, fromMe: false }), deps);
   assert.equal(sock.sent.length, afterDeactivate, 'Após .desativar, o grupo volta a ficar 100% silencioso');
+});
+
+test('anti-link: somente grupos autorizados e opt-in; allowlist e administradores são respeitados', async () => {
+  const group = 'anti-link-seguro@g.us';
+  const wrappedGroup = 'anti-link-efimero@g.us';
+  const randomGroup = 'anti-link-nao-autorizado@g.us';
+  const member = '5531991112222@s.whatsapp.net';
+  const admin = '5531993334444@s.whatsapp.net';
+  cfg.get().autorizados = [group];
+  cfg.get().grupos[group] = {
+    welcome: false,
+    goodbye: false,
+    antiLink: { enabled: true, allowlist: ['example.com'] }
+  };
+  cfg.get().autorizados.push(wrappedGroup);
+  cfg.get().grupos[wrappedGroup] = {
+    welcome: false,
+    goodbye: false,
+    antiLink: { enabled: true, allowlist: ['example.com'] }
+  };
+
+  const sock = makeSock();
+  let metadataCalls = 0;
+  sock.groupMetadata = async (jid) => {
+    metadataCalls++;
+    return {
+      id: jid,
+      participants: [
+        { id: sock.user.id, admin: 'admin' },
+        { id: member },
+        { id: admin, admin: 'admin' }
+      ]
+    };
+  };
+  const deps = makeDeps(sock);
+
+  await handleMessage(sock, textMsg(randomGroup, 'https://spam.example/promo', { from: member, fromMe: false }), deps);
+  assert.equal(metadataCalls, 0, 'grupos não autorizados não consultam metadados nem moderam');
+  assert.equal(sock.sent.length, 0);
+
+  await handleMessage(sock, textMsg(group, 'https://sub.example.com/ok', { from: member, fromMe: false }), deps);
+  assert.equal(sock.sent.length, 0, 'domínio permitido inclui subdomínios');
+
+  const violation = textMsg(group, 'https://spam.example/promo', { from: member, fromMe: false, id: 'SPAM_LINK' });
+  await handleMessage(sock, violation, deps);
+  assert.equal(sock.sent.length, 1);
+  assert.equal(sock.sent[0].content.delete.id, 'SPAM_LINK');
+
+  const wrapped = textMsg(wrappedGroup, 'invólucro', { from: member, fromMe: false, id: 'WRAPPED_LINK' });
+  wrapped.message = { ephemeralMessage: { message: { extendedTextMessage: { text: 'spam.example/promo' } } } };
+  await handleMessage(sock, wrapped, deps);
+  assert.equal(sock.sent[1].content.delete.id, 'WRAPPED_LINK', 'mensagens efêmeras também passam pelo filtro');
+
+  const viewOnce = textMsg(wrappedGroup, 'view once', { from: member, fromMe: false, id: 'VIEW_ONCE_LINK' });
+  viewOnce.message = { viewOnceMessage: { message: { extendedTextMessage: { text: 'https://spam.example/private' } } } };
+  await handleMessage(sock, viewOnce, deps);
+  assert.equal(sock.sent.length, 2, 'o filtro não abre conteúdo View Once');
+
+  await handleMessage(sock, textMsg(group, 'https://spam.example/admin', { from: admin, fromMe: false }), deps);
+  assert.equal(sock.sent.length, 2, 'links enviados por administradores não são apagados');
+});
+
+test('anti-link: sem admin do bot, bloqueia comandos com link sem tentar apagar', async () => {
+  const group = 'anti-link-sem-admin@g.us';
+  const member = '5531995556666@s.whatsapp.net';
+  cfg.get().autorizados = [group];
+  cfg.get().grupos[group] = {
+    welcome: false,
+    goodbye: false,
+    antiLink: { enabled: true, allowlist: [] }
+  };
+
+  const sock = makeSock();
+  sock.groupMetadata = async (jid) => ({
+    id: jid,
+    participants: [{ id: member }, { id: sock.user.id, admin: null }]
+  });
+  await handleMessage(sock, textMsg(group, '.dl https://youtube.com/watch?v=abc', { from: member, fromMe: false }), makeDeps(sock));
+  assert.equal(sock.sent.length, 0, 'link não segue para o downloader quando o bot não pode moderá-lo');
+});
+
+test('anti-link: se não consegue confirmar os metadados, não processa o link', async () => {
+  const group = 'grupo-metadata-indisponivel@g.us';
+  const member = '5531995557777@s.whatsapp.net';
+  cfg.get().autorizados = [group];
+  cfg.get().grupos[group] = {
+    welcome: false,
+    goodbye: false,
+    antiLink: { enabled: true, allowlist: [] }
+  };
+  const sock = makeSock();
+  sock.groupMetadata = async () => { throw new Error('metadados indisponíveis'); };
+
+  await handleMessage(sock, textMsg(group, '.dl https://youtube.com/watch?v=abc', { from: member, fromMe: false }), makeDeps(sock));
+  assert.equal(sock.sent.length, 0, 'falha de verificação não libera download nem tenta excluir');
+});
+
+test('configuração de grupo: boas-vindas e anti-link exigem admin; ativar anti-link exige o bot admin', async () => {
+  const group = 'grupo-config-segura@g.us';
+  const admin = '5531977001122@s.whatsapp.net';
+  const member = '5531977003344@s.whatsapp.net';
+  cfg.get().autorizados = [group];
+  const sock = makeSock();
+  sock.groupMetadata = async (jid) => ({
+    id: jid,
+    participants: [
+      { id: sock.user.id, admin: 'admin' },
+      { id: admin, admin: 'admin' },
+      { id: member }
+    ]
+  });
+  const deps = makeDeps(sock);
+
+  await handleMessage(sock, textMsg(group, '.boasvindas on', { from: admin, fromMe: false }), deps);
+  await handleMessage(sock, textMsg(group, '.boasvindas saida on', { from: admin, fromMe: false }), deps);
+  await handleMessage(sock, textMsg(group, '.antilink permitir example.com', { from: admin, fromMe: false }), deps);
+  await handleMessage(sock, textMsg(group, '.antilink on', { from: admin, fromMe: false }), deps);
+
+  assert.equal(cfg.get().grupos[group].welcome, true);
+  assert.equal(cfg.get().grupos[group].goodbye, true);
+  assert.equal(cfg.get().grupos[group].antiLink.enabled, true);
+  assert.deepEqual(cfg.get().grupos[group].antiLink.allowlist, ['example.com']);
+
+  await handleMessage(sock, textMsg(group, '.antilink off', { from: member, fromMe: false }), deps);
+  assert.equal(cfg.get().grupos[group].antiLink.enabled, true, 'membro comum não pode mudar as regras');
+  assert.match(sock.sent.at(-1).content.text || '', /administradores do grupo/i);
+});
+
+test('antilink não pode ser ativado antes de o bot receber permissão de administrador', async () => {
+  const group = 'grupo-bot-sem-admin@g.us';
+  const admin = '5531977550001@s.whatsapp.net';
+  cfg.get().autorizados = [group];
+  const sock = makeSock();
+  sock.groupMetadata = async (jid) => ({
+    id: jid,
+    participants: [{ id: sock.user.id }, { id: admin, admin: 'admin' }]
+  });
+
+  await handleMessage(sock, textMsg(group, '.antilink on', { from: admin, fromMe: false }), makeDeps(sock));
+  assert.equal(cfg.get().grupos[group], undefined, 'a proteção permanece desligada');
+  assert.match(sock.sent.at(-1).content.text || '', /promova o bot a administrador/i);
+});
+
+test('autorização individual de participante não habilita moderação, enquetes ou ajustes do grupo', async () => {
+  const group = 'grupo-nao-liberado@g.us';
+  const member = '5531990001234@s.whatsapp.net';
+  cfg.get().autorizados = [member];
+  cfg.get().grupos[group] = {
+    welcome: false,
+    goodbye: false,
+    antiLink: { enabled: true, allowlist: [] }
+  };
+  const sock = makeSock();
+  let metadataCalls = 0;
+  sock.groupMetadata = async () => {
+    metadataCalls++;
+    return { participants: [{ id: member, admin: 'admin' }, { id: sock.user.id, admin: 'admin' }] };
+  };
+  const deps = makeDeps(sock);
+
+  await handleMessage(sock, textMsg(group, 'https://spam.example/promo', { from: member, fromMe: false }), deps);
+  await handleMessage(sock, textMsg(group, '.enquete Pergunta? | Sim | Não', { from: member, fromMe: false }), deps);
+  await handleMessage(sock, textMsg(group, '.antilink off', { from: member, fromMe: false }), deps);
+
+  assert.equal(metadataCalls, 0, 'ferramentas de grupo exigem autorização explícita do JID do grupo');
+  assert.equal(sock.sent.filter((entry) => entry.content.delete || entry.content.poll).length, 0);
+  assert.equal(cfg.get().grupos[group].antiLink.enabled, true);
+});
+
+test('revogar grupo remove suas configurações opt-in locais', async () => {
+  const group = 'grupo-revogado@g.us';
+  cfg.get().autorizados = [group];
+  cfg.get().grupos[group] = {
+    welcome: true,
+    goodbye: true,
+    antiLink: { enabled: true, allowlist: ['example.com'] }
+  };
+  const sock = makeSock();
+
+  await handleMessage(sock, textMsg(group, '.desativar', { from: OWNER_JID, fromMe: true }), makeDeps(sock));
+  assert.equal(cfg.get().autorizados.includes(group), false);
+  assert.equal(Object.hasOwn(cfg.get().grupos, group), false);
+});
+
+test('saudações de grupo só enviam eventos add/remove com opt-in e grupo autorizado', async () => {
+  const welcomeGroup = 'welcome-opt-in@g.us';
+  const goodbyeGroup = 'goodbye-opt-in@g.us';
+  const closedGroup = 'welcome-fechado@g.us';
+  const newcomer = '5531988880000@s.whatsapp.net';
+  cfg.get().autorizados = [welcomeGroup, goodbyeGroup];
+  cfg.get().grupos[welcomeGroup] = { welcome: true, goodbye: false, antiLink: { enabled: false, allowlist: [] } };
+  cfg.get().grupos[goodbyeGroup] = { welcome: false, goodbye: true, antiLink: { enabled: false, allowlist: [] } };
+  cfg.get().grupos[closedGroup] = { welcome: true, goodbye: false, antiLink: { enabled: false, allowlist: [] } };
+
+  const sock = makeSock();
+  await handleGroupParticipantsUpdate(sock, { id: welcomeGroup, action: 'add', participants: [newcomer] });
+  await handleGroupParticipantsUpdate(sock, { id: goodbyeGroup, action: 'remove', participants: [newcomer] });
+  await handleGroupParticipantsUpdate(sock, { id: closedGroup, action: 'add', participants: [newcomer] });
+  await handleGroupParticipantsUpdate(sock, { id: welcomeGroup, action: 'promote', participants: [newcomer] });
+
+  assert.equal(sock.sent.length, 2);
+  assert.match(sock.sent[0].content.text, /@5531988880000/);
+  assert.deepEqual(sock.sent[0].content.mentions, [newcomer]);
+  assert.match(sock.sent[1].content.text, /Até mais/);
+});
+
+test('enquetes validam opções e limitam envios por usuário/grupo', async () => {
+  const group = 'enquete-limitada@g.us';
+  const member = '5531977554433@s.whatsapp.net';
+  cfg.get().autorizados = [group];
+  const sock = makeSock();
+  const deps = makeDeps(sock);
+
+  await handleMessage(sock, textMsg(group, '.enquete Pizza ou massa? | Pizza | Massa', { from: member, fromMe: false }), deps);
+  await handleMessage(sock, textMsg(group, '.enquete Café? | Sim | Não', { from: member, fromMe: false }), deps);
+
+  assert.equal(sock.sent.filter((entry) => entry.content.poll).length, 1, 'o limite silencioso bloqueia enquete repetida');
+  assert.deepEqual(sock.sent[0].content.poll, {
+    name: 'Pizza ou massa?',
+    values: ['Pizza', 'Massa'],
+    selectableCount: 1
+  });
 });
 
 test('anti-delete: sem opt-in mensagens não entram no cache', async () => {

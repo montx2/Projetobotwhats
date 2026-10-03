@@ -1,9 +1,8 @@
 // 🎨 MENUS — separados em 2 versões:
 // 1) ownerMenu(): menu COMPLETO que só aparece no privado do dono.
 // 2) publicMenu(): menu para grupos/conversas liberadas com .ativar.
-//    Mostra TUDO (figurinhas, downloads de qualquer rede, IA, voz…)
-//    MENOS as duas funções 100% privadas: View Once e Anti-Delete,
-//    que não são citadas em nenhum lugar e não respondem para terceiros.
+//    Mostra comandos públicos e ferramentas de grupo (estas, só para admins)
+//    MENOS View Once e Anti-Delete, que são 100% privados e não aparecem para terceiros.
 
 import { cfg } from '../core/config.js';
 import { PLATFORM, PLATFORM_LABEL } from '../core/platform.js';
@@ -37,7 +36,7 @@ const AI_ITEMS = [
 
 /**
  * Menu público para chats/grupos liberados com .ativar.
- * Regra: ZERO menção a View Once e Anti-Delete. Todo o resto aparece.
+ * Nunca menciona View Once/Anti-Delete; comandos de administração de grupo são validados no roteador.
  */
 export function publicMenu() {
   const nome = cfg.get().nomeBot;
@@ -51,8 +50,15 @@ export function publicMenu() {
     section('Utilidades', [
       ['.menu', 'este painel'],
       ['.ping', 'testa a velocidade'],
-      ['.info', 'status do bot']
+      ['.info', 'status do bot'],
+      ['.enquete pergunta | opção 1 | opção 2', 'cria uma enquete no grupo']
     ]),
+    section('Gestão do grupo', [
+      ['.boasvindas on | off', 'mensagem automática ao entrar'],
+      ['.boasvindas saida on | off', 'mensagem quando alguém sai'],
+      ['.antilink on | off', 'proteção de links'],
+      ['.antilink permitir <domínio>', 'libera um domínio e subdomínios']
+    ], { note: 'Alterações por admin do grupo ou dono do bot; anti-link exige o bot como administrador.' }),
     footer('Envie uma mídia com .s  ·  Mande .s <link> e eu já monto a figurinha')
   ]);
 }
@@ -68,6 +74,13 @@ export function ownerMenu() {
       ['.desativar tudo', 'bloqueia todos de uma vez'],
       ['.ativos', 'lista os chats liberados']
     ]),
+    section('Grupo (use dentro do grupo)', [
+      ['.enquete pergunta | opção 1 | opção 2', 'cria uma enquete'],
+      ['.boasvindas on | off', 'entrada de novos membros'],
+      ['.boasvindas saida on | off', 'mensagem quando alguém sai'],
+      ['.antilink on | off', 'remove links fora da lista permitida'],
+      ['.antilink permitir <domínio>', 'libera um domínio e subdomínios']
+    ], { note: 'Boas-vindas e anti-link vêm desligados; alterações por admin do grupo ou dono do bot.' }),
     section('View Once', [['.vo', 'status'], ['.vo on | off', 'automação opt-in por chat']], {
       note: 'mídias capturadas são enviadas somente ao privado do dono'
     }),

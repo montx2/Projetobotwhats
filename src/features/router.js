@@ -5,9 +5,8 @@
 //    (0 rastros nos chats/grupos) e são as ÚNICAS funções invisíveis para os outros.
 // 2) Por padrão, o bot SÓ funciona no privado do próprio dono.
 // 3) Quando o dono dá `.ativar` (ou `. ativar`) em um grupo ou chat privado,
-//    aquele chat ganha acesso a TUDO — figurinhas, downloads de qualquer rede,
-//    IA e afins. As duas únicas coisas que nunca aparecem nem respondem para
-//    terceiros são View Once e Anti-Delete.
+//    aquele chat ganha acesso aos comandos públicos. View Once e Anti-Delete
+//    continuam privados; configurações de grupo exigem administrador do grupo.
 
 import { isStale, alreadySeen } from '../core/freshness.js';
 import { cfg, envSummary } from '../core/config.js';
@@ -31,7 +30,18 @@ import {
   antiDeleteMenu,
   infoText
 } from './menu.js';
-import { extractUrls, truncate, uptimeText, isGroup, normalizeJid } from '../util/text.js';
+import { extractUrls, truncate, uptimeText, isGroup, normalizeJid, parseBool } from '../util/text.js';
+import {
+  clearGroupSettings,
+  ensureGroupSettings,
+  getGroupMetadata,
+  getGroupSettings,
+  isBotGroupAdministrator,
+  moderateIncomingGroupLinks,
+  normalizeAllowDomain,
+  requireAuthorizedGroup,
+  requireGroupAdministrator
+} from './group-tools.js';
 import { hasFfmpeg } from '../util/ffmpeg.js';
 import { cobaltPool } from './downloaders/cobalt.js';
 import { hasYtDlp, isYtdlpEnabled, findYtdlp } from './downloaders/ytdlp.js';
@@ -39,6 +49,10 @@ import { SlidingWindowLimiter } from '../core/limiter.js';
 
 const STARTED_AT = Date.now();
 const expensiveLimiter = new SlidingWindowLimiter({ limit: 6, windowMs: 60_000, minIntervalMs: 2_000 });
+const pollUserLimiter = new SlidingWindowLimiter({ limit: 2, windowMs: 5 * 60_000, minIntervalMs: 30_000, maxKeys: 5000 });
+const pollGroupLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60 * 60_000, minIntervalMs: 5_000, maxKeys: 1024 });
+const groupControlLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60_000, minIntervalMs: 0, maxKeys: 5000 });
+const GROUP_CONTROL_COMMANDS = new Set(['boasvindas', 'bemvindo', 'welcome', 'antilink', 'anti-link']);
 const MAX_CONCURRENT_EXPENSIVE = 3;
 let activeExpensive = 0;
 const EXPENSIVE_COMMANDS = new Set([
@@ -388,6 +402,10 @@ export async function handleMessage(sock, msg, deps) {
     return;
   }
 
+  // Moderação de links só roda em grupos autorizados e com opt-in explícito.
+  // Se houver violação, a mensagem não segue para comandos nem auto-download.
+  if (authorized && isGroup(jid) && await moderateIncomingGroupLinks(sock, msg, text, { owner: senderIsOwner })) return;
+
   // Automação View Once requer habilitação explícita para este JID.
   const autoViewOnce = cfg.get().viewOnce.autoChats || [];
   if (!msg.key.fromMe && allowedChat && autoViewOnce.some((chat) => bareId(chat) === bareId(jid)) && viewOnce) {
@@ -401,8 +419,8 @@ export async function handleMessage(sock, msg, deps) {
   // 4) CONTROLE DE ACESSO:
   // • No privado do dono (inOwnerPrivate): acesso TOTAL, inclusive View Once e Anti-Delete.
   // • Dono digitou .ativar / .desativar / .ativos em qualquer chat: executa.
-  // • Chat/grupo ativado com .ativar (authorized): TUDO liberado, MENOS
-  //   View Once e Anti-Delete (que somem do menu e não respondem).
+  // • Chat/grupo ativado com .ativar (authorized): comandos públicos liberados;
+  //   recursos privados/de configuração seguem bloqueados ou exigem admin de grupo.
   // • Caso contrário: silêncio absoluto (0 mensagens).
   if (command) {
     if (isAuthCmd) {
@@ -411,6 +429,10 @@ export async function handleMessage(sock, msg, deps) {
       // Fora do privado do dono: precisa estar ativado e não ser comando exclusivo do dono
       if (!authorized) return;
       if (OWNER_ONLY_COMMANDS.has(command.name)) return; // View Once / Anti-Delete: 0 traços
+    }
+    if (isGroup(jid) && GROUP_CONTROL_COMMANDS.has(command.name)) {
+      const actor = bareId(msg.key?.participant || jid);
+      if (!groupControlLimiter.consume(`${bareId(jid)}:${actor}`).allowed) return;
     }
 
     log.cmd(`${command.name}${command.args.length ? ` (${command.args.length} argumento(s))` : ''} · ${isGroup(jid) ? 'grupo' : 'privado'}`);
@@ -514,6 +536,127 @@ function requireOwner(ctx, msg) {
   }
 }
 
+function groupFeatureStatus(jid) {
+  const settings = getGroupSettings(jid) || {};
+  const antiLink = settings.antiLink && typeof settings.antiLink === 'object' && !Array.isArray(settings.antiLink)
+    ? settings.antiLink
+    : {};
+  return {
+    welcome: settings.welcome === true,
+    goodbye: settings.goodbye === true,
+    antiLink: {
+      enabled: antiLink.enabled === true,
+      allowlist: Array.isArray(antiLink.allowlist)
+        ? [...new Set(antiLink.allowlist.map(normalizeAllowDomain).filter(Boolean))].slice(0, 50)
+        : []
+    }
+  };
+}
+
+async function welcomeCommand(sock, msg, args, ctx, owner) {
+  const jid = requireAuthorizedGroup(msg.key.remoteJid);
+
+  const first = String(args[0] || '').toLowerCase();
+  const isGoodbye = ['saida', 'saída', 'despedida', 'tchau', 'goodbye'].includes(first);
+  const mode = isGoodbye ? 'goodbye' : 'welcome';
+  const value = isGoodbye ? args[1] : args[0];
+  const settings = groupFeatureStatus(jid);
+  if (!value || ['status', 'lista'].includes(String(value).toLowerCase())) {
+    return ctx.reply(card([
+      header('Boas-vindas', 'configuração por grupo · desativada por padrão'),
+      kv('Entrada de novos membros', toggle(settings.welcome, 'ligada', 'desligada')),
+      kv('Mensagem de saída', toggle(settings.goodbye, 'ligada', 'desligada')),
+      usage('.boasvindas on|off', '.boasvindas saida on', 'Somente administradores do grupo (ou o dono do bot) podem alterar.')
+    ]));
+  }
+
+  const enabled = parseBool(value);
+  if (enabled === null) throw new Error('uso: .boasvindas on|off ou .boasvindas saida on|off');
+  await requireGroupAdministrator(sock, msg, { owner });
+  const current = ensureGroupSettings(jid);
+  current[mode] = enabled;
+  cfg.save();
+  return ctx.reply(ok(
+    mode === 'welcome'
+      ? enabled ? 'Boas-vindas ativadas' : 'Boas-vindas desativadas'
+      : enabled ? 'Mensagem de saída ativada' : 'Mensagem de saída desativada',
+    'a configuração vale somente para este grupo'
+  ));
+}
+
+async function antiLinkCommand(sock, msg, args, ctx, owner) {
+  const jid = requireAuthorizedGroup(msg.key.remoteJid);
+  const sub = String(args[0] || 'status').toLowerCase();
+  const rest = args.slice(1).join(' ').trim();
+  const settings = groupFeatureStatus(jid).antiLink;
+
+  if (['status', 'lista', 'list'].includes(sub)) {
+    let botAdmin = 'necessário para ativar';
+    if (settings.enabled) {
+      try {
+        botAdmin = isBotGroupAdministrator(await getGroupMetadata(sock, jid), sock) ? 'sim' : 'não — sem permissão de remoção';
+      } catch {
+        botAdmin = 'não foi possível confirmar';
+      }
+    }
+    return ctx.reply(card([
+      header('Proteção de links', settings.enabled ? 'ativa' : 'desativada'),
+      kv('Bot administrador', botAdmin),
+      kv('Domínios permitidos', settings.allowlist.length ? settings.allowlist : ['nenhum']),
+      '_Links HTTP(S), www e domínios simples fora da lista podem ser removidos. Administradores do grupo são excluídos do filtro._',
+      usage('.antilink on|off', '.antilink permitir exemplo.com', 'Ativação exige que o bot também seja administrador.')
+    ]));
+  }
+
+  if (['on', 'ligar', 'ativar', 'off', 'desligar', 'desativar'].includes(sub)) {
+    if (args.length > 1) throw new Error('uso: .antilink on ou .antilink off');
+    await requireGroupAdministrator(sock, msg, { owner });
+    const enabled = ['on', 'ligar', 'ativar'].includes(sub);
+    if (enabled) {
+      let metadata;
+      try {
+        metadata = await getGroupMetadata(sock, jid);
+      } catch {
+        throw new Error('não consegui verificar o grupo; tente novamente');
+      }
+      if (!isBotGroupAdministrator(metadata, sock)) {
+        throw new Error('promova o bot a administrador antes de ativar a remoção de links');
+      }
+    }
+    ensureGroupSettings(jid).antiLink.enabled = enabled;
+    cfg.save();
+    return ctx.reply(ok(enabled ? 'Proteção de links ativada' : 'Proteção de links desativada'));
+  }
+
+  if (['permitir', 'allow', 'liberar'].includes(sub)) {
+    if (!rest) throw new Error('uso: .antilink permitir exemplo.com');
+    await requireGroupAdministrator(sock, msg, { owner });
+    const domain = normalizeAllowDomain(rest);
+    if (!domain) throw new Error('informe apenas um domínio válido, sem URL, caminho, porta ou curinga');
+    const allowlist = ensureGroupSettings(jid).antiLink.allowlist;
+    if (allowlist.includes(domain)) return ctx.reply(ok('Domínio já permitido', domain));
+    if (allowlist.length >= 50) throw new Error('a lista deste grupo já atingiu o limite de 50 domínios');
+    allowlist.push(domain);
+    cfg.save();
+    return ctx.reply(ok('Domínio permitido', `${domain} e seus subdomínios`));
+  }
+
+  if (['remover', 'remove', 'del'].includes(sub)) {
+    if (!rest) throw new Error('uso: .antilink remover exemplo.com');
+    await requireGroupAdministrator(sock, msg, { owner });
+    const domain = normalizeAllowDomain(rest);
+    if (!domain) throw new Error('informe apenas um domínio válido, sem URL, caminho, porta ou curinga');
+    const allowlist = ensureGroupSettings(jid).antiLink.allowlist;
+    const filtered = allowlist.filter((item) => item !== domain);
+    if (filtered.length === allowlist.length) return ctx.reply(warn('Domínio não estava na lista', domain));
+    ensureGroupSettings(jid).antiLink.allowlist = filtered;
+    cfg.save();
+    return ctx.reply(ok('Domínio removido da lista', domain));
+  }
+
+  throw new Error('uso: .antilink status | on | off | permitir <domínio> | remover <domínio>');
+}
+
 function revokeChatFeatures(jid) {
   const target = bareId(jid);
   messageCache.clearChat(jid);
@@ -521,6 +664,7 @@ function revokeChatFeatures(jid) {
   cfg.get().autorizados = cfg.get().autorizados.filter((item) => bareId(item) !== target);
   cfg.get().antiDelete.chats = cfg.get().antiDelete.chats.filter((item) => bareId(item) !== target);
   cfg.get().viewOnce.autoChats = cfg.get().viewOnce.autoChats.filter((item) => bareId(item) !== target);
+  clearGroupSettings(jid);
 }
 
 async function runCommand(sock, msg, cmd, ctx) {
@@ -559,7 +703,8 @@ async function runCommand(sock, msg, cmd, ctx) {
         const revoke = new Set([
           ...cfg.get().autorizados,
           ...cfg.get().antiDelete.chats,
-          ...cfg.get().viewOnce.autoChats
+          ...cfg.get().viewOnce.autoChats,
+          ...Object.keys(cfg.get().grupos || {})
         ].map(bareId).filter((chat) => chat && chat !== ownerChat));
         for (const chat of revoke) revokeChatFeatures(chat);
         cfg.get().autorizados = [];
@@ -608,6 +753,37 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'ajuda':
     case 'comandos':
       return reply(inOwnerPrivate ? ownerMenu() : publicMenu());
+
+    case 'boasvindas':
+    case 'bemvindo':
+    case 'welcome':
+      return welcomeCommand(sock, msg, args, ctx, owner);
+
+    case 'antilink':
+    case 'anti-link':
+      return antiLinkCommand(sock, msg, args, ctx, owner);
+
+    case 'enquete':
+    case 'poll': {
+      requireAuthorizedGroup(jid);
+      const parts = argText.split('|').map((part) => part.trim());
+      if (parts.length < 3 || parts.some((part) => !part)) {
+        throw new Error('uso: .enquete pergunta | opção 1 | opção 2');
+      }
+      const question = parts.shift();
+      const options = parts;
+      if (question.length > 200) throw new Error('a pergunta deve ter no máximo 200 caracteres');
+      if (options.length > 12) throw new Error('a enquete aceita no máximo 12 opções');
+      if (options.some((option) => option.length > 80)) throw new Error('cada opção deve ter no máximo 80 caracteres');
+      if (new Set(options.map((option) => option.toLocaleLowerCase('pt-BR'))).size !== options.length) {
+        throw new Error('as opções da enquete devem ser diferentes');
+      }
+      const actor = bareId(msg.key.participant || jid);
+      const groupKey = bareId(jid);
+      if (!pollUserLimiter.consume(`${groupKey}:${actor}`).allowed) return; // silêncio para não amplificar spam
+      if (!pollGroupLimiter.consume(groupKey).allowed) return;
+      return reply({ poll: { name: question, values: options, selectableCount: 1 } });
+    }
 
     case 'menudl':
     case 'downloadmenu':

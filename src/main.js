@@ -12,6 +12,7 @@ import { DATA_DIR, ensureDirs, flushStore } from './core/store.js';
 import { platformBanner, isTermux } from './core/platform.js';
 import { startClient, stopClient } from './wa/client.js';
 import { handleMessage } from './features/router.js';
+import { handleGroupParticipantsUpdate } from './features/group-tools.js';
 import { hasFfmpeg } from './util/ffmpeg.js';
 import { bgStatus, warnIfBgUnconfigured } from './features/bgremoval.js';
 import { envSummary } from './core/config.js';
@@ -120,6 +121,7 @@ async function boot() {
       owner.setFromSocket(sock);
       log.ok('MontxBOT no ar · modo privado exclusivo do dono');
     },
+    onGroupParticipantsUpdate: handleGroupParticipantsUpdate,
     onMessage: async (sock, msg, type) => {
       owner.setFromSocket(sock);
       const deps = {
