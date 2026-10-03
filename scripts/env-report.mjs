@@ -37,6 +37,17 @@ line('GROQ_MODELS', s.groqModels ? `${s.groqModels} modelo(s) fixado(s)` : '— 
 line('GEMINI_MODELS', s.geminiModels ? `${s.geminiModels} modelo(s) fixado(s)` : '— padrão do bot (gemini-3.8-flash → reservas)');
 line('AI_MODELS', s.aiModels ? `${s.aiModels} modelo(s) fixado(s)` : '— padrão do bot');
 
+console.log('\n  ── Imagem (.criar) ──');
+line('IMAGE_MODEL', s.imageModel || '— padrão do bot (flux → reservas)');
+line('IMAGE_MODELS', s.imageModels ? `${s.imageModels} modelo(s) fixado(s)` : '— padrão do bot');
+line('GEMINI_IMAGE_MODELS', s.geminiImageModels ? `${s.geminiImageModels} modelo(s) fixado(s)` : '— descoberta automática');
+
+console.log('\n  ── Voz (.voz) ──');
+line('Motor principal', 'edge — grátis, sem chave (WebSocket nativo do Node 22+)');
+line('VOZES_EXTRA', s.vozesExtra ? `✅ ${s.vozesExtra} voz(es) personalizada(s)` : '— nenhuma (crie vozes no formato nome=voz|pitch=+30|fx=nasal)');
+line('ELEVENLABS_KEYS', s.elevenLabsKeys ? `✅ ${s.elevenLabsKeys} chave(s)` : '— vazio (opcional)');
+line('ELEVENLABS_VOICE_ID', process.env.ELEVENLABS_VOICE_ID || '— padrão (Rachel)');
+
 console.log('\n  ── Downloads ──');
 line('COBALT_INSTANCES', String(envList('COBALT_INSTANCES').length));
 line('TIKTOK_API', String(envList('TIKTOK_API').length));

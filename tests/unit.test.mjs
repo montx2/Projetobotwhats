@@ -348,7 +348,7 @@ test('prompts padrão antigos migram para o tom natural sem sobrescrever prompts
     assert.equal(migrated.ia.sistema, DEFAULT_CONFIG.ia.sistema);
   }
   assert.match(DEFAULT_CONFIG.ia.sistema, /padrão é tranquilo e sem gírias/i);
-  assert.match(DEFAULT_CONFIG.ia.sistema, /não imitar ou repetir/i);
+  assert.match(DEFAULT_CONFIG.ia.sistema, /sem imitar ou repetir/i);
   assert.match(DEFAULT_CONFIG.ia.sistema, /não dê sermão nem use uma recusa automática/i);
   assert.match(DEFAULT_CONFIG.ia.sistema, /no máximo um/i);
   assert.doesNotMatch(DEFAULT_CONFIG.ia.sistema, /RESENHA TOTAL|foda pra caralho/i);

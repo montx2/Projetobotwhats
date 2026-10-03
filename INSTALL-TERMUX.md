@@ -2,6 +2,8 @@
 
 O bot exige Node.js 22+ e FFmpeg. A sessão e a configuração ficam em `data/` e não devem ser compartilhadas: o diretório contém credenciais do WhatsApp e, se habilitado, cache privado.
 
+O FFmpeg é obrigatório para figurinhas e recomendado para voz e imagem: sem ele o `.voz` ainda fala (as vozes do catálogo perdem só os efeitos), o `.criar --hd` não amplia e o áudio vai como MP3 em vez de mensagem de voz (PTT).
+
 ## 1. Instale os pacotes
 
 Use o Termux atualizado (recomendado via F-Droid) e execute:
