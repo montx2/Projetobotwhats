@@ -466,9 +466,16 @@ export async function handleMessage(sock, msg, deps) {
     };
     const expensive = isExpensiveRequest(command, msg);
     if (expensive) {
-      const actor = msg.key?.participant || jid;
-      const rate = expensiveLimiter.consume(`${jid}:${actor}`);
-      if (!rate.allowed) return; // silencioso para não transformar o limitador em fonte de spam
+      // Privado do dono: o operador não precisa de janela de silêncio entre
+      // comandos — duas figurinhas seguidas (`.s <link>` e `.s inteira <link>`)
+      // são uso normal, e o descarte silencioso parecia bot quebrado.
+      // O limitador anti-spam segue valendo para os demais chats; o teto de
+      // concorrência vale para todos.
+      if (!inOwnerPrivate) {
+        const actor = msg.key?.participant || jid;
+        const rate = expensiveLimiter.consume(`${jid}:${actor}`);
+        if (!rate.allowed) return; // silencioso para não transformar o limitador em fonte de spam
+      }
       if (activeExpensive >= MAX_CONCURRENT_EXPENSIVE) {
         await reply(warn('Bot ocupado', 'aguarde um pouco antes de iniciar outra tarefa pesada'));
         return;
@@ -512,9 +519,11 @@ export async function handleMessage(sock, msg, deps) {
   if (inOwnerPrivate || authorized) {
     const urls = extractUrls(text);
     if (urls.length && cfg.get().autoDownload && urls.some(isKnownSocialUrl)) {
-      const actor = msg.key?.participant || jid;
-      const rate = expensiveLimiter.consume(`${jid}:${actor}`);
-      if (!rate.allowed) return;
+      if (!inOwnerPrivate) {
+        const actor = msg.key?.participant || jid;
+        const rate = expensiveLimiter.consume(`${jid}:${actor}`);
+        if (!rate.allowed) return;
+      }
       const progress = createProgress(sock, jid, msg);
       const reply = async (t) => progress.update(t);
       if (activeExpensive >= MAX_CONCURRENT_EXPENSIVE) {
