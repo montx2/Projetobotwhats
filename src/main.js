@@ -54,6 +54,25 @@ function bareDigits(jid) {
   return String(jid).split('@')[0].split(':')[0].replace(/\D/g, '');
 }
 
+const OWNER_LIDS_FILE = () => path.join(DATA_DIR, 'owner-lids.json');
+
+function readSavedOwnerLids() {
+  try {
+    const data = JSON.parse(fs.readFileSync(OWNER_LIDS_FILE(), 'utf8'));
+    return Array.isArray(data) ? data.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveOwnerLids(lids) {
+  try {
+    fs.writeFileSync(OWNER_LIDS_FILE(), JSON.stringify([...lids], null, 2));
+  } catch {
+    /* persistência é best-effort */
+  }
+}
+
 function readSavedPairingDigits() {
   try {
     return fs.readFileSync(path.join(DATA_DIR, 'pairing-number.txt'), 'utf8').replace(/\D/g, '');
@@ -71,6 +90,40 @@ const owner = {
       .map((n) => String(n || '').replace(/\D/g, ''))
       .filter(Boolean)
   ),
+  lids: new Set(readSavedOwnerLids()),
+  /**
+   * O WhatsApp passou a identificar participantes de grupo por @lid. Quando uma
+   * mensagem traz o @lid junto do número real (participantPn/participantAlt),
+   * aprendemos esse par para que o dono seja reconhecido também nos grupos,
+   * onde só o @lid costuma chegar.
+   */
+  learnFromMessage(sock, msg) {
+    const key = msg?.key || {};
+    const ids = [
+      key.participant, key.participantPn, key.participantAlt,
+      key.senderLid, key.senderPn, msg?.participant,
+      key.fromMe ? sock?.user?.id : null,
+      key.fromMe ? sock?.user?.lid : null
+    ].filter(Boolean).map(String);
+    if (!ids.length) return;
+    const digits = ids.map(bareDigits).filter(Boolean);
+    const lids = ids.filter((id) => id.endsWith('@lid')).map(safeNormalize);
+    if (!lids.length) return;
+    const isOwnerMsg =
+      Boolean(key.fromMe) ||
+      digits.some((d) => this.numbers.has(d)) ||
+      lids.some((l) => this.lids.has(l));
+    if (!isOwnerMsg) return;
+    let changed = false;
+    for (const l of lids) {
+      if (!this.lids.has(l)) {
+        this.lids.add(l);
+        changed = true;
+      }
+    }
+    for (const d of digits) if (d) this.numbers.add(d);
+    if (changed) saveOwnerLids(this.lids);
+  },
   setFromSocket(sock) {
     const savedDigits = readSavedPairingDigits();
     if (savedDigits) this.numbers.add(savedDigits);
@@ -87,6 +140,10 @@ const owner = {
     }
     if (rawLid) {
       this.lid = safeNormalize(rawLid);
+      if (!this.lids.has(this.lid)) {
+        this.lids.add(this.lid);
+        saveOwnerLids(this.lids);
+      }
     }
   },
   matchesOwnerJid(sock, candidate) {
@@ -95,6 +152,7 @@ const owner = {
     const norm = safeNormalize(candidate);
     const num = bareDigits(candidate);
     if (num && this.numbers.has(num)) return true;
+    if (this.lids.has(norm)) return true;
     const known = [
       this.jid,
       this.lid,
@@ -124,11 +182,14 @@ async function boot() {
     onGroupParticipantsUpdate: handleGroupParticipantsUpdate,
     onMessage: async (sock, msg, type) => {
       owner.setFromSocket(sock);
+      owner.learnFromMessage(sock, msg);
       const deps = {
         type, // 'notify' (ao vivo) | 'append' (histórico) | 'update'
         ownerJid: owner.jid || owner.lid,
         isOwner: (jid, participant) =>
-          !!msg.key?.fromMe || owner.matchesOwnerJid(sock, participant) || owner.matchesOwnerJid(sock, jid),
+          !!msg.key?.fromMe ||
+          owner.matchesOwnerJid(sock, participant) ||
+          (!isGroup(jid) && owner.matchesOwnerJid(sock, jid)),
         isOwnerPrivateChat: (jid) => owner.isPrivateOwnerChat(sock, jid),
         sendOwner: async (content) => {
           const dest = owner.jid || owner.lid;

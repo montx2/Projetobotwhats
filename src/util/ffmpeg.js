@@ -101,6 +101,34 @@ function tmpFile(ext) {
   return path.join(os.tmpdir(), `nexus-${crypto.randomBytes(6).toString('hex')}${cleanExt}`);
 }
 
+/**
+ * Converte qualquer áudio em OGG/Opus mono 48 kHz — o formato que o WhatsApp
+ * espera em mensagem de voz (ptt). Enviar MP3 como ptt costuma gerar um áudio
+ * que não toca em alguns aparelhos.
+ * @param {Buffer} input áudio original (mp3, wav, ogg…)
+ * @returns {Promise<Buffer>} áudio em ogg/opus
+ */
+export async function toVoiceOpus(input) {
+  const inFile = tmpFile('.audio');
+  const outFile = tmpFile('.ogg');
+  fs.writeFileSync(inFile, input);
+  try {
+    await runFfmpeg([
+      '-y', '-hide_banner', '-loglevel', 'error',
+      '-i', inFile,
+      '-vn', '-ac', '1', '-ar', '48000',
+      '-c:a', 'libopus', '-b:a', '32k', '-application', 'voip',
+      '-f', 'ogg', outFile
+    ], { timeoutMs: 90_000 });
+    const buf = fs.readFileSync(outFile);
+    if (!buf.length) throw new Error('ffmpeg não gerou áudio');
+    return buf;
+  } finally {
+    fs.rmSync(inFile, { force: true });
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
 /** Detecta a extensão real pelo cabeçalho binário (magic bytes). */
 export function detectMediaExt(buf, fallback = '.jpg') {
   if (!Buffer.isBuffer(buf) || buf.length < 4) return fallback;

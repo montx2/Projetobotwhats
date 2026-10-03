@@ -42,7 +42,7 @@ import {
   requireAuthorizedGroup,
   requireGroupAdministrator
 } from './group-tools.js';
-import { hasFfmpeg } from '../util/ffmpeg.js';
+import { hasFfmpeg, toVoiceOpus } from '../util/ffmpeg.js';
 import { cobaltPool } from './downloaders/cobalt.js';
 import { hasYtDlp, isYtdlpEnabled, findYtdlp } from './downloaders/ytdlp.js';
 import { SlidingWindowLimiter } from '../core/limiter.js';
@@ -205,6 +205,28 @@ function bareId(jid) {
 function bareDigits(jid) {
   if (!jid || isGroup(jid)) return '';
   return String(jid).split('@')[0].split(':')[0].replace(/\D/g, '');
+}
+
+/**
+ * Todas as identidades possíveis de quem enviou a mensagem.
+ * O WhatsApp migrou grupos para JIDs @lid, então o `participant` pode vir como
+ * `1234567@lid` enquanto o número real aparece em `participantPn`/`participantAlt`.
+ */
+export function senderCandidates(msg) {
+  const key = msg?.key || {};
+  const list = [
+    key.participant,
+    key.participantPn,
+    key.participantAlt,
+    key.senderLid,
+    key.senderPn,
+    msg?.participant,
+    msg?.participantPn,
+    msg?.participantAlt,
+    isGroup(key.remoteJid) ? null : key.remoteJid,
+    isGroup(key.remoteJidAlt) ? null : key.remoteJidAlt
+  ];
+  return [...new Set(list.filter(Boolean).map(String))];
 }
 
 /** Verifica se o chat ou remetente foi ativado/autorizado explicitamente pelo dono. */
@@ -385,12 +407,15 @@ export async function handleMessage(sock, msg, deps) {
   const text = extractAnyText(msg.message).trim();
   if (msg.key?.fromMe && isBotGeneratedText(text)) return;
 
-  const senderIsOwner = Boolean(msg.key?.fromMe || isOwner?.(jid, msg.key.participant));
+  // Em grupos o WhatsApp pode entregar o remetente como @lid (novo identificador)
+  // em vez do número. Testamos TODAS as variantes que o Baileys expõe para que
+  // `.ativar` (e demais comandos do dono) funcionem também em grupo.
+  const senderIsOwner = Boolean(msg.key?.fromMe || senderCandidates(msg).some((c) => isOwner?.(jid, c, msg)));
   const inOwnerPrivate =
     typeof deps.isOwnerPrivateChat === 'function'
       ? deps.isOwnerPrivateChat(jid, msg)
       : !isGroup(jid) && Boolean(isOwner?.(jid));
-  const authorized = isAuthorizedTarget(jid, msg.key.participant);
+  const authorized = senderCandidates(msg).some((c) => isAuthorizedTarget(jid, c)) || isAuthorizedTarget(jid, msg.key.participant);
   const allowedChat = inOwnerPrivate || authorized;
   const revoke = isRevokeMessage(msg);
   const viewOnce = isViewOnce(msg.message);
@@ -446,7 +471,16 @@ export async function handleMessage(sock, msg, deps) {
   // • Caso contrário: silêncio absoluto (0 mensagens).
   if (command) {
     if (isAuthCmd || OWNER_ONLY_COMMANDS.has(command.name)) {
-      if (!senderIsOwner) return; // terceiros tentando comandos exclusivos do dono são ignorados em silêncio
+      if (!senderIsOwner) {
+        // Terceiros são ignorados em silêncio, mas registramos no console para
+        // diagnosticar casos em que o próprio dono não é reconhecido (ex.: @lid).
+        log.warn(
+          `.${command.name} ignorado: remetente não reconhecido como dono ` +
+            `(${senderCandidates(msg).join(', ') || 'sem identificador'}) · ` +
+            'defina OWNER_NUMBERS no .env com o seu número'
+        );
+        return;
+      }
       if (!inOwnerPrivate && PRIVATE_OWNER_COMMANDS.has(command.name)) return; // View Once / Anti-Delete: 0 traços fora do privado
     } else if (!inOwnerPrivate) {
       // Fora do privado do dono: precisa estar ativado
@@ -1081,9 +1115,19 @@ async function runCommand(sock, msg, cmd, ctx) {
       const text2 = argText || extractAnyText(msg.message?.extendedTextMessage?.contextInfo?.quotedMessage || {});
       if (!text2) return reply(usage('.voz <texto>', '.voz bom dia, pessoal'));
       await reply(wait('Gerando áudio'));
-      const buffer = await aiVoice(truncate(text2, 900));
+      const raw = await aiVoice(truncate(text2, 900));
       await reply(wait('Enviando áudio'));
-      const sent = await sock.sendMessage(jid, { audio: buffer, mimetype: 'audio/mpeg', ptt: true }, { quoted: msg });
+      // O WhatsApp só toca mensagem de voz (ptt) de forma confiável em OGG/Opus.
+      // Sem FFmpeg, enviamos o MP3 como áudio normal (sem ptt) para não quebrar.
+      let payload = { audio: raw, mimetype: 'audio/mpeg' };
+      if (hasFfmpeg()) {
+        try {
+          payload = { audio: await toVoiceOpus(raw), mimetype: 'audio/ogg; codecs=opus', ptt: true };
+        } catch (e) {
+          log.warn(`voz: conversão para opus falhou (${e.message}); enviando mp3`);
+        }
+      }
+      const sent = await sock.sendMessage(jid, payload, { quoted: msg });
       if (sent?.key?.id) markBotSent(sent.key.id);
       return reply(ok('Áudio pronto'));
     }
