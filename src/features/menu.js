@@ -243,8 +243,9 @@ export function voiceMenu({ extra = [], current = 'auto' } = {}) {
       ['.voz "bob é o cara"', 'aspas = texto literal, sem trocar de voz']
     ]),
     footer(
-      'Personagens são paródias por efeitos de voz (não são as vozes originais). ' +
-        'Quer a sua? Cadastre em VOZES_EXTRA no .env — veja o README.'
+      'Voz 100% grátis, sem chave: edge (online) e espeak/piper (offline, sem internet). ' +
+        'Personagens são paródias por efeitos de voz, não as vozes originais. ' +
+        'Crie as suas em VOZES_EXTRA no .env — veja o README.'
     )
   ]);
 }

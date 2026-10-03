@@ -16,8 +16,15 @@
 //  3. `idiomas`     vozes de fora falando português (gringo, gringa, mexicano).
 //
 // SOBRE OS PERSONAGENS: são IMITAÇÕES/paródias feitas com efeitos de voz, não as
-// vozes originais de ninguém (nenhum serviço dá essas vozes de graça, e clonar
-// voz de pessoa real exige autorização). Servem para zoeira no grupo.
+// vozes originais de ninguém (clonar voz de pessoa real exige autorização e os
+// serviços que fazem isso são pagos — o bot não usa nenhum). Servem para
+// zoeira no grupo, e funcionam com qualquer motor, inclusive os grátis
+// offline (`tts-local.js`).
+//
+// MOTORES (todos grátis, nenhum pede pagamento):
+//   edge     — "Ler em voz alta" do Microsoft Edge (online, sem chave) — padrão.
+//   espeak   — espeak-ng, offline, sem internet (Termux: pkg install espeak).
+//   piper    — voz neural offline (opcional; precisa de modelo .onnx).
 
 // ── Efeitos de áudio (aplicados pelo FFmpeg, quando instalado) ────────
 // Cada efeito é um pedaço de filtro do FFmpeg. Se o FFmpeg não estiver
@@ -49,7 +56,7 @@ export function buildVoiceFxChain(fx) {
 
 /**
  * Cadeia "corrige tom e velocidade" para motores que NÃO aceitam SSML
- * (OpenAI, ElevenLabs, Polly…). O FFmpeg muda o tom alterando a taxa de
+ * (piper, StreamElements/Polly…). O FFmpeg muda o tom alterando a taxa de
  * amostragem e depois compensa a velocidade com `atempo`, então o resultado
  * mantém a duração original e só o timbre muda.
  * @param {{pitchPct?: number, speedPct?: number, fx?: string[]}} opts
@@ -195,6 +202,19 @@ export const VOICE_CATEGORIES = Object.freeze({
   idiomas: 'Outros idiomas'
 });
 
+// Avisa uma vez por voz que ficou de fora (o catálogo é relido a cada comando).
+const warnedDropped = new Set();
+
+function warnDroppedEngine(id, value) {
+  if (warnedDropped.has(id)) return;
+  warnedDropped.add(id);
+  console.warn(
+    `[voz] VOZES_EXTRA "${id}=${String(value).split(':')[0]}:…" ignorada: ` +
+      'motores pagos (ElevenLabs/OpenAI TTS) foram removidos do bot. ' +
+      'Use uma voz do Edge (ex.: pt-BR-ThalitaNeural) ou um motor grátis offline: espeak:/piper:.'
+  );
+}
+
 function normalizeName(value) {
   return String(value || '')
     .trim()
@@ -222,11 +242,19 @@ export function parseCustomVoices(raw) {
     const id = normalizeName(namePart.slice(0, eq));
     let voice = namePart.slice(eq + 1).trim();
     if (!id || !voice) continue;
-    // Prefixo de motor: `eleven:<voiceId>`, `openai:nova`, `polly:Camila`.
+    // Prefixos de serviços PAGOS (ElevenLabs, OpenAI TTS) não existem mais: a
+    // entrada é ignorada com um aviso, em vez de quebrar o `.voz`.
+    if (/^(elevenlabs|eleven|openai)\s*:/i.test(voice)) {
+      warnDroppedEngine(id, voice);
+      continue;
+    }
+    // Prefixo de motor (todos grátis): `edge:`, `espeak:pt-br+f3`, `piper:modelo`
+    // e `polly:Camila` (voz da reserva grátis StreamElements).
     let engine = 'edge';
-    const prefixed = /^(elevenlabs|eleven|polly|openai|edge)\s*:\s*(.+)$/i.exec(voice);
+    const prefixed = /^(espeak-ng|espeak|local|piper|polly|edge)\s*:\s*(.+)$/i.exec(voice);
     if (prefixed) {
-      engine = prefixed[1].toLowerCase().startsWith('eleven') ? 'elevenlabs' : prefixed[1].toLowerCase();
+      const raw = prefixed[1].toLowerCase();
+      engine = raw === 'local' ? 'espeak' : raw === 'espeak-ng' ? 'espeak' : raw;
       voice = prefixed[2].trim();
     }
     const opts = { pitch: 0, rate: 0, volume: 0, fx: [], desc: 'voz personalizada do .env' };

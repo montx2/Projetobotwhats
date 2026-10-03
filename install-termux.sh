@@ -8,6 +8,12 @@ pkg update -y && pkg upgrade -y
 echo "📦 Instalando Node.js, Git, FFmpeg e utilitários…"
 pkg install -y nodejs-lts git ffmpeg procps
 
+# espeak deixa o .voz funcionando 100% offline e de graça (sem chave, sem
+# internet). É opcional: se o pacote não estiver disponível no seu espelho, o
+# bot continua funcionando com os motores online grátis.
+echo "🔊 Instalando o motor de voz offline (espeak)…"
+pkg install -y espeak || echo "⚠️  espeak indisponível agora — .voz segue grátis com os motores online (tente: pkg install espeak)"
+
 cd "$(dirname "$0")"
 
 echo "📦 Instalando dependências do bot…"

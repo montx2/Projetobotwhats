@@ -207,6 +207,23 @@ export function detectMediaExt(buf, fallback = '.jpg') {
 }
 
 /**
+ * Mimetype de áudio pelo cabeçalho binário.
+ * Sem FFmpeg o `.voz` manda o arquivo como veio (o espeak, por exemplo, gera
+ * WAV): anunciar o mimetype certo evita áudio que "não toca" no celular.
+ */
+export function detectAudioMime(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) return 'audio/mpeg';
+  const head4 = buf.toString('latin1', 0, 4);
+  if (head4 === 'RIFF' && buf.toString('latin1', 8, 12) === 'WAVE') return 'audio/wav';
+  if (head4 === 'OggS') return 'audio/ogg; codecs=opus';
+  if (head4 === 'fLaC') return 'audio/flac';
+  const head3 = buf.toString('latin1', 0, 3);
+  if (head3 === 'ID3' || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)) return 'audio/mpeg';
+  if (buf.length > 12 && buf.toString('latin1', 4, 8) === 'ftyp') return 'audio/mp4';
+  return 'audio/mpeg';
+}
+
+/**
  * Modos de enquadramento da figurinha (sempre sai 512x512):
  *  - 'fill'  (padrão): preenche TODO o quadrado, esticando se preciso (sem bordas vazias)
  *  - 'contain'       : imagem inteira, proporção original, com margem transparente
