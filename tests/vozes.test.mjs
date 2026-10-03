@@ -5,7 +5,8 @@
 // testado é o que costuma quebrar na vida real:
 //   • o token Sec-MS-GEC (se errar, o serviço devolve 403);
 //   • o protocolo do Edge TTS (quadros binários com cabeçalho de 2 bytes);
-//   • a escolha de voz por nome (`.voz bob …`) e as aspas que protegem o texto;
+//   • a escolha de voz/tom no comando (`.voz masculina grossa …`) e as aspas
+//     que protegem o texto;
 //   • a cascata de reserva quando o motor principal não responde;
 //   • os atalhos do `.criar` (--formato, --estilo, --hd, --bruto, --seed).
 
@@ -21,6 +22,7 @@ process.env.NEXUS_ENV_FILE = path.join(os.tmpdir(), 'nexus-teste-vozes-sem-env',
 import { setDnsLookupForTests } from '../src/core/http.js';
 import {
   buildEdgeSsml,
+  resetEdgeStateForTests,
   edgeSocketUrl,
   edgeTimestamp,
   parseEdgeAudioFrame,
@@ -30,13 +32,21 @@ import {
   EDGE_SEC_MS_GEC_VERSION
 } from '../src/features/tts-edge.js';
 import {
+  VOICE_TONES,
   buildPitchSpeedFilter,
   buildVoiceFxChain,
+  describeRecipe,
+  describeSpec,
+  isVoiceName,
   parseCustomVoices,
   parseVoiceRequest,
+  resolveFxList,
+  resolveTone,
   resolveVoice,
-  voiceCatalogLines,
-  isVoiceName
+  resolveVoiceSpec,
+  toneOptionLines,
+  voiceOptionLines,
+  voiceRecipe
 } from '../src/features/voices.js';
 import { parseImageRequest, extractImageFlags, composeImagePrompt, aiImageFull } from '../src/features/ai.js';
 
@@ -185,76 +195,128 @@ test('edgeTimestamp sai no formato que o serviço exige', () => {
   assert.equal(stamp, 'Sat Oct 03 2026 19:00:05 GMT+0000 (Coordinated Universal Time)');
 });
 
-// ── Catálogo de vozes ─────────────────────────────────────────────────────
+// ── Vozes e tons ────────────────────────────────────────────────────────────
 test('catálogo resolve nomes, apelidos e acentos', () => {
-  assert.equal(resolveVoice('bob').id, 'bob');
-  assert.equal(resolveVoice('Bob Esponja').id, 'bob');
-  assert.equal(resolveVoice('BOB-ESPONJA').id, 'bob');
-  assert.equal(resolveVoice('lula').id, 'lula');
-  assert.equal(resolveVoice('Lula').id, 'lula');
-  assert.equal(resolveVoice('antonio').id, 'antonio');
-  assert.equal(resolveVoice('Antônio').id, 'antonio');
+  assert.equal(resolveVoice('masculina').voice, 'pt-BR-AntonioNeural');
+  assert.equal(resolveVoice('Masculina').id, 'masculina');
+  assert.equal(resolveVoice('homem').id, 'masculina');
+  assert.equal(resolveVoice('feminina').id, 'feminina');
+  assert.equal(resolveVoice('mulher').id, 'feminina');
   assert.equal(resolveVoice('narrador').id, 'narrador');
+  assert.equal(resolveVoice('Antônio').id, 'masculina'); // apelido com acento
   assert.equal(resolveVoice('').id, 'auto');
   // Nome técnico do motor também vale.
   assert.equal(resolveVoice('pt-BR-ThalitaNeural').voice, 'pt-BR-ThalitaNeural');
-  // Voz inexistente: erro claro e com sugestão.
-  assert.throws(() => resolveVoice('bobe'), /não existe/);
+  // Voz inexistente: erro claro, com as opções na mensagem.
+  assert.throws(() => resolveVoice('vozinha'), /não existe/);
+  assert.throws(() => resolveVoice('vozinha'), /masculina, feminina/);
+  // Personagens não existem mais — e o erro ensina o caminho novo.
+  assert.throws(() => resolveVoice('bob'), /não existe/);
+  // Tom digitado no lugar da voz: o erro explica, em vez de falar "não existe".
+  assert.throws(() => resolveVoice('grossa'), /é um tom, não uma voz/);
 });
 
-test('vozes de personagem trazem tom, velocidade e efeitos já definidos', () => {
-  const bob = resolveVoice('bob');
-  assert.ok(bob.pitchPct > 20, 'Bob precisa subir o tom');
-  assert.ok(bob.speedPct > 0, 'Bob fala mais rápido');
-  assert.ok(bob.fx.length > 0);
-
-  const lula = resolveVoice('lula');
-  assert.ok(lula.pitchPct < 0, 'Lula precisa descer o tom');
-  assert.ok(lula.speedPct < 0, 'Lula fala mais devagar');
-
-  // Toda voz do catálogo tem descrição e id utilizável no comando.
-  for (const [, desc] of voiceCatalogLines()) assert.ok(desc && desc.length > 3);
+test('tom vira pitch: grossa desce, fina sobe, e o número fino também vale', () => {
+  assert.equal(resolveVoice('masculina', { tone: resolveTone('grossa') }).pitchPct, -25);
+  assert.equal(resolveVoice('masculina', { tone: resolveTone('muitogrossa') }).pitchPct, -45);
+  assert.equal(resolveVoice('feminina', { tone: resolveTone('fina') }).pitchPct, 25);
+  assert.equal(resolveVoice('feminina', { tone: resolveTone('muitofina') }).pitchPct, 45);
+  assert.equal(resolveVoice('masculina', { tone: resolveTone('normal') }).pitchPct, 0);
+  // Número direto, com ou sem sinal, com limite.
+  assert.equal(resolveTone('-30'), -30);
+  assert.equal(resolveTone('+12'), 12);
+  assert.equal(resolveTone('40'), 40);
+  assert.equal(resolveTone('-999'), -60, 'passou do limite: prende no mínimo');
+  assert.throws(() => resolveTone('banana'), /não existe/);
+  // Apelidos de tom funcionam como o nome.
+  assert.equal(resolveTone('grave'), -45);
+  assert.equal(resolveTone('aguda'), 25);
+  // Todo tom tem uma linha de ajuda.
+  assert.equal(toneOptionLines().length, VOICE_TONES.length);
+  for (const [usageLine, desc] of toneOptionLines()) {
+    assert.match(usageLine, /^\.voz \w+ <texto>$/);
+    assert.ok(desc.length > 3);
+  }
+  for (const [usageLine, desc] of voiceOptionLines()) {
+    assert.match(usageLine, /^\.voz \w+ <texto>$/);
+    assert.ok(desc.length > 3);
+  }
 });
 
-test('VOZES_EXTRA cria vozes próprias, inclusive nos motores grátis offline', () => {
-  const extra = parseCustomVoices(
-    'meuvoz=pt-BR-ThalitaNeural|pitch=+25|rate=+10|fx=nasal+ecoCurto|desc=teste,' +
-      'robô=espeak:pt-br+f3|fx=grave, semAspas=en-US-GuyNeural, neural=piper:voz.onnx|rate=-10'
-  );
-  assert.equal(extra.length, 4);
-  const [meuvoz, robo, simples, piperVoice] = extra;
-  assert.equal(meuvoz.id, 'meuvoz');
-  assert.equal(meuvoz.pitch, 25); // campo cru do .env — o público (pitchPct) vem do resolveVoice
-  assert.deepEqual(meuvoz.fx, ['nasal', 'ecoCurto']);
-  // Motores locais/offline são grátis; nenhum prefixo aponta para serviço pago.
-  assert.equal(robo.engine, 'espeak');
-  assert.equal(robo.voice, 'pt-br+f3');
-  assert.equal(simples.engine, 'edge');
-  assert.equal(piperVoice.engine, 'piper');
-  assert.equal(piperVoice.voice, 'voz.onnx');
-
-  const resolved = resolveVoice('meuvoz', { extra });
-  assert.equal(resolved.pitchPct, 25);
-  assert.equal(resolved.speedPct, 10);
-  assert.equal(resolved.fx.length, 2);
-
-  assert.equal(isVoiceName('meuvoz', { extra }), true);
-  assert.equal(isVoiceName('meuvoz'), false);
+test('efeitos: nomes conferidos (sem erro, o efeito seria ignorado em silêncio)', () => {
+  assert.deepEqual(resolveFxList('ecoCurto+radio'), ['ecoCurto', 'radio']);
+  assert.deepEqual(resolveFxList('ECOCURTO'), ['ecoCurto']); // não liga para maiúscula
+  assert.throws(() => resolveFxList('eco'), /não existe/);
+  assert.throws(() => resolveFxList(''), /escreva o nome do efeito/);
 });
 
-test('parseVoiceRequest separa voz de texto (e respeita aspas e --voz)', () => {
+test('parseVoiceRequest separa voz, tom e texto (aspas e flags incluídas)', () => {
   const extra = parseCustomVoices('meuvoz=pt-BR-ThalitaNeural');
 
-  assert.deepEqual(parseVoiceRequest(['bob', 'bom', 'dia']), { voice: 'bob', text: 'bom dia', explicit: true });
-  assert.deepEqual(parseVoiceRequest(['bob']), { voice: 'bob', text: null, explicit: true });
-  assert.deepEqual(parseVoiceRequest(['bom', 'dia', 'pessoal']), { voice: null, text: 'bom dia pessoal', explicit: false });
-  // Aspas protegem um texto que começa com nome de voz.
-  assert.deepEqual(parseVoiceRequest(['bob', '"lula",', 'é', 'o', 'cara']), { voice: 'bob', text: '"lula", é o cara', explicit: true });
-  assert.deepEqual(parseVoiceRequest(['"lula é o cara"']), { voice: null, text: 'lula é o cara', explicit: false });
-  // Marcador explícito em qualquer posição.
-  assert.deepEqual(parseVoiceRequest(['olá', '--voz', 'bob', 'tudo', 'bem']), { voice: 'bob', text: 'olá tudo bem', explicit: true });
+  // Só texto: nada é configurado.
+  assert.deepEqual(parseVoiceRequest(['bom', 'dia', 'pessoal']), {
+    voice: null, tone: null, speed: null, fx: null, text: 'bom dia pessoal', explicit: false, recipe: null
+  });
+  // Tom no começo.
+  const grossa = parseVoiceRequest(['grossa', 'boa', 'noite']);
+  assert.equal(grossa.tone, -25);
+  assert.equal(grossa.text, 'boa noite');
+  assert.equal(grossa.recipe, '--tom grossa');
+  // Voz + tom, em qualquer ordem.
+  const dupla = parseVoiceRequest(['feminina', 'fina', 'bom', 'dia']);
+  assert.equal(dupla.voice, 'feminina');
+  assert.equal(dupla.tone, 25);
+  assert.equal(dupla.text, 'bom dia');
+  assert.equal(parseVoiceRequest(['fina', 'feminina', 'bom dia']).recipe, 'feminina --tom fina');
+  // Flags em qualquer posição, com ou sem "=".
+  const flags = parseVoiceRequest(['olá', '--tom', '-30', '--vel=-10', 'tudo', 'bem']);
+  assert.equal(flags.tone, -30);
+  assert.equal(flags.speed, -10);
+  assert.equal(flags.text, 'olá tudo bem');
+  assert.equal(flags.recipe, '--tom -30 --vel -10');
+  assert.equal(parseVoiceRequest(['oi', '--voz', 'narrador', 'e', 'agora']).voice, 'narrador');
+  // Número com sinal, sem flag.
+  assert.equal(parseVoiceRequest(['-40', 'boa', 'noite']).tone, -40);
+  // Aspas protegem um texto que começa com voz ou tom.
+  assert.deepEqual(parseVoiceRequest(['grossa', '"grossa é o nome"']), {
+    voice: null, tone: -25, speed: null, fx: null, text: 'grossa é o nome', explicit: true, recipe: '--tom grossa'
+  });
+  assert.equal(parseVoiceRequest(['\"masculina é legal\"']).text, 'masculina é legal');
+  assert.equal(parseVoiceRequest(['\"masculina é legal\"']).voice, null);
+  // Voz só, sem texto: prévia.
+  assert.deepEqual(parseVoiceRequest(['masculina']).text, null);
+  assert.equal(parseVoiceRequest(['masculina']).explicit, true);
   // Voz cadastrada no .env também é reconhecida.
   assert.equal(parseVoiceRequest(['meuvoz', 'teste'], { extra }).voice, 'meuvoz');
+  // Texto comum que começa com palavra parecida NÃO vira configuração.
+  assert.equal(parseVoiceRequest(['hoje', 'foi', 'top']).voice, null);
+  assert.equal(parseVoiceRequest(['hoje', 'foi', 'top']).tone, null);
+});
+
+test('receita: o que o comando monta é o que o config guarda e o bot relê', () => {
+  const recipe = voiceRecipe({ voice: 'masculina', tone: -25, speed: -10 });
+  assert.equal(recipe, 'masculina --tom grossa --vel -10');
+  const spec = resolveVoiceSpec(recipe);
+  assert.equal(spec.id, 'masculina');
+  assert.equal(spec.pitchPct, -25);
+  assert.equal(spec.speedPct, -10);
+  assert.equal(describeSpec(spec), 'Masculina · tom -25% (grossa) · velocidade -10%');
+  assert.equal(describeRecipe(recipe), describeSpec(spec));
+  // Receita vazia = voz padrão, sem erro.
+  assert.equal(resolveVoiceSpec('').id, 'auto');
+  assert.equal(resolveVoiceSpec('--tom -30').pitchPct, -30);
+  // Receita que o bot não entende descreve exatamente o que ele vai fazer
+  // (falar com a voz automática) — a descrição nunca mente.
+  assert.equal(describeRecipe('voz-que-nao-existe'), describeSpec(resolveVoiceSpec('voz-que-nao-existe')));
+  // Receita inválida de verdade não derruba a descrição: mostra como veio.
+  assert.equal(describeRecipe('--tom banana'), '--tom banana');
+});
+
+test('o tom pedido substitui o tom de fábrica da voz do .env', () => {
+  const extra = parseCustomVoices('meuvoz=pt-BR-ThalitaNeural|pitch=+25|rate=+10');
+  assert.equal(resolveVoiceSpec('meuvoz', { extra }).pitchPct, 25);
+  assert.equal(resolveVoiceSpec('meuvoz --tom grossa', { extra }).pitchPct, -25);
+  assert.equal(resolveVoiceSpec('meuvoz --tom grossa', { extra }).speedPct, 10, 'a velocidade da voz continua');
 });
 
 test('cadeia de efeitos e correção de tom/velocidade do FFmpeg', () => {
@@ -341,9 +403,11 @@ test('sem o motor Edge, a voz cai para o provedor grátis seguinte', async (t) =
   });
 
   const { aiVoiceFull } = await import(`../src/features/ai.js?fallback=${Date.now()}`);
-  const result = await aiVoiceFull('teste de voz', 'bob');
+  const result = await aiVoiceFull('teste de voz', 'masculina grossa');
   assert.equal(result.engine, 'streamelements');
   assert.equal(result.fallback, true);
+  // O tom sobrevive à reserva (é o FFmpeg que corrige, não o SSML do Edge).
+  assert.equal(result.settingsLabel, 'Masculina · tom -25% (grossa)');
   assert.ok(result.buffer.length > 1000);
   assert.ok(calls.some((url) => url.includes('streamelements.com')));
 });
@@ -404,4 +468,83 @@ test('motores pagos são ignorados com aviso; polly: continua funcionando (grát
   assert.equal(extra[0].id, 'dacasa'); // ids são normalizados (sem acento/maiúscula)
   assert.equal(extra[0].engine, 'polly');
   assert.equal(extra[0].voice, 'Vitoria');
+});
+
+// ── Motor Edge (regressão) ──────────────────────────────────────────────────
+// O `.voz` usava `edgeVoiceFor(spec)`, função que NUNCA existiu: a chamada
+// quebrava com ReferenceError e o áudio saía sempre de uma reserva
+// (StreamElements/Google/Pollinations). Como nessas reservas o tom é feito por
+// FFmpeg (chipmunk), era exatamente isso que fazia a voz "não parecer" nada.
+test('o motor Edge é chamado de verdade e escolhe a voz na lista do serviço', async (t) => {
+  const originalFetch = globalThis.fetch;
+  const originalWebSocket = globalThis.WebSocket;
+  const VOICES = JSON.stringify([
+    { ShortName: 'pt-BR-AntonioNeural', Locale: 'pt-BR', Gender: 'Male' },
+    { ShortName: 'pt-BR-FranciscaNeural', Locale: 'pt-BR', Gender: 'Female' }
+  ]);
+  let openedUrl = null;
+
+  // WebSocket de mentira: abre e falha (a ideia é ver ATÉ ONDE o .voz chega).
+  class StubSocket {
+    constructor(url) {
+      openedUrl = url;
+      this.binaryType = '';
+      this.handlers = {};
+      setTimeout(() => this.emit('error', {}), 0);
+    }
+    addEventListener(type, fn) {
+      (this.handlers[type] ||= []).push(fn);
+    }
+    emit(type, event) {
+      for (const fn of this.handlers[type] || []) fn(event || {});
+    }
+    send() {}
+    close() {}
+  }
+
+  globalThis.WebSocket = StubSocket;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/voices/list')) {
+      return new Response(VOICES, { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('rede fora do ar (teste)');
+  };
+  resetEdgeStateForTests();
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    globalThis.WebSocket = originalWebSocket;
+    resetEdgeStateForTests();
+  });
+
+  const { aiVoiceFull, edgeVoiceFor, resetVoiceCooldowns } = await import(`../src/features/ai.js?edge=${Date.now()}`);
+  resetVoiceCooldowns();
+
+  // Voz do catálogo encontrada na lista; voz aposentada cai para a mesma
+  // língua/gênero em vez de mandar um nome que o serviço não tem.
+  assert.equal(await edgeVoiceFor({ voice: 'pt-BR-AntonioNeural', alts: ['pt-BR-DonatoNeural'] }), 'pt-BR-AntonioNeural');
+  assert.equal(await edgeVoiceFor({ voice: 'pt-BR-AposentadaNeural', alts: ['pt-BR-DonatoNeural'] }), 'pt-BR-AntonioNeural');
+  assert.equal(await edgeVoiceFor({ voice: 'pt-BR-FranciscaNeural', alts: [] }), 'pt-BR-FranciscaNeural');
+
+  let message = '';
+  try {
+    await aiVoiceFull('bom dia', 'masculina grossa');
+  } catch (error) {
+    message = String(error.message);
+    assert.match(message, /edge: falha de conexão com o serviço de voz/);
+  }
+  assert.doesNotMatch(message, /is not defined/, 'a função de voz do Edge precisa existir');
+  assert.ok(String(openedUrl).startsWith('wss://speech.platform.bing.com'), 'o WebSocket do Edge precisa ser aberto');
+  resetVoiceCooldowns();
+});
+
+test('o tom chega no SSML do Edge como pitch/rate (sem depender de FFmpeg)', () => {
+  const spec = resolveVoiceSpec('masculina --tom grossa --vel -10');
+  const ssml = buildEdgeSsml('boa noite', {
+    voice: spec.voice,
+    pitch: `${spec.pitchPct}%`,
+    rate: `${spec.speedPct}%`,
+    lang: spec.lang
+  });
+  assert.match(ssml, /<voice name='pt-BR-AntonioNeural'>/);
+  assert.match(ssml, /<prosody pitch='-25%' rate='-10%'/);
 });

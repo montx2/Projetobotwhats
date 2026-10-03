@@ -130,7 +130,7 @@ export async function toVoiceOpus(input) {
 }
 
 /**
- * Aplica uma cadeia de filtros de áudio (voz de personagem, eco, tom…).
+ * Aplica uma cadeia de filtros de áudio (tom da voz, eco, recorte…).
  * Sem FFmpeg não é erro fatal: devolve `null` e quem chamou segue sem efeito.
  *
  * @param {Buffer} input áudio original (mp3, ogg, wav…)

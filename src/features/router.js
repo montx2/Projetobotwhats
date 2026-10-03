@@ -38,7 +38,16 @@ import {
   voiceForChat,
   voiceExtraList
 } from './ai.js';
-import { resolveVoice, parseVoiceRequest, voiceNameList } from './voices.js';
+import {
+  describeRecipe,
+  describeSpec,
+  parseVoiceRequest,
+  resolveVoice,
+  resolveVoiceSpec,
+  voiceNameList,
+  voiceRecipe,
+  VOICE_TONES
+} from './voices.js';
 import { resolveDownload, sendDownload, parseQuality, autoDownload, isKnownSocialUrl } from './download.js';
 import {
   ownerMenu,
@@ -775,22 +784,28 @@ function poolsHintRefino() {
 }
 
 /**
- * Frase de exemplo usada na prévia das vozes (`.voz bob` sem texto).
+ * Frase usada na prévia (`.voz grossa` sem texto).
  * Curta de propósito: gasta menos e mostra o timbre na hora.
  */
-function voiceSample(voiceId) {
-  const samples = {
-    bob: 'Eu tô pronto! Eu tô pronto! Hoje eu vou pegar a fórmula do hambúrguer de siri!',
-    lula: 'Meus companheiros e minhas companheiras, o povo brasileiro merece respeito.',
-    narrador: 'Em um mundo dominado pelo caos, apenas um bot ousou responder no grupo.',
-    monstro: 'Raaawr! Alguém chamou o monstro aqui no grupo?',
-    robo: 'Sistema online. Processando comandos. A zoeira não pode parar.',
-    pato: 'Quá! Quá! Isso aqui é um absurdo, quá!'
-  };
-  return (
-    samples[voiceId] ||
-    'Olá! Esta é a minha voz no WhatsApp. Mande .voz e escreva o que quiser que eu falo pra você.'
-  );
+const VOICE_SAMPLE = 'Olá! Esta é a minha voz. Mande .voz com o seu texto que eu falo pra você.';
+
+/**
+ * Envia o áudio como mensagem de voz (ptt). O WhatsApp só toca ptt de forma
+ * confiável em OGG/Opus; sem FFmpeg o arquivo vai como veio (o motor offline
+ * gera WAV) e o mimetype é detectado no cabeçalho para tocar em qualquer aparelho.
+ */
+async function sendVoiceAudio(sock, jid, msg, buffer) {
+  let payload = { audio: buffer, mimetype: detectAudioMime(buffer) };
+  if (hasFfmpeg()) {
+    try {
+      payload = { audio: await toVoiceOpus(buffer), mimetype: 'audio/ogg; codecs=opus', ptt: true };
+    } catch (error) {
+      log.warn(`voz: conversão para opus falhou (${error.message}); enviando o áudio como veio`);
+    }
+  }
+  const sent = await sock.sendMessage(jid, payload, { quoted: msg });
+  if (sent?.key?.id) markBotSent(sent.key.id);
+  return sent;
 }
 
 async function runCommand(sock, msg, cmd, ctx) {
@@ -1181,92 +1196,89 @@ async function runCommand(sock, msg, cmd, ctx) {
       const extra = voiceExtraList();
       const quotedText = extractAnyText(msg.message?.extendedTextMessage?.contextInfo?.quotedMessage || {});
       const parsed = parseVoiceRequest(args, { extra });
-      let voiceName = parsed.voice || voiceForChat(jid);
-      let text2 = parsed.text;
-      // `.voz bob` sem texto = prévia da voz (o texto de exemplo é do próprio bot).
-      if (!text2 && parsed.voice) text2 = voiceSample(voiceName);
-      if (!text2) text2 = quotedText;
-      if (!text2) {
-        return reply(usage(
-          '.voz [voz] <texto>',
-          '.voz bob bom dia, pessoal',
-          `Sem voz, uso a padrão deste chat (${voiceForChat(jid)}). Vozes: ${voiceNameList({ limit: 6, extra })} — lista completa em .vozes`
-        ));
-      }
-      if (!parsed.voice) voiceName = voiceForChat(jid);
-      await reply(wait(`Gerando áudio com a voz ${voiceName}`));
-      const result = await aiVoiceFull(truncate(text2, 1_500), parsed.voice, { jid });
-      await reply(wait('Enviando áudio'));
-      // O WhatsApp só toca mensagem de voz (ptt) de forma confiável em OGG/Opus.
-      // Sem FFmpeg, enviamos o MP3 como áudio normal (sem ptt) para não quebrar.
-      // Sem FFmpeg o arquivo vai como veio (o motor offline gera WAV): o
-      // mimetype é detectado no cabeçalho para o áudio tocar em qualquer aparelho.
-      let payload = { audio: result.buffer, mimetype: detectAudioMime(result.buffer) };
-      if (hasFfmpeg()) {
-        try {
-          payload = { audio: await toVoiceOpus(result.buffer), mimetype: 'audio/ogg; codecs=opus', ptt: true };
-        } catch (e) {
-          log.warn(`voz: conversão para opus falhou (${e.message}); enviando mp3`);
-        }
-      }
-      const sent = await sock.sendMessage(jid, payload, { quoted: msg });
-      if (sent?.key?.id) markBotSent(sent.key.id);
+      // Configurou voz/tom mas não escreveu nada? Manda uma prévia com aquilo.
+      const text2 = parsed.text || quotedText || (parsed.explicit ? VOICE_SAMPLE : null);
+      // `.voz` seco = ajuda (mostra como configurar a voz deste chat).
+      if (!text2) return reply(voiceMenu({ extra, current: voiceForChat(jid) }));
+      const recipe = parsed.explicit ? parsed.recipe : null;
+      await reply(wait(`Gerando áudio · ${describeRecipe(recipe || voiceForChat(jid), { extra })}`));
+      const result = await aiVoiceFull(truncate(text2, 1_500), recipe, { jid });
+      await sendVoiceAudio(sock, jid, msg, result.buffer);
       return reply(ok(
         'Áudio pronto',
-        `${result.voiceLabel} · ${result.engineLabel || result.engine}${result.effects ? ' + efeitos' : ''}` +
-          `${result.fallback ? ' (voz aproximada — a voz exata não respondeu)' : ''}`
+        `${result.settingsLabel} · ${result.engineLabel || result.engine}` +
+          `${result.effects ? ' + efeitos' : ''}` +
+          `${result.fallback ? ' · voz aproximada (o motor principal não respondeu)' : ''}`
       ));
     }
 
     case 'vozes':
     case 'vozlist': {
       const extra = voiceExtraList();
-      // `.vozes bob` (ou `.vozes ouvir bob`) manda um exemplo da voz.
+      // `.vozes masculina grossa` (ou `.vozes ouvir grossa`) manda um exemplo.
       const words = args.map((item) => String(item).toLowerCase());
       const sampleIndex = ['ouvir', 'testar', 'preview', 'exemplo'].includes(words[0]) ? 1 : 0;
-      const maybeVoice = args[sampleIndex];
-      if (maybeVoice) {
-        const spec = resolveVoice(maybeVoice, { extra });
-        await reply(wait(`Gerando exemplo da voz ${spec.label}`));
-        const result = await aiVoiceFull(voiceSample(spec.id), spec.id, { jid });
-        let payload = { audio: result.buffer, mimetype: detectAudioMime(result.buffer) };
-        if (hasFfmpeg()) {
-          try {
-            payload = { audio: await toVoiceOpus(result.buffer), mimetype: 'audio/ogg; codecs=opus', ptt: true };
-          } catch (e) {
-            log.warn(`voz: conversão para opus falhou (${e.message}); enviando mp3`);
-          }
-        }
-        const sent = await sock.sendMessage(jid, payload, { quoted: msg });
-        if (sent?.key?.id) markBotSent(sent.key.id);
-        return reply(ok(`Exemplo: ${spec.label}`, `${result.engineLabel || result.engine}${result.fallback ? ' (aproximada)' : ''} · use .vozpadrao ${spec.id} para fixar`));
-      }
-      return reply(voiceMenu({ extra, current: voiceForChat(jid) }));
+      const wanted = args.slice(sampleIndex);
+      if (!wanted.length) return reply(voiceMenu({ extra, current: voiceForChat(jid) }));
+      const parsed = parseVoiceRequest(wanted, { extra });
+      const recipe = parsed.recipe || voiceForChat(jid);
+      await reply(wait(`Gerando exemplo · ${describeRecipe(recipe, { extra })}`));
+      const result = await aiVoiceFull(VOICE_SAMPLE, recipe, { jid });
+      await sendVoiceAudio(sock, jid, msg, result.buffer);
+      return reply(ok(
+        'Exemplo pronto',
+        `${result.settingsLabel} · ${result.engineLabel || result.engine}` +
+          `${parsed.recipe ? ` · use .vozpadrao ${parsed.recipe} para deixar assim neste chat` : ''}`
+      ));
     }
 
     case 'vozpadrao':
     case 'vozpadrão': {
       const extra = voiceExtraList();
-      const target = String(args[0] || '').trim();
       const chatId = normalizeJid(jid);
-      if (!target) {
-        return reply(usage(
-          '.vozpadrao <voz>',
-          '.vozpadrao bob',
-          `A voz vale só neste chat. Voz atual: ${voiceForChat(jid)}. Use .vozpadrao auto para voltar ao padrão do bot.`
-        ));
+      const current = voiceForChat(jid);
+      if (!args.length) {
+        return reply(card([
+          header(cfg.get().nomeBot, 'voz deste chat'),
+          kv('Configuração atual', describeRecipe(current, { extra })),
+          section('Mudar', [
+            ['.vozpadrao masculina grossa', 'salva a voz e o tom'],
+            ['.vozpadrao --tom -20', 'ajusta só o tom, mantém a voz'],
+            ['.vozpadrao auto', 'volta ao padrão do bot']
+          ]),
+          footer(`Vozes: ${voiceNameList({ extra })} · tons: ${VOICE_TONES.map((tone) => tone.id).join(', ')} · tudo em .vozes`)
+        ]));
       }
-      if (['auto', 'padrao', 'padrão', 'limpar', 'reset', 'nenhuma'].includes(target.toLowerCase())) {
+      if (['auto', 'padrao', 'padrão', 'limpar', 'reset', 'nenhuma'].includes(args.join(' ').trim().toLowerCase())) {
         delete cfg.get().ia.vozChats[chatId];
         cfg.save();
-        return reply(ok('Voz deste chat voltou ao padrão', voiceForChat(jid)));
+        return reply(ok('Voz deste chat voltou ao padrão', describeRecipe(voiceForChat(jid), { extra })));
+      }
+      const parsed = parseVoiceRequest(args, { extra });
+      if (!parsed.explicit) {
+        // Nada do que veio é voz, tom ou flag: o erro do resolveVoice diz o que
+        // existe (com sugestão de digitação), que é mais útil que um uso genérico.
+        resolveVoice(String(args[0] || ''), { extra });
+        return reply(usage(
+          '.vozpadrao <voz> [tom] [--vel N]',
+          '.vozpadrao masculina grossa',
+          'O que você não mudar continua como está. `.vozpadrao auto` volta ao padrão e `.vozes` mostra tudo.'
+        ));
       }
       // Em grupo, trocar a voz do chat exige ser administrador (evita bagunça).
       if (isGroup(jid) && !owner) await requireGroupAdministrator(sock, msg, { owner });
-      const spec = resolveVoice(target, { extra });
-      cfg.get().ia.vozChats[chatId] = spec.id;
+      // Só o que foi pedido muda: o resto vem da configuração atual do chat.
+      const before = parseVoiceRequest(current, { extra });
+      const recipe = voiceRecipe({
+        voice: parsed.voice ?? before.voice,
+        tone: parsed.tone ?? before.tone,
+        speed: parsed.speed ?? before.speed,
+        fx: parsed.fx ?? before.fx
+      });
+      const spec = resolveVoiceSpec(recipe, { extra }); // valida antes de salvar
+      cfg.get().ia.vozChats[chatId] = recipe;
       cfg.save();
-      return reply(ok('Voz deste chat trocada', `${spec.label} — teste com .voz bom dia, pessoal`));
+      return reply(ok('Voz deste chat salva', `${describeSpec(spec)} — teste com .voz bom dia, pessoal`));
     }
 
     case 'traduz':
@@ -1488,7 +1500,7 @@ async function runCommand(sock, msg, cmd, ctx) {
         '',
         `${SYM.section} *VOZ (.voz) — grátis, sem chave*`,
         ...aiVoiceStatus().map((s2) => ` ${SYM.detail} ${s2}`),
-        ` ${SYM.detail} vozes do catálogo: .vozes  ·  vozes extras: VOZES_EXTRA no .env`,
+        ` ${SYM.detail} voz, tom e velocidade: .vozes  ·  vozes extras: VOZES_EXTRA no .env`,
         ` ${SYM.detail} sem internet o motor offline (espeak/piper) assume o comando`,
         '',
         `${SYM.section} *DOWNLOADS*`,

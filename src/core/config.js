@@ -66,10 +66,10 @@ export const DEFAULT_CONFIG = {
   maxMB: 90,
   ia: {
     modeloImagem: 'flux',
-    // Nome amigável do catálogo de vozes (`auto` = melhor voz disponível).
+    // Configuração padrão de voz: voz + tom + velocidade (`auto` = voz padrão).
     vozPadrao: 'auto',
     idiomaVoz: 'pt-BR',
-    // Voz escolhida por chat: { "5511...@s.whatsapp.net": "bob" }.
+    // Voz de cada chat: { "5511...@s.whatsapp.net": "masculina --tom grossa" }.
     vozChats: {},
     sistema: DEFAULT_IA_SYSTEM
   },
@@ -83,7 +83,8 @@ function normalizeVoiceChats(value) {
   const result = {};
   for (const [rawJid, rawVoice] of Object.entries(value).slice(0, 500)) {
     const jid = String(rawJid || '').trim().toLowerCase().replace(/:\d+@/, '@');
-    const voice = String(rawVoice || '').trim().toLowerCase().slice(0, 40);
+    // É uma receita de voz ("masculina --tom grossa --vel -10"), não só um nome.
+    const voice = String(rawVoice || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 120);
     if (!jid || !voice || jid.length > 180) continue;
     result[jid] = voice;
   }
@@ -129,7 +130,7 @@ export function normalizeConfig(saved) {
     ia: {
       modeloImagem: typeof source.ia?.modeloImagem === 'string' ? source.ia.modeloImagem.slice(0, 80) : base.ia.modeloImagem,
       vozPadrao: typeof source.ia?.vozPadrao === 'string' && source.ia.vozPadrao.trim()
-        ? source.ia.vozPadrao.trim().slice(0, 40)
+        ? source.ia.vozPadrao.trim().replace(/\s+/g, ' ').slice(0, 120)
         : base.ia.vozPadrao,
       idiomaVoz: typeof source.ia?.idiomaVoz === 'string' ? source.ia.idiomaVoz.slice(0, 20) : base.ia.idiomaVoz,
       vozChats: normalizeVoiceChats(source.ia?.vozChats),

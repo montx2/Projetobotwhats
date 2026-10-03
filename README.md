@@ -144,10 +144,11 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .ia <pergunta>                  → IA conversa natural e entra na resenha se o contexto pedir
 .criar <descrição> [atalhos]    → geração de imagem (prompt otimizado)
 .criar anime um gato --formato 9:16 --hd  → estilo, enquadramento e nitidez
-.voz <texto>                    → texto para áudio (voz padrão do chat)
-.voz bob <texto>                → fala com uma voz do catálogo
-.vozes                          → lista as vozes · `.vozes bob` ouve a voz
-.vozpadrao bob                  → fixa a voz só neste chat (`auto` volta)
+.voz <texto>                    → texto para áudio (voz do chat)
+.voz grossa <texto>             → tom grave · `.voz fina` faz o contrário
+.voz masculina --tom -30 oi     → voz, tom e velocidade na mesma frase
+.vozes                          → vozes, tons e como configurar · `.vozes grossa` ouve
+.vozpadrao masculina grossa     → salva a voz só neste chat (`auto` volta)
 .traduz <idioma> <texto>        → tradução
 .resumo <texto>                 → resumo
 .clima <cidade>                 → clima atual e previsão do dia
@@ -310,48 +311,75 @@ O estilo também pode vir como primeira palavra (`.criar anime um gato samurai`)
 e `.menucriar` mostra esse guia no WhatsApp. A legenda da imagem diz qual motor
 e qual formato foram usados.
 
-### Voz (`.voz`) — 100% grátis, com vozes de personagem
+### Voz (`.voz`) — 100% grátis, com voz e tom configuráveis
 
 **Nenhum serviço pago entra na voz do bot**: não existe chave de ElevenLabs nem
 de TTS da OpenAI, e nada aqui pede cartão, conta ou cadastro.
 
 O motor principal é o **"Ler em voz alta" do Microsoft Edge**: vozes neurais
-boas, sem chave e sem custo. Sobre ele funciona um catálogo com nome em
-português, então você não precisa decorar nome técnico nenhum:
+brasileiras, sem chave e sem custo. Não há catálogo de personagem para decorar —
+você escolhe **voz**, **tom** e **velocidade**, e o bot aplica isso na própria
+síntese (`<prosody pitch rate>` no SSML), não com efeito de desenho por cima.
 
 ```text
-.voz bom dia, pessoal          → usa a voz padrão deste chat
-.voz bob querido diário        → voz de personagem (paródia)
-.voz lula meus companheiros    → voz de personagem (paródia)
-.voz narrador em um mundo...   → locução de trailer
-.voz antonio boa tarde         → voz brasileira natural
-.voz bob                       → manda um exemplo da voz, sem gerar texto
-.voz "bob é o cara"            → aspas = texto literal, sem trocar de voz
-.vozes                         → catálogo completo (e `.vozes bob` para ouvir)
-.vozpadrao bob                 → fixa a voz neste chat · `.vozpadrao auto` volta
+.voz bom dia, pessoal           → usa a voz configurada neste chat
+.voz grossa boa noite           → tom grave só nesta mensagem
+.voz fina bom dia               → tom agudo
+.voz masculina grossa e aí      → voz + tom na mesma frase
+.voz --tom -35 --vel -10 oi     → ajuste fino, número por número
+.voz masculina                  → sem texto: manda uma prévia daquela voz
+.voz "grossa é o nome"          → aspas = texto literal, sem trocar nada
+.vozes                          → o guia completo (e `.vozes grossa` para ouvir)
+.vozpadrao                      → mostra o que está salvo neste chat
+.vozpadrao masculina grossa     → salva voz + tom neste chat
+.vozpadrao --tom -20            → muda só o tom, mantém a voz
+.vozpadrao auto                 → volta ao padrão do bot
 ```
 
-As vozes de personagem são **paródias feitas com efeitos** (tom, velocidade e
-filtros de FFmpeg) — não são as vozes originais de ninguém, e clonar voz de
-pessoa real exige autorização. São para zoeira no grupo.
+**Vozes:** `auto`, `masculina`, `feminina`, `narrador` (locução grave) e
+`jovem`. Também vale o nome técnico do motor (`.voz pt-BR-YaraNeural oi`) e as
+vozes criadas por você em `VOZES_EXTRA`.
 
-**Criando as suas vozes** (`.env`, sem reiniciar o catálogo é relido a cada uso):
+**Tons:** `muitogrossa` (-45%), `grossa` (-25%), `normal` (0%), `fina` (+25%) e
+`muitofina` (+45%). Quer outro valor? Use o número: `--tom` vai de **-60 a +60**
+(negativo = mais grossa) e `--vel` vai de **-60 a +60** (velocidade da fala).
+
+```text
+.voz masculina --tom -60 --vel -20 boa noite   → o mais grave possível, devagar
+.voz feminina --tom +40 --vel +15 bom dia      → aguda e animada
+```
+
+Onde cada ajuste é aplicado:
+
+| Motor | Tom e velocidade |
+| --- | --- |
+| **edge** (principal) | SSML do serviço — qualidade neural, sem FFmpeg |
+| **espeak** (offline) | parâmetros nativos do binário (`-p`, `-s`) |
+| **piper** e reservas online | FFmpeg: muda a taxa de amostragem e compensa a duração com `atempo` (o timbre muda, a duração não) |
+
+Ou seja: o tom continua valendo mesmo quando o bot cai para um motor de reserva
+— e a legenda do áudio sempre diz o que foi usado
+(`Masculina · tom -25% (grossa) · edge (online, grátis)`).
+
+Efeitos são opcionais e ficam fora do caminho por padrão: `--fx ecoCurto`,
+`--fx radio`, `--fx sussurro` (precisam de FFmpeg; sem ele a voz sai igual, só
+sem o efeito).
+
+**Criando as suas vozes** (`.env`, o catálogo é relido a cada uso):
 
 ```env
 # nome=voz|pitch=+30|rate=+5|fx=nasal+ecoCurto|desc=o que aparece no .vozes
 VOZES_EXTRA=meuvoz=pt-BR-ThalitaNeural|pitch=+25|rate=+10|fx=nasal
-VOZES_EXTRA=meuvoz=pt-BR-ThalitaNeural|pitch=+25|rate=+10|fx=nasal,tio=pt-BR-AntonioNeural|pitch=-10|fx=radio
+VOZES_EXTRA=meuvoz=pt-BR-ThalitaNeural|pitch=+25,meugrave=pt-BR-AntonioNeural|pitch=-10|fx=radio
 ```
 
-Efeitos disponíveis: `nasal`, `grave`, `meioGrave`, `brilho`, `vibrato`,
-`vibratoLeve`, `ecoCurto`, `ecoLongo`, `ecoFantasma`, `robotico`, `radio`,
-`teatro`, `sussurro`, `distorcao` (efeitos precisam de FFmpeg instalado; sem
-ele a voz sai sem o efeito, nunca falha).
+O `--tom` do comando tem prioridade sobre o `pitch` da voz do `.env` (a
+velocidade e os efeitos da voz continuam valendo).
 
 Também dá para escolher o motor na própria voz (todos grátis):
 
 ```env
-VOZES_EXTRA=robo_local=espeak:pt-br+f3|fx=robotico
+VOZES_EXTRA=voz_local=espeak:pt-br+f3|fx=robotico
 VOZES_EXTRA=neurinha=piper:pt_BR-faber-medium.onnx|rate=-10
 ```
 
