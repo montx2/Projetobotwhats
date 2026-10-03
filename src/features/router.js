@@ -63,7 +63,7 @@ import {
   requireAuthorizedGroup,
   requireGroupAdministrator
 } from './group-tools.js';
-import { hasFfmpeg, toVoiceOpus } from '../util/ffmpeg.js';
+import { hasFfmpeg, toVoiceOpus, detectAudioMime } from '../util/ffmpeg.js';
 import { cobaltPool } from './downloaders/cobalt.js';
 import { hasYtDlp, isYtdlpEnabled, findYtdlp } from './downloaders/ytdlp.js';
 import { SlidingWindowLimiter } from '../core/limiter.js';
@@ -1199,7 +1199,9 @@ async function runCommand(sock, msg, cmd, ctx) {
       await reply(wait('Enviando áudio'));
       // O WhatsApp só toca mensagem de voz (ptt) de forma confiável em OGG/Opus.
       // Sem FFmpeg, enviamos o MP3 como áudio normal (sem ptt) para não quebrar.
-      let payload = { audio: result.buffer, mimetype: 'audio/mpeg' };
+      // Sem FFmpeg o arquivo vai como veio (o motor offline gera WAV): o
+      // mimetype é detectado no cabeçalho para o áudio tocar em qualquer aparelho.
+      let payload = { audio: result.buffer, mimetype: detectAudioMime(result.buffer) };
       if (hasFfmpeg()) {
         try {
           payload = { audio: await toVoiceOpus(result.buffer), mimetype: 'audio/ogg; codecs=opus', ptt: true };
@@ -1211,7 +1213,7 @@ async function runCommand(sock, msg, cmd, ctx) {
       if (sent?.key?.id) markBotSent(sent.key.id);
       return reply(ok(
         'Áudio pronto',
-        `${result.voiceLabel} · ${result.engine}${result.effects ? ' + efeitos' : ''}` +
+        `${result.voiceLabel} · ${result.engineLabel || result.engine}${result.effects ? ' + efeitos' : ''}` +
           `${result.fallback ? ' (voz aproximada — a voz exata não respondeu)' : ''}`
       ));
     }
@@ -1227,7 +1229,7 @@ async function runCommand(sock, msg, cmd, ctx) {
         const spec = resolveVoice(maybeVoice, { extra });
         await reply(wait(`Gerando exemplo da voz ${spec.label}`));
         const result = await aiVoiceFull(voiceSample(spec.id), spec.id, { jid });
-        let payload = { audio: result.buffer, mimetype: 'audio/mpeg' };
+        let payload = { audio: result.buffer, mimetype: detectAudioMime(result.buffer) };
         if (hasFfmpeg()) {
           try {
             payload = { audio: await toVoiceOpus(result.buffer), mimetype: 'audio/ogg; codecs=opus', ptt: true };
@@ -1237,7 +1239,7 @@ async function runCommand(sock, msg, cmd, ctx) {
         }
         const sent = await sock.sendMessage(jid, payload, { quoted: msg });
         if (sent?.key?.id) markBotSent(sent.key.id);
-        return reply(ok(`Exemplo: ${spec.label}`, `${result.engine}${result.fallback ? ' (aproximada)' : ''} · use .vozpadrao ${spec.id} para fixar`));
+        return reply(ok(`Exemplo: ${spec.label}`, `${result.engineLabel || result.engine}${result.fallback ? ' (aproximada)' : ''} · use .vozpadrao ${spec.id} para fixar`));
       }
       return reply(voiceMenu({ extra, current: voiceForChat(jid) }));
     }
@@ -1429,7 +1431,10 @@ async function runCommand(sock, msg, cmd, ctx) {
       // marcados como fora do ar, sem precisar reiniciar o bot.
       if (['reset', 'limpar', 'clear'].includes(String(args[0] || '').toLowerCase())) {
         const cleared = resetAiPools();
-        return reply(ok('Pools reiniciados', `cooldowns liberados: ${cleared.keys} chave(s) · ${cleared.models} modelo(s) marcado(s)`));
+        return reply(ok(
+          'Pools reiniciados',
+          `cooldowns liberados: ${cleared.keys} chave(s) · ${cleared.models} modelo(s) · ${cleared.voice || 0} motor(es) de voz`
+        ));
       }
 
       // `.pools recarregar` — relê o .env e remonta os pools: dá para colar
@@ -1481,9 +1486,10 @@ async function runCommand(sock, msg, cmd, ctx) {
         ...aiImageStatus().map((s2) => ` ${SYM.detail} ${s2}`),
         ` ${SYM.detail} refino do prompt: ${poolsHintRefino()}`,
         '',
-        `${SYM.section} *VOZ (.voz)*`,
+        `${SYM.section} *VOZ (.voz) — grátis, sem chave*`,
         ...aiVoiceStatus().map((s2) => ` ${SYM.detail} ${s2}`),
         ` ${SYM.detail} vozes do catálogo: .vozes  ·  vozes extras: VOZES_EXTRA no .env`,
+        ` ${SYM.detail} sem internet o motor offline (espeak/piper) assume o comando`,
         '',
         `${SYM.section} *DOWNLOADS*`,
         ` ${SYM.detail} cobalt ${env.cobaltInstances} instância(s)`,

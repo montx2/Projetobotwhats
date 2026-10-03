@@ -21,10 +21,14 @@
 // Gemini → OpenAI (gpt-image-1) → Pollinations (grátis, sem chave). Formatos,
 // estilos, semente fixa e `--hd` (upscale com FFmpeg) são atalhos do comando.
 //
-// VOZ (`.voz`): motor principal é o Edge (grátis, sem chave, WebSocket nativo
-// do Node 22) sobre o catálogo de vozes de `voices.js` — `.voz bob`,
-// `.voz lula`, `.voz narrador`… Com reserva em cascata (ElevenLabs se houver
-// chave, OpenAI, StreamElements, Google e, por último, Pollinations).
+// VOZ (`.voz`): 100% GRÁTIS — nenhum provedor pago, nenhuma chave obrigatória.
+// Motor principal: Edge (grátis, sem chave, WebSocket nativo do Node 22) sobre
+// o catálogo de vozes de `voices.js` — `.voz bob`, `.voz lula`, `.voz narrador`.
+// Se o Edge falhar (bloqueio de IP, 403, internet caída) a cascata segue com
+// provedores grátis sem chave (StreamElements, Google, Pollinations) e, por
+// último, os motores LOCAIS e OFFLINE (`tts-local.js`: piper/espeak-ng), que
+// não dependem de internet e não custam nada — garantindo que o áudio sempre
+// saia. Nada de ElevenLabs/OpenAI TTS: eram os únicos caminhos pagos.
 // Imagem e voz seguem funcionando só com Pollinations quando não há chave
 // nenhuma (limite menor, ~1 req/15s, e sujeito a 402 em pico de uso).
 
@@ -43,6 +47,7 @@ import {
   resolveVoice
 } from './voices.js';
 import { edgeStatus, edgeTts, isEdgeSupported } from './tts-edge.js';
+import { espeakTts, isFeminineVoice, localStatus, piperTts } from './tts-local.js';
 import {
   convertCurrency,
   extractCurrencyIntent,
@@ -66,10 +71,7 @@ const POOL_DEFS = {
   // Pollinations é grátis sem chave, mas sem chave o limite é ~1 req/15s por
   // IP e devolve 402 quando o uso compartilhado aperta. Com chave(s) grátis
   // (auth.pollinations.ai) o limite sobe bastante.
-  pollinations: { name: 'pollinations', read: () => ENV.pollinationsKeys, cooldownMs: 2 * 60_000 },
-  // ElevenLabs é OPCIONAL: só entra na voz se você colar uma chave. É a única
-  // forma de usar vozes de personagem que existem de verdade no catálogo deles.
-  elevenlabs: { name: 'elevenlabs', read: () => ENV.elevenLabsKeys, cooldownMs: 10 * 60_000 }
+  pollinations: { name: 'pollinations', read: () => ENV.pollinationsKeys, cooldownMs: 2 * 60_000 }
 };
 
 const pools = {};
@@ -1052,22 +1054,27 @@ export function aiImageStatus() {
   return rows;
 }
 
-// ── Voz (TTS com vários provedores) ────────────────────────
+// ── Voz (TTS 100% grátis) ───────────────────────────────────
 //
-// A voz mudou de patamar: o motor principal agora é o Edge (o mesmo "Ler em voz
-// alta" do Microsoft Edge) — vozes neurais boas, GRÁTIS e sem chave. Sobre ele
-// funcionam as vozes do catálogo (.voz bob, .voz lula, .voz narrador…), que usam
-// tom/velocidade no SSML e efeitos de FFmpeg.
+// Motor principal: Edge (o mesmo "Ler em voz alta" do Microsoft Edge) — vozes
+// neurais boas, GRÁTIS e sem chave. Sobre ele funcionam as vozes do catálogo
+// (.voz bob, .voz lula, .voz narrador…), que usam tom/velocidade no SSML e
+// efeitos de FFmpeg.
+//
+// NENHUM provedor pago participa: sem ElevenLabs, sem OpenAI TTS, sem chave
+// obrigatória em lugar nenhum.
 //
 // CADEIA DE RESERVA (o primeiro que entregar áudio válido ganha):
-//   1) Edge             (grátis, sem chave — voz principal)
-//   2) ElevenLabs       (opcional, com ELEVENLABS_KEYS — vozes de personagem reais)
-//   3) OpenAI TTS       (com OPENAI_KEYS)
-//   4) StreamElements   (grátis, vozes Polly pt-BR: Camila/Vitoria/Ricardo)
-//   5) Google Translate (grátis, sem chave)
-//   6) Pollinations     (último recurso)
+//   1) motor da voz      (Edge por padrão; espeak/piper se a voz pedir)
+//   2) StreamElements    (grátis, vozes Polly pt-BR: Camila/Vitoria/Ricardo)
+//   3) Google Translate  (grátis, sem chave)
+//   4) espeak / piper    (LOCAL e OFFLINE — grátis, sem internet, sem chave)
+//   5) Pollinations      (grátis, último recurso)
+//
+// Com `VOZ_LOCAL=1` no .env os motores offline vêm antes das reservas online.
+// Cada motor que falha entra em cooldown: a próxima tentativa não repete a
+// espera à toa.
 
-const OPENAI_TTS_VOICES = new Set(['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse']);
 const POLLY_VOICES = {
   feminina: 'Camila',
   camila: 'Camila',
@@ -1077,6 +1084,9 @@ const POLLY_VOICES = {
   ricardo: 'Ricardo'
 };
 const GOOGLE_TTS_CHUNK = 190;
+// O Pollinations (modelo openai-audio) só entende vozes no estilo OpenAI:
+// traduzimos o gênero pedido para a voz mais próxima.
+const POLLINATIONS_VOICES = Object.freeze({ feminina: 'nova', masculina: 'onyx' });
 
 /** Vozes extras cadastradas no .env (VOZES_EXTRA). */
 export function voiceExtraList() {
@@ -1105,47 +1115,27 @@ function isAudioBuffer(buf) {
   return isMp3(buf) || head === 'OggS' || head === 'RIFF' || buf.subarray(4, 8).toString('latin1') === 'ftyp';
 }
 
-async function openaiTtsOnce(text, voice, key) {
-  const v = OPENAI_TTS_VOICES.has(String(voice).toLowerCase()) ? String(voice).toLowerCase() : 'nova';
-  const buffer = await fetchBuffer(`${OPENAI_BASE}/audio/speech`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: v, input: text, response_format: 'mp3' }),
-    timeoutMs: 120_000,
-    maxBytes: 25 * 1024 * 1024
-  });
-  if (!isAudioBuffer(buffer)) throw new Error('áudio inválido');
-  return buffer;
-}
-
-/** ElevenLabs (opcional): é o único jeito de ter voz de personagem "de verdade". */
-async function elevenLabsTtsOnce(text, voiceId, key) {
-  const buffer = await fetchBuffer(
-    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`,
-    {
-      method: 'POST',
-      headers: { 'xi-api-key': key, 'content-type': 'application/json', accept: 'audio/mpeg' },
-      body: JSON.stringify({
-        text,
-        model_id: 'eleven_multilingual_v2',
-        voice_settings: { stability: 0.45, similarity_boost: 0.8, style: 0.15, use_speaker_boost: true }
-      }),
-      timeoutMs: 180_000,
-      maxBytes: 30 * 1024 * 1024
-    }
-  );
-  if (!isAudioBuffer(buffer)) throw new Error('áudio inválido');
-  return buffer;
+/**
+ * Nome de voz do StreamElements/Polly.
+ * `feminina`/`masculina` (gênero genérico) viram Camila/Ricardo; um nome
+ * próprio (`VOZES_EXTRA=algo=polly:Vitoria`) é respeitado.
+ */
+function pollyVoiceName(voice) {
+  const raw = String(voice || '').trim();
+  const mapped = POLLY_VOICES[raw.toLowerCase()];
+  if (mapped) return mapped;
+  if (/^[a-z]{2,25}$/i.test(raw)) return raw[0].toUpperCase() + raw.slice(1).toLowerCase();
+  return 'Camila';
 }
 
 async function streamElementsTts(text, voice) {
-  const v = POLLY_VOICES[String(voice || '').toLowerCase()] || 'Camila';
+  const v = pollyVoiceName(voice);
   // A API aceita textos longos, mas fatiar reduz erro 400 e timeouts.
   const chunks = splitForTts(text, 480);
   const buffers = [];
   for (const chunk of chunks) {
     const url = `https://api.streamelements.com/kappa/v2/speech?voice=${encodeURIComponent(v)}&text=${encodeURIComponent(chunk)}`;
-    const buf = await fetchBuffer(url, { timeoutMs: 60_000, maxBytes: 20 * 1024 * 1024 });
+    const buf = await fetchBuffer(url, { timeoutMs: 45_000, maxBytes: 20 * 1024 * 1024 });
     if (!isAudioBuffer(buf)) throw new Error('áudio inválido');
     buffers.push(buf);
   }
@@ -1176,7 +1166,7 @@ async function googleTts(text, lang = 'pt-BR') {
 
 async function pollinationsTtsOnce(text, voice, key) {
   const url = `https://text.pollinations.ai/${encodeURIComponent(text)}?model=openai-audio&voice=${encodeURIComponent(voice)}&referrer=nexusbot`;
-  const buffer = await fetchBuffer(url, { timeoutMs: 120_000, maxBytes: 25 * 1024 * 1024, headers: pollinationsAuthHeaders(key) });
+  const buffer = await fetchBuffer(url, { timeoutMs: 60_000, maxBytes: 25 * 1024 * 1024, headers: pollinationsAuthHeaders(key) });
   if (!isAudioBuffer(buffer)) throw new Error('áudio inválido (provedor devolveu texto/erro)');
   return buffer;
 }
@@ -1184,75 +1174,155 @@ async function pollinationsTtsOnce(text, voice, key) {
 /** Voz genérica do provedor quando a voz pedida é de outro motor. */
 function fallbackVoiceFor(spec) {
   const female = /femin|fem|mulher|f$/i.test(`${spec.id} ${spec.label || ''}`) || /Francisca|Thalita|Camila|Vitoria|Emma|Ava|Ana|Nova/i.test(spec.voice || '');
-  if (spec.engine === 'elevenlabs') return 'Camila';
   return female ? 'feminina' : 'masculina';
+}
+
+// ── Cooldown por motor ──────────────────────────────────────────────
+// Um motor que acabou de falhar (serviço fora do ar, IP bloqueado, sem
+// internet) não é tentado de novo a cada `.voz`: sem isso, cada comando
+// repetia a mesma espera longa antes de chegar no motor que funciona.
+const VOICE_PROVIDER_COOLDOWN_MS = 10 * 60_000;
+const voiceCooldowns = new Map(); // nome do motor → instante em que volta a valer
+
+// Teto de tempo para os motores online antes de partir para os offline. Sem
+// isso, uma rede ruim podia prender o `.voz` por minutos a fio.
+const VOICE_TOTAL_BUDGET_MS = 75_000;
+
+/** Nome amigável do motor, usado na legenda do áudio. */
+const VOICE_ENGINE_LABELS = Object.freeze({
+  edge: 'edge (online, grátis)',
+  streamelements: 'streamelements (grátis)',
+  google: 'google tradutor (grátis)',
+  pollinations: 'pollinations (grátis)',
+  espeak: 'espeak local (offline, grátis)',
+  piper: 'piper local (offline, grátis)'
+});
+
+function providerCooling(name) {
+  const until = voiceCooldowns.get(name);
+  if (!until) return false;
+  if (until <= Date.now()) {
+    voiceCooldowns.delete(name);
+    return false;
+  }
+  return true;
+}
+
+function markProviderFailure(name) {
+  voiceCooldowns.set(name, Date.now() + VOICE_PROVIDER_COOLDOWN_MS);
+}
+
+function markProviderSuccess(name) {
+  voiceCooldowns.delete(name);
+}
+
+/** Libera os cooldowns dos motores de voz (usado por `.pools reset`). */
+export function resetVoiceCooldowns() {
+  const cleared = voiceCooldowns.size;
+  voiceCooldowns.clear();
+  return cleared;
+}
+
+/** Motores locais/offline disponíveis nesta máquina, na ordem de preferência. */
+function localProviders(text, spec) {
+  const list = [];
+  const status = localStatus();
+  if (status.piper.installed) list.push(['piper', () => piperTts(text, spec)]);
+  // ESPEAK_VOICE (opcional) usa a mesma voz crua do espeak para todo o catálogo.
+  if (status.espeak.installed) list.push(['espeak', () => espeakTts(text, spec, { override: ENV.espeakVoice })]);
+  return list;
 }
 
 /**
  * Aplica os efeitos do catálogo no áudio já sintetizado.
- * No Edge o tom/velocidade já vão no SSML; nos outros motores o FFmpeg faz o
- * trabalho (mudando a taxa e recompensando com `atempo`).
+ * No Edge o tom/velocidade já vão no SSML e no espeak eles são nativos: nesses
+ * dois só os efeitos (`fx`) passam pelo FFmpeg. Nos demais motores (piper e
+ * reservas online) o FFmpeg também corrige tom e velocidade — mudando a taxa
+ * de amostragem e recompensando a duração com `atempo`.
  */
+const NATIVE_PITCH_ENGINES = new Set(['edge', 'espeak']);
+
 async function applyVoiceEffects(buffer, spec, engineName) {
   const fxChain = buildVoiceFxChain(spec.fx);
-  if (engineName === 'edge') {
+  if (NATIVE_PITCH_ENGINES.has(engineName)) {
     if (!fxChain) return { buffer, effects: false };
     const filtered = await applyAudioFilter(buffer, { filter: fxChain });
     return { buffer: filtered || buffer, effects: Boolean(filtered) };
   }
-  const filter = buildPitchSpeedFilter({ pitchPct: spec.pitchPct, speedPct: spec.speedPct, fx: spec.fx });
+  // No piper a velocidade já saiu nativa (`length_scale`): só o tom e os
+  // efeitos ficam para o FFmpeg.
+  const filter = buildPitchSpeedFilter({
+    pitchPct: spec.pitchPct,
+    speedPct: engineName === 'piper' ? 0 : spec.speedPct,
+    fx: spec.fx
+  });
   if (!filter) return { buffer, effects: false };
   const filtered = await applyAudioFilter(buffer, { filter });
   return { buffer: filtered || buffer, effects: Boolean(filtered) };
 }
 
-/** Lista de provedores de voz na ordem de preferência, já sabendo qual voz usar. */
+/**
+ * Lista de motores na ordem de preferência, já sabendo qual voz usar.
+ * Nada aqui é pago: Edge, reservas grátis sem chave e motores locais/offline.
+ */
 function voiceProviders(text, spec) {
   const list = [];
   const lang = spec.lang || cfg.get().ia?.idiomaVoz || 'pt-BR';
-
-  if (spec.engine === 'edge' && isEdgeSupported()) {
-    list.push([
-      'edge',
-      () => edgeTts(text, {
-        voice: spec.voice,
+  const edgeProvider = () => [
+    'edge',
+    () =>
+      edgeTts(text, {
+        voice: edgeVoiceFor(spec),
         pitch: pct(spec.pitchPct),
         rate: pct(spec.speedPct),
         volume: pct(spec.volumePct),
         lang,
         split: splitForTts,
-        timeoutMs: 90_000
+        timeoutMs: 45_000
       })
-    ]);
-  }
+  ];
 
-  if (spec.engine === 'elevenlabs' && pools.elevenlabs.size) {
-    list.push([
-      'elevenlabs',
-      () => pools.elevenlabs.run((key) => elevenLabsTtsOnce(text, spec.voice, key))
-    ]);
-  }
-
-  if (spec.engine === 'openai' && pools.openai.size) {
-    list.push(['openai', () => pools.openai.run((key) => openaiTtsOnce(text, spec.voice, key))]);
-  }
-
-  // Reservas: funcionam com qualquer voz (a voz exata se perde, o áudio não).
-  if (pools.elevenlabs.size && spec.engine !== 'elevenlabs') {
-    list.push([
-      'elevenlabs',
-      () => pools.elevenlabs.run((key) => elevenLabsTtsOnce(text, ENV.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM', key))
-    ]);
-  }
-  if (pools.openai.size && spec.engine !== 'openai') {
-    list.push(['openai', () => pools.openai.run((key) => openaiTtsOnce(text, fallbackVoiceFor(spec), key))]);
-  }
-  list.push(['streamelements', () => streamElementsTts(text, fallbackVoiceFor(spec))]);
-  list.push(['google', () => googleTts(text, lang)]);
-  if (pools.pollinations.size) {
-    list.push(['pollinations', () => pools.pollinations.run((key) => pollinationsTtsOnce(text, spec.voice, key))]);
+  // 1) O motor que a própria voz pede (Edge no catálogo; espeak/piper quando a
+  //    voz foi criada no .env como `espeak:…` / `piper:…`).
+  if (spec.engine === 'edge') {
+    if (isEdgeSupported() && !providerCooling('edge')) list.push(edgeProvider());
+  } else if (spec.engine === 'polly') {
+    // `VOZES_EXTRA=algo=polly:Camila` — voz da reserva grátis, mas como principal.
+    if (!providerCooling('streamelements')) list.push(['streamelements', () => streamElementsTts(text, spec.voice)]);
   } else {
-    list.push(['pollinations', () => pollinationsTtsOnce(text, spec.voice, '')]);
+    list.push(...localProviders(text, spec).filter(([name]) => name === spec.engine && !providerCooling(name)));
+  }
+
+  // 2) Reservas grátis. Com VOZ_LOCAL=1 o motor offline vem primeiro (útil em
+  //    rede instável: sai na hora e não depende de internet).
+  const pollyVoice = spec.engine === 'polly' ? spec.voice : fallbackVoiceFor(spec);
+  const online = [];
+  if (!providerCooling('streamelements') && !list.some(([name]) => name === 'streamelements')) {
+    online.push(['streamelements', () => streamElementsTts(text, pollyVoice)]);
+  }
+  if (!providerCooling('google')) online.push(['google', () => googleTts(text, lang)]);
+  if (!providerCooling('pollinations')) {
+    const pollinationsVoice = POLLINATIONS_VOICES[fallbackVoiceFor(spec)] || 'nova';
+    online.push([
+      'pollinations',
+      () =>
+        pools.pollinations.size
+          ? pools.pollinations.run((key) => pollinationsTtsOnce(text, pollinationsVoice, key))
+          : pollinationsTtsOnce(text, pollinationsVoice, '')
+    ]);
+  }
+
+  const offline = localProviders(text, spec).filter(
+    ([name]) => !providerCooling(name) && !list.some(([added]) => added === name)
+  );
+
+  if (ENV.vozLocal) list.push(...offline, ...online);
+  else list.push(...online, ...offline);
+
+  // 3) Edge como última cartada quando a voz veio de outro motor (ex.: a voz
+  //    era do espeak e ninguém esperava que o espeak falhasse).
+  if (spec.engine !== 'edge' && isEdgeSupported() && !providerCooling('edge') && !list.some(([name]) => name === 'edge')) {
+    list.push(edgeProvider());
   }
   return list;
 }
@@ -1275,15 +1345,26 @@ export async function aiVoiceFull(text, voiceName, { jid } = {}) {
   const spec = resolveVoice(requested, { extra });
   const errors = [];
   let lastError = null;
+  const startedAt = Date.now();
 
   for (const [name, run] of voiceProviders(text, spec)) {
+    const local = name === 'espeak' || name === 'piper';
+    // Os motores online têm um teto de tempo: passou disso, não vale a pena
+    // fazer o usuário esperar — o motor local (quando existe) responde na hora.
+    if (!local && Date.now() - startedAt > VOICE_TOTAL_BUDGET_MS) {
+      errors.push(`${name}: fora do tempo`);
+      continue;
+    }
     try {
       const raw = await run();
       const { buffer, effects } = await applyVoiceEffects(raw, spec, name);
+      markProviderSuccess(name);
       log.ai(`voz gerada via ${name}${spec.id ? ` (${spec.id})` : ''}${effects ? ' + efeitos' : ''}`);
       return {
         buffer,
         engine: name,
+        engineLabel: VOICE_ENGINE_LABELS[name] || name,
+        offline: local,
         voiceId: spec.id,
         voiceLabel: spec.label || spec.id,
         effects,
@@ -1292,10 +1373,14 @@ export async function aiVoiceFull(text, voiceName, { jid } = {}) {
     } catch (error) {
       lastError = error;
       errors.push(`${name}: ${String(error?.message || error).slice(0, 90)}`);
+      if (!local) markProviderFailure(name);
       log.warn(`voz · ${name} falhou: ${error?.message || error}`);
     }
   }
-  throw new Error(`nenhum provedor de voz respondeu · ${errors.join(' | ')}`, { cause: lastError });
+  const hint = localStatus().any
+    ? ''
+    : ' · para voz offline e grátis: pkg install espeak (Termux) / apt install espeak-ng (Linux)';
+  throw new Error(`nenhum motor de voz respondeu · ${errors.join(' | ')}${hint}`, { cause: lastError });
 }
 
 export async function aiVoice(text, voice) {
@@ -1303,18 +1388,25 @@ export async function aiVoice(text, voice) {
   return result.buffer;
 }
 
-/** Situação das vozes para `.pools` / `.info`. */
+/** Situação das vozes para `.pools` / `.info`. Tudo grátis: nenhum item pago. */
 export function aiVoiceStatus() {
-  const rows = []; 
+  const rows = [];
   const edge = edgeStatus();
-  rows.push(edge.ok ? `edge (principal): ${edge.detail}` : `edge: indisponível — ${edge.detail}`);
+  rows.push(edge.ok ? `edge (principal, online): ${edge.detail}` : `edge (principal, online): indisponível — ${edge.detail}`);
+
+  const local = localStatus();
   rows.push(
-    pools.elevenlabs.size
-      ? `elevenlabs: ${pools.elevenlabs.available}/${pools.elevenlabs.size} chave(s) — vozes de personagem`
-      : 'elevenlabs: sem chave (opcional — ELEVENLABS_KEYS)'
+    local.espeak.installed
+      ? `espeak (offline, grátis): pronto — ${local.espeak.bin}`
+      : 'espeak (offline, grátis): não instalado — Termux: pkg install espeak · Linux: apt install espeak-ng'
   );
-  rows.push(pools.openai.size ? `openai: ${pools.openai.available}/${pools.openai.size} chave(s)` : 'openai: reserva (opcional)');
-  rows.push('streamelements · google: reserva grátis, sem chave');
+  rows.push(
+    local.piper.installed
+      ? `piper (offline, grátis): ${local.piper.model}`
+      : 'piper (offline, grátis): opcional — PIPER_MODEL=/caminho/voz.onnx'
+  );
+  rows.push('streamelements · google · pollinations: reservas grátis, sem chave');
+  if (ENV.vozLocal) rows.push('VOZ_LOCAL=1 — o motor offline é tentado primeiro');
   return rows;
 }
 
@@ -1549,7 +1641,8 @@ export function resetAiPools() {
   const models = blockedModels.size;
   blockedModels.clear();
   discoveredModels.clear();
-  return { keys: cleared, models };
+  const voice = resetVoiceCooldowns();
+  return { keys: cleared, models, voice };
 }
 
 /**

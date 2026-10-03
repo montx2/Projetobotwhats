@@ -28,6 +28,14 @@ if (ff.status === 0) {
   bad('FFmpeg ausente — figurinhas e conversões precisam dele.\n   Termux: pkg install ffmpeg · Linux: apt install ffmpeg · Windows: winget install ffmpeg');
 }
 
+// Voz (.voz) — tudo grátis: motor online sem chave + motores offline opcionais.
+const { localStatus } = await import('../src/features/tts-local.js');
+const voice = localStatus();
+console.log('ℹ️ Voz (.voz): grátis e sem chave — edge (online) + streamelements/google/pollinations (reservas).');
+if (voice.espeak.installed) ok(`voz offline: espeak instalado (${voice.espeak.bin}) — .voz fala até sem internet`);
+else warn('voz offline: espeak não instalado (opcional) — Termux: pkg install espeak · Linux: apt install espeak-ng');
+if (voice.piper.installed) ok(`voz offline neural: piper (${voice.piper.model})`);
+
 // yt-dlp (opcional e desligado por padrão por segurança)
 const { hasYtDlp, findYtdlp, isYtdlpEnabled } = await import('../src/features/downloaders/ytdlp.js');
 const ytdlp = findYtdlp();

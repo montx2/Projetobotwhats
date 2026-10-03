@@ -216,19 +216,22 @@ test('vozes de personagem trazem tom, velocidade e efeitos já definidos', () =>
   for (const [, desc] of voiceCatalogLines()) assert.ok(desc && desc.length > 3);
 });
 
-test('VOZES_EXTRA cria vozes próprias, inclusive em outros motores', () => {
+test('VOZES_EXTRA cria vozes próprias, inclusive nos motores grátis offline', () => {
   const extra = parseCustomVoices(
     'meuvoz=pt-BR-ThalitaNeural|pitch=+25|rate=+10|fx=nasal+ecoCurto|desc=teste,' +
-      'homer=eleven:abc123|fx=grave, semAspas=en-US-GuyNeural'
+      'robô=espeak:pt-br+f3|fx=grave, semAspas=en-US-GuyNeural, neural=piper:voz.onnx|rate=-10'
   );
-  assert.equal(extra.length, 3);
-  const [meuvoz, homer, simples] = extra;
+  assert.equal(extra.length, 4);
+  const [meuvoz, robo, simples, piperVoice] = extra;
   assert.equal(meuvoz.id, 'meuvoz');
   assert.equal(meuvoz.pitch, 25); // campo cru do .env — o público (pitchPct) vem do resolveVoice
   assert.deepEqual(meuvoz.fx, ['nasal', 'ecoCurto']);
-  assert.equal(homer.engine, 'elevenlabs');
-  assert.equal(homer.voice, 'abc123');
+  // Motores locais/offline são grátis; nenhum prefixo aponta para serviço pago.
+  assert.equal(robo.engine, 'espeak');
+  assert.equal(robo.voice, 'pt-br+f3');
   assert.equal(simples.engine, 'edge');
+  assert.equal(piperVoice.engine, 'piper');
+  assert.equal(piperVoice.voice, 'voz.onnx');
 
   const resolved = resolveVoice('meuvoz', { extra });
   assert.equal(resolved.pitchPct, 25);
@@ -391,4 +394,14 @@ test('imagem: falha em todos os modelos vira erro explicativo', async (t) => {
     () => aiImageFull('qualquer coisa --bruto'),
     /não consegui gerar a imagem agora/
   );
+});
+
+test('motores pagos são ignorados com aviso; polly: continua funcionando (grátis)', () => {
+  const extra = parseCustomVoices('antigo=eleven:abc123|fx=grave, daCasa=polly:Vitoria|fx=radio');
+  // A entrada do motor pago sai do catálogo (não quebra o .voz)…
+  assert.equal(extra.length, 1);
+  // …e a voz da reserva grátis segue valendo, agora como motor próprio.
+  assert.equal(extra[0].id, 'dacasa'); // ids são normalizados (sem acento/maiúscula)
+  assert.equal(extra[0].engine, 'polly');
+  assert.equal(extra[0].voice, 'Vitoria');
 });

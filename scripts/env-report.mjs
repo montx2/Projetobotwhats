@@ -7,6 +7,7 @@
 // variável. Se o caminho estiver errado, é só mover/criar o .env ali.
 import { ENV_FILE, loadDotEnv, envList, envBool } from '../src/core/env.js';
 import { envSummary } from '../src/core/config.js';
+import { localStatus } from '../src/features/tts-local.js';
 
 const load = loadDotEnv();
 const s = envSummary();
@@ -42,11 +43,22 @@ line('IMAGE_MODEL', s.imageModel || '— padrão do bot (flux → reservas)');
 line('IMAGE_MODELS', s.imageModels ? `${s.imageModels} modelo(s) fixado(s)` : '— padrão do bot');
 line('GEMINI_IMAGE_MODELS', s.geminiImageModels ? `${s.geminiImageModels} modelo(s) fixado(s)` : '— descoberta automática');
 
-console.log('\n  ── Voz (.voz) ──');
-line('Motor principal', 'edge — grátis, sem chave (WebSocket nativo do Node 22+)');
+console.log('\n  ── Voz (.voz) — 100% grátis, sem chave ──');
+line('Motor principal', 'edge — online, grátis, sem chave (WebSocket nativo do Node 22+)');
+line('Reservas online', 'streamelements · google · pollinations — grátis, sem chave');
+const local = localStatus();
+line(
+  'espeak (offline)',
+  local.espeak.installed
+    ? `✅ ${local.espeak.bin}`
+    : '— não instalado (Termux: pkg install espeak · Linux: apt install espeak-ng)'
+);
+line(
+  'piper (offline)',
+  local.piper.installed ? `✅ ${local.piper.model}` : '— opcional (PIPER_MODEL=/caminho/voz.onnx)'
+);
+line('VOZ_LOCAL', s.vozLocal ? '✅ ligado — o motor offline é tentado primeiro' : '— desligado (padrão)');
 line('VOZES_EXTRA', s.vozesExtra ? `✅ ${s.vozesExtra} voz(es) personalizada(s)` : '— nenhuma (crie vozes no formato nome=voz|pitch=+30|fx=nasal)');
-line('ELEVENLABS_KEYS', s.elevenLabsKeys ? `✅ ${s.elevenLabsKeys} chave(s)` : '— vazio (opcional)');
-line('ELEVENLABS_VOICE_ID', process.env.ELEVENLABS_VOICE_ID || '— padrão (Rachel)');
 
 console.log('\n  ── Downloads ──');
 line('COBALT_INSTANCES', String(envList('COBALT_INSTANCES').length));

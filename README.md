@@ -97,13 +97,13 @@ Esses controles ajudam a reduzir spam e links indesejados, mas **não são moder
 
 ### IA e dados enviados a terceiros
 
-Os comandos de IA usam provedores externos configurados (ou Pollinations quando não há outras chaves). Perguntas, trechos citados, descrições de imagem e texto de voz podem ser enviados ao provedor escolhido para gerar a resposta. **Não envie senhas, dados de pagamento ou informações sensíveis.**
+Os comandos de IA usam provedores externos configurados (ou Pollinations quando não há outras chaves). Perguntas, trechos citados e descrições de imagem podem ser enviados ao provedor de IA escolhido para gerar a resposta; no `.voz`, o texto vai apenas para os motores online grátis que falarem por ele (com o motor offline instalado, a voz sai do próprio aparelho e nada é enviado). **Não envie senhas, dados de pagamento ou informações sensíveis.**
 
 Detalhando o caminho de cada um:
 
 - **`.ia`** — o texto vai para o provedor de chat configurado (Groq, Gemini, OpenAI, endpoint próprio) ou, sem chaves, para o Pollinations.
 - **`.criar`** — a sua descrição é reescrita pelo provedor de chat (quando disponível) e o prompt final vai para o gerador de imagem: Gemini, OpenAI ou Pollinations.
-- **`.voz`** — o texto é falado pelo serviço "Ler em voz alta" do Microsoft Edge (grátis e sem chave; a Microsoft recebe o texto como receberia de qualquer leitor de tela) ou, se ele falhar, pelos provedores de reserva (ElevenLabs/OpenAI/StreamElements/Google/Pollinations, conforme a chave existente).
+- **`.voz`** — a voz é 100% grátis e não usa nenhum serviço pago. O texto é falado pelo serviço "Ler em voz alta" do Microsoft Edge (grátis e sem chave; a Microsoft recebe o texto como receberia de qualquer leitor de tela) ou, se ele falhar, pelos provedores gratuitos de reserva (StreamElements/Google/Pollinations). Com `espeak` instalado há ainda os motores **offline** (`espeak`/`piper`), que falam sem internet e sem enviar o texto para fora.
 
 Tudo isso são serviços de terceiros: a retenção e o uso do texto seguem as políticas de cada um. Em `.pools` você vê quais estão ativos no seu bot.
 
@@ -225,10 +225,12 @@ POLLINATIONS_KEYS=...
 IMAGE_MODEL=flux
 IMAGE_MODELS=flux,turbo,sana
 GEMINI_IMAGE_MODELS=
-# voz (opcional — o motor principal é grátis e não pede chave)
+# voz (opcional — tudo grátis, nada disso pede chave)
 VOZES_EXTRA=meuvoz=pt-BR-ThalitaNeural|pitch=+25|fx=nasal
-ELEVENLABS_KEYS=
-ELEVENLABS_VOICE_ID=
+# usa o motor offline (espeak/piper) antes das reservas online
+VOZ_LOCAL=false
+ESPEAK_VOICE=
+PIPER_MODEL=
 ```
 
 `AI_BASE_URL`/`OPENAI_BASE_URL` são endpoints escolhidos pelo operador; as credenciais configuradas serão enviadas a eles. Use somente endpoints confiáveis. Para serviços locais, configure explicitamente o endereço privado apropriado.
@@ -308,11 +310,14 @@ O estilo também pode vir como primeira palavra (`.criar anime um gato samurai`)
 e `.menucriar` mostra esse guia no WhatsApp. A legenda da imagem diz qual motor
 e qual formato foram usados.
 
-### Voz (`.voz`) — grátis, com vozes de personagem
+### Voz (`.voz`) — 100% grátis, com vozes de personagem
+
+**Nenhum serviço pago entra na voz do bot**: não existe chave de ElevenLabs nem
+de TTS da OpenAI, e nada aqui pede cartão, conta ou cadastro.
 
 O motor principal é o **"Ler em voz alta" do Microsoft Edge**: vozes neurais
-boas, sem chave, sem cadastro e sem custo. Sobre ele funciona um catálogo com
-nome em português, então você não precisa decorar nome técnico nenhum:
+boas, sem chave e sem custo. Sobre ele funciona um catálogo com nome em
+português, então você não precisa decorar nome técnico nenhum:
 
 ```text
 .voz bom dia, pessoal          → usa a voz padrão deste chat
@@ -343,14 +348,37 @@ Efeitos disponíveis: `nasal`, `grave`, `meioGrave`, `brilho`, `vibrato`,
 `teatro`, `sussurro`, `distorcao` (efeitos precisam de FFmpeg instalado; sem
 ele a voz sai sem o efeito, nunca falha).
 
-Quer voz de personagem **de verdade** (licenciada)? Configure
-`ELEVENLABS_KEYS` (plano grátis próprio) e cadastre o id em
-`VOZES_EXTRA=nome=eleven:<voiceId>`. Sem isso, tudo continua funcionando de graça.
+Também dá para escolher o motor na própria voz (todos grátis):
+
+```env
+VOZES_EXTRA=robo_local=espeak:pt-br+f3|fx=robotico
+VOZES_EXTRA=neurinha=piper:pt_BR-faber-medium.onnx|rate=-10
+```
+
+**Voz offline (opcional, grátis e sem internet).** Se você instalar o
+`espeak-ng`, o bot passa a ter um motor local: a voz sai do próprio aparelho,
+sem mandar o texto para fora e sem depender de serviço nenhum.
+
+```bash
+pkg install espeak          # Termux
+apt install espeak-ng       # Debian/Ubuntu
+dnf install espeak-ng       # Fedora
+winget install espeak-ng    # Windows
+```
+
+O `piper` (voz neural offline, mais bonita) também é detectado quando existe
+binário + modelo: `PIPER_MODEL=/caminho/voz.onnx`. Modelos grátis em
+[huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
+Com `VOZ_LOCAL=true` no `.env` o motor offline é tentado antes das reservas
+online — bom para rede instável.
 
 A cadeia de reserva garante que o áudio sai mesmo se o motor principal mudar:
-Edge → ElevenLabs (se houver chave) → OpenAI → StreamElements → Google →
-Pollinations. Qualquer voz do catálogo funciona em qualquer motor da cadeia; o
-bot avisa na legenda quando a voz teve de ser aproximada.
+Edge (online, grátis) → StreamElements → Google → Pollinations →
+**espeak/piper (offline, grátis)**. Com `VOZ_LOCAL=true` o motor offline passa
+na frente das reservas online. Cada motor que falha entra em cooldown de 10 minutos
+(ou `.pools reset` para liberar na hora) e a legenda diz qual motor foi usado.
+Sem o motor offline instalado e sem internet, o `.voz` avisa o que fazer em vez
+de ficar tentando à toa.
 
 ### Remoção de fundo e downloads
 
@@ -395,7 +423,7 @@ src/
 ├── core/       config, HTTP seguro, key pools, armazenamento, limites
 ├── wa/         cliente Baileys, cache, reenvio de mensagens (sent-store), cache de grupos e helpers de mídia em stream
 ├── features/   router, jogos, View Once, Anti-Delete, IA (chat, imagem e voz:
-│              voices.js + tts-edge.js), figurinhas e downloads
+│              voices.js + tts-edge.js + tts-local.js), figurinhas e downloads
 └── util/       streams, FFmpeg, WebP e texto
 scripts/        pareamento, doctor, relatório de ambiente e runner de testes
 ```

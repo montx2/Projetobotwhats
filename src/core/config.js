@@ -276,11 +276,14 @@ const ENV_SCHEMA = {
   imageModel: () => process.env.IMAGE_MODEL || '',
   imageModels: () => envList('IMAGE_MODELS'),
   geminiImageModels: () => envList('GEMINI_IMAGE_MODELS'),
-  // Voz: chaves opcionais do ElevenLabs (vozes de personagem reais) e vozes
-  // personalizadas no formato nome=voz|pitch=+30|rate=+5|fx=nasal.
-  elevenLabsKeys: () => envListAny('ELEVENLABS_KEYS', 'ELEVENLABS_API_KEY', 'ELEVEN_LABS_KEYS', 'XI_API_KEY'),
-  elevenLabsVoiceId: () => process.env.ELEVENLABS_VOICE_ID || '',
+  // Voz: tudo grátis — sem chave de serviço pago. `VOZES_EXTRA` cria vozes no
+  // formato nome=voz|pitch=+30|rate=+5|fx=nasal; `VOZ_LOCAL=1` prefere os
+  // motores offline (espeak/piper) antes das reservas online.
   vozesExtra: () => process.env.VOZES_EXTRA || '',
+  vozLocal: () => envBool('VOZ_LOCAL', false),
+  // Voz crua do espeak para todo o catálogo (ex.: `pt-br+f4`). O piper lê
+  // PIPER_BIN/PIPER_MODEL direto em tts-local.js, junto da detecção dele.
+  espeakVoice: () => process.env.ESPEAK_VOICE || '',
   cobaltInstances: () => envList('COBALT_INSTANCES'),
   cobaltApiKey: () => process.env.COBALT_API_KEY || '',
   tiktokApi: () => envList('TIKTOK_API'),
@@ -325,8 +328,8 @@ export function envSummary() {
     imageModel: ENV.imageModel,
     imageModels: ENV.imageModels.length,
     geminiImageModels: ENV.geminiImageModels.length,
-    elevenLabsKeys: ENV.elevenLabsKeys.length,
     vozesExtra: ENV.vozesExtra ? ENV.vozesExtra.split(/[,;\n]+/).filter((item) => item.includes('=')).length : 0,
+    vozLocal: ENV.vozLocal,
     cobaltInstances: ENV.cobaltInstances.length
   };
 }
