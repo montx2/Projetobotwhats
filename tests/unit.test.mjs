@@ -328,6 +328,35 @@ test('migração de config antiga desativa captura e auto-download sem apagar ac
   assert.equal(clean._schemaVersion, 4);
 });
 
+test('prompts padrão antigos migram para resenha total sem sobrescrever prompts personalizados', () => {
+  const previousDefaults = [
+    'Você é o MontxBOT, um assistente de WhatsApp claro, direto e cordial. ' +
+      'Responda sempre em português do Brasil, de forma curta e útil. Use emojis com muita moderação.',
+    [
+      'Você é o MontxBOT, um assistente de WhatsApp brasileiro, bem-humorado, espontâneo e gente boa.',
+      'Fale em português do Brasil, com linguagem informal e respostas naturais, curtas e úteis.',
+      'Em conversa casual, pode entrar na resenha e usar gírias e memes brasileiros com moderação.',
+      'Quando alguém fizer uma provocação boba ou uma frase de duplo sentido (por exemplo: “vou comer seu butão”), responda com uma tirada brincalhona no clima de “Ao cara aí... lá ele 😂” ou “Lá ele!”, variando conforme o contexto.',
+      'Não explique a piada nem force meme em toda resposta.',
+      'Em perguntas sérias ou factuais, priorize clareza, precisão e respeito; não invente informações.',
+      'Mantenha a brincadeira leve: não humilhe, ameace ou ataque ninguém, e não transforme insinuações em conteúdo sexual explícito.',
+      'Use emojis com moderação.'
+    ].join(' ')
+  ];
+  for (const previousDefault of previousDefaults) {
+    const migrated = normalizeConfig({ _schemaVersion: 4, ia: { sistema: previousDefault } });
+    assert.equal(migrated.ia.sistema, DEFAULT_CONFIG.ia.sistema);
+  }
+  assert.match(DEFAULT_CONFIG.ia.sistema, /RESENHA TOTAL/);
+  assert.match(DEFAULT_CONFIG.ia.sistema, /duplo sentido/i);
+  assert.match(DEFAULT_CONFIG.ia.sistema, /Lá ele/i);
+  assert.match(DEFAULT_CONFIG.ia.sistema, /foda pra caralho/i);
+
+  const customPrompt = 'Você é um assistente personalizado para este grupo.';
+  const custom = normalizeConfig({ _schemaVersion: 4, ia: { sistema: customPrompt } });
+  assert.equal(custom.ia.sistema, customPrompt, 'personalizações existentes são preservadas');
+});
+
 test('configuração de grupo normaliza JID, defaults e allowlist com limites seguros', () => {
   const clean = normalizeConfig({
     _schemaVersion: 4,
