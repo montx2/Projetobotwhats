@@ -151,6 +151,7 @@ test('autorização: ". ativar" libera TUDO no grupo/privado, MENOS View Once e 
   assert.match(publicReply, /INTELIG/i, 'menu público mostra IA');
   assert.match(publicReply, /\.antilink/i, 'menu público apresenta as novas ferramentas de grupo');
   assert.match(publicReply, /\.enquete/i, 'menu público apresenta enquetes');
+  assert.ok(!/\.info\b/i.test(publicReply), 'menu público não deve listar .info');
   assert.ok(!/VIEW ONCE/i.test(publicReply), 'menu público NUNCA deve mostrar View Once');
   assert.ok(!/ANTI-DELETE/i.test(publicReply), 'menu público NUNCA deve mostrar Anti-Delete');
 
@@ -161,12 +162,19 @@ test('autorização: ". ativar" libera TUDO no grupo/privado, MENOS View Once e 
   await handleMessage(sock, textMsg(groupJid, '.ia', { from: friendJid, fromMe: false }), deps);
   assert.ok(sock.sent.length > countBefore, 'figurinhas e IA devem responder no chat ativado');
 
-  // View Once / Anti-Delete / config: 100% ignorados para terceiros (0 rastros)
+  // View Once / Anti-Delete / config / info: 100% ignorados para terceiros (0 rastros)
   const countSecret = sock.sent.length;
   await handleMessage(sock, textMsg(groupJid, '.vo', { from: friendJid, fromMe: false }), deps);
   await handleMessage(sock, textMsg(groupJid, '.antidelete', { from: friendJid, fromMe: false }), deps);
   await handleMessage(sock, textMsg(groupJid, '.config', { from: friendJid, fromMe: false }), deps);
-  assert.equal(sock.sent.length, countSecret, 'View Once, Anti-Delete e config são 100% ignorados no grupo');
+  await handleMessage(sock, textMsg(groupJid, '.info', { from: friendJid, fromMe: false }), deps);
+  await handleMessage(sock, textMsg(groupJid, '.status', { from: friendJid, fromMe: false }), deps);
+  assert.equal(sock.sent.length, countSecret, 'View Once, Anti-Delete, config e info são 100% ignorados para terceiros');
+
+  // O dono pode consultar .info normalmente
+  await handleMessage(sock, textMsg(groupJid, '.info', { from: OWNER_JID, fromMe: true }), deps);
+  assert.equal(sock.sent.length, countSecret + 1, 'dono pode usar .info');
+  assert.match(sock.sent.at(-1).content.text, /status do sistema/i);
 
   // Dono dá ". desativar" no grupo -> bloqueia novamente
   await handleMessage(sock, textMsg(groupJid, '. desativar', { from: OWNER_JID, fromMe: true }), deps);
@@ -420,20 +428,34 @@ test('saudações de grupo só enviam eventos add/remove com opt-in e grupo auto
   assert.match(sock.sent[1].content.text, /Até mais/);
 });
 
-test('enquetes validam opções e limitam envios por usuário/grupo', async () => {
+test('enquetes validam opções, aceitam linguagem natural com IA e limitam envios por usuário/grupo', async (t) => {
   const group = 'enquete-limitada@g.us';
+  const aiGroup = 'enquete-ia@g.us';
   const member = '5531977554433@s.whatsapp.net';
-  cfg.get().autorizados = [group];
+  cfg.get().autorizados = [group, aiGroup];
   const sock = makeSock();
   const deps = makeDeps(sock);
 
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: '{"question":"Hoje tem fut?","options":["Sim","Não","Depende da hora"]}' } }]
+  }), { headers: { 'content-type': 'application/json' } });
+  t.after(() => { globalThis.fetch = originalFetch; });
+
   await handleMessage(sock, textMsg(group, '.enquete Pizza ou massa? | Pizza | Massa', { from: member, fromMe: false }), deps);
   await handleMessage(sock, textMsg(group, '.enquete Café? | Sim | Não', { from: member, fromMe: false }), deps);
+  await handleMessage(sock, textMsg(aiGroup, '.enquete Hoje tem fut , sim ou nao, ou tepende da hora', { from: member, fromMe: false }), deps);
 
-  assert.equal(sock.sent.filter((entry) => entry.content.poll).length, 1, 'o limite silencioso bloqueia enquete repetida');
-  assert.deepEqual(sock.sent[0].content.poll, {
+  const polls = sock.sent.filter((entry) => entry.content.poll).map((entry) => entry.content.poll);
+  assert.equal(polls.length, 2, 'bloqueia enquete repetida no mesmo grupo e cria a enquete via IA no outro grupo');
+  assert.deepEqual(polls[0], {
     name: 'Pizza ou massa?',
     values: ['Pizza', 'Massa'],
+    selectableCount: 1
+  });
+  assert.deepEqual(polls[1], {
+    name: 'Hoje tem fut?',
+    values: ['Sim', 'Não', 'Depende da hora'],
     selectableCount: 1
   });
 });

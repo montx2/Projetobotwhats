@@ -62,10 +62,9 @@ export function publicMenu({ isGroup = true } = {}) {
     ['.cotacao <valor> <origem> <destino>', 'conversão de moedas'],
     ['.feriados [ano] [país]', 'próximos feriados nacionais · padrão BR'],
     ['.menu', 'este painel'],
-    ['.ping', 'testa a velocidade'],
-    ['.info', 'status do bot']
+    ['.ping', 'testa a velocidade']
   ];
-  if (isGroup) utilidades.push(['.enquete pergunta | opção 1 | opção 2', 'cria uma enquete no grupo']);
+  if (isGroup) utilidades.push(['.enquete pergunta | opção 1 | opção 2', 'cria enquete com IA (texto livre ou |)']);
 
   const blocos = [
     header(nome, isGroup ? 'central de comandos' : 'central de comandos · conversa privada'),
@@ -105,7 +104,7 @@ export function ownerMenu() {
       ['.ativos', 'lista os chats liberados']
     ]),
     section('Grupo (use dentro do grupo)', [
-      ['.enquete pergunta | opção 1 | opção 2', 'cria uma enquete'],
+      ['.enquete pergunta | opção 1 | opção 2', 'cria enquete com IA (texto livre ou |)'],
       ['.boasvindas on | off', 'entrada de novos membros'],
       ['.boasvindas saida on | off', 'mensagem quando alguém sai'],
       ['.antilink on | off', 'remove links fora da lista permitida'],

@@ -289,6 +289,142 @@ export async function aiSummary(text) {
   );
 }
 
+const POLL_WORD_FIXES = [
+  [/\bnao\b/gi, 'não'],
+  [/\btepende\b/gi, 'depende'],
+  [/\btalves\b/gi, 'talvez'],
+  [/\bconcerteza\b/gi, 'com certeza'],
+  [/\bsabado\b/gi, 'sábado'],
+  [/\bterca\b/gi, 'terça'],
+  [/\bhorario\b/gi, 'horário'],
+  [/\bninguem\b/gi, 'ninguém'],
+  [/\balguem\b/gi, 'alguém'],
+  [/\bvoce\b/gi, 'você'],
+  [/\btambem\b/gi, 'também'],
+  [/\bja\b/gi, 'já'],
+  [/\bso\b/gi, 'só'],
+  [/\bate\b/gi, 'até']
+];
+
+function polishPollText(text, { isQuestion = false } = {}) {
+  let clean = String(text || '').replace(/\s+/g, ' ').trim();
+  clean = clean.replace(/^[|:;,.!?-]+\s*|\s*[|,;:-]+$/g, '').trim();
+  if (!clean) return '';
+  for (const [pattern, replacement] of POLL_WORD_FIXES) {
+    clean = clean.replace(pattern, (match) => {
+      const isUpper = match[0] === match[0].toUpperCase() && match[0] !== match[0].toLowerCase();
+      return isUpper ? replacement[0].toUpperCase() + replacement.slice(1) : replacement;
+    });
+  }
+  clean = clean[0].toUpperCase() + clean.slice(1);
+  if (isQuestion && !/[?!…]$/.test(clean)) clean += '?';
+  return clean.slice(0, isQuestion ? 200 : 80);
+}
+
+function dedupePollOptions(options) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(options) ? options : []) {
+    const clean = polishPollText(raw, { isQuestion: false });
+    if (!clean) continue;
+    const key = clean.toLocaleLowerCase('pt-BR');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function splitNaturalOptions(raw) {
+  return String(raw || '')
+    .split(/\s*(?:,|;|\/|\n|\bou\b)\s*/i)
+    .map((item) => polishPollText(item, { isQuestion: false }))
+    .filter(Boolean);
+}
+
+export function parseNaturalPollFallback(input) {
+  const raw = String(input || '').trim();
+  if (!raw) throw new Error('informe o tema ou a pergunta da enquete');
+
+  const qMatch = raw.match(/^(.+?[?:])\s+(.+)$/s);
+  if (qMatch) {
+    const question = polishPollText(qMatch[1].replace(/:$/, '?'), { isQuestion: true });
+    const options = dedupePollOptions(splitNaturalOptions(qMatch[2]));
+    if (question && options.length >= 2) return { question, options };
+  }
+
+  const firstSplit = raw.match(/^([^,;\n]+?)\s*[,;\n]+\s*(.+)$/s);
+  if (firstSplit) {
+    const candidateQ = firstSplit[1].trim();
+    const restOptions = dedupePollOptions(splitNaturalOptions(firstSplit[2]));
+    if (!/\bou\b/i.test(candidateQ) && restOptions.length >= 2) {
+      return {
+        question: polishPollText(candidateQ, { isQuestion: true }),
+        options: restOptions
+      };
+    }
+  }
+
+  const directOptions = dedupePollOptions(splitNaturalOptions(raw.replace(/[?!.]+$/, '')));
+  if (directOptions.length >= 2) {
+    return {
+      question: polishPollText(raw, { isQuestion: true }),
+      options: directOptions
+    };
+  }
+
+  return {
+    question: polishPollText(raw, { isQuestion: true }),
+    options: ['Sim', 'Não', 'Talvez']
+  };
+}
+
+function parseAiPollResponse(rawResponse) {
+  const text = String(rawResponse || '').trim();
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch {
+    return null;
+  }
+  const rawQuestion = parsed?.question || parsed?.pergunta || parsed?.title || parsed?.name || '';
+  const rawOptions = parsed?.options || parsed?.opcoes || parsed?.values || parsed?.choices || [];
+  const question = polishPollText(rawQuestion, { isQuestion: true });
+  const options = dedupePollOptions(rawOptions);
+  if (!question || options.length < 2) return null;
+  return { question, options };
+}
+
+/** Interpreta texto livre com IA (e fallback inteligente) para montar uma enquete. */
+export async function aiPoll(text) {
+  const source = String(text || '').trim();
+  if (!source) throw new Error('informe o tema ou a pergunta da enquete');
+  if (source.length > 500) throw new Error('o texto da enquete deve ter no máximo 500 caracteres');
+  const prompt = [
+    'Você transforma pedidos informais no WhatsApp em uma enquete estruturada em português do Brasil.',
+    'Corrija erros de digitação/acentuação (ex.: "tepende da hora" -> "Depende da hora", "nao" -> "Não", "Hoje tem fut" -> "Hoje tem fut?") e separe a pergunta das opções.',
+    'Se a pessoa escreveu apenas a pergunta ou o tema sem listar opções, crie de 2 a 4 opções curtas e naturais.',
+    'Regras:',
+    '- "question": pergunta clara (máximo 200 caracteres), terminada em "?".',
+    '- "options": array com 2 a 12 opções distintas e curtas (máximo 80 caracteres cada).',
+    '- Responda APENAS com JSON puro, sem markdown:',
+    '{"question":"Pergunta?","options":["Opção 1","Opção 2"]}',
+    '',
+    `Pedido: ${source}`
+  ].join('\n');
+  try {
+    const raw = await aiChatRaw(prompt);
+    const parsed = parseAiPollResponse(raw);
+    if (parsed) return parsed;
+  } catch (error) {
+    log.warn('IA para enquete falhou; usando interpretação local', { name: error?.name, status: error?.status });
+  }
+  return parseNaturalPollFallback(source);
+}
+
 async function aiChatRaw(prompt) {
   if (String(prompt).length > 3_000) throw new Error('texto de IA longo demais');
   const messages = [{ role: 'user', content: prompt }];

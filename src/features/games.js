@@ -5,6 +5,9 @@ import { readJson, writeJsonNow } from '../core/store.js';
 import { SYM, header, section, card, footer, kv, mono as wrapMonospace, ok, fail, warn, usage } from '../core/ui.js';
 import { isGroup, normalizeJid } from '../util/text.js';
 import { requireGroupAdministrator } from './group-tools.js';
+import { TERMO_VALID_WORDS, TERMO_WORDS, isValidTermoWord } from './termo-words.js';
+
+export { TERMO_VALID_WORDS, TERMO_WORDS, isValidTermoWord };
 
 const SCORE_FILE = 'games-score.json';
 const MAX_SCORE_PLAYERS = 1_000;
@@ -412,7 +415,7 @@ function gameMenu() {
     section('Tabuleiros', [
       ['.velha [facil|medio|dificil]', 'Jogo da velha contra o bot'],
       ['.velha @oponente | aberto', 'desafio PvP ou partida aberta no grupo'],
-      ['.termo', 'palavra de 5 letras com leitura letra a letra · .termo dica'],
+      ['.termo', 'palavra de 5 letras · .termo dica'],
       ['.forca', 'forca com categorias · .forca dica'],
       ['.minado', 'campo minado 5×5 · A1–E5 · flag A1']
     ]),
@@ -734,64 +737,13 @@ export function renderTermoBoard(attempts = []) {
   });
 }
 
-function termoMissingLetters(attempts = []) {
-  const known = new Set();
-  const missing = new Set();
-  for (const { guess, marks } of attempts) {
-    const letters = normalizeLetters(guess);
-    for (let index = 0; index < letters.length; index++) {
-      if (marks?.[index] === 'absent') missing.add(letters[index]);
-      else known.add(letters[index]);
-    }
-  }
-  return [...missing].filter((letter) => !known.has(letter)).sort().map((letter) => letter.toUpperCase());
-}
-
-const TERMO_WORDS = Object.freeze([
-  'abriu', 'acaso', 'acima', 'acude', 'adeus', 'agora', 'ajuda', 'alado', 'aluno', 'amigo', 'amora', 'anexo',
-  'areia', 'aroma', 'astro', 'atras', 'audio', 'aviao', 'baixa', 'banco', 'barco', 'beijo', 'bicho', 'bolsa',
-  'bravo', 'brisa', 'cabra', 'calma', 'calor', 'campo', 'canto', 'carro', 'carta', 'casal', 'causa', 'cerca',
-  'certo', 'chave', 'cheio', 'chuva', 'ciclo', 'cinza', 'claro', 'cobra', 'coisa', 'conto', 'corpo', 'couro',
-  'creme', 'crime', 'dança'.normalize('NFD').replace(/[\u0300-\u036f]/g, ''), 'dente', 'digno', 'disco', 'doido', 'dolar',
-  'duque', 'etapa', 'falar', 'fardo', 'farol', 'festa', 'filho', 'final', 'firme', 'folha', 'forca', 'frase',
-  'frevo', 'fruta', 'fugir', 'fundo', 'gente', 'gosto', 'grato', 'grupo', 'gueto', 'horta', 'hotel', 'humor',
-  'ideia', 'igual', 'jogar', 'jovem', 'julho', 'justo', 'lacre', 'lapis', 'leite', 'lenda', 'lindo', 'livro',
-  'longe', 'lugar', 'magia', 'magro', 'maior', 'manga', 'manha', 'manso', 'marca', 'massa', 'medir', 'melro',
-  'mente', 'mesmo', 'metro', 'milho', 'minha', 'moeda', 'monte', 'moral', 'morro', 'mundo', 'nadar', 'natal',
-  'navio', 'negro', 'ninho', 'noite', 'norte', 'nuvem', 'olhar', 'oncas', 'ordem', 'orgao', 'outro', 'padre',
-  'pacto', 'pague', 'papel', 'parar', 'parte', 'passe', 'pasta', 'pedra', 'peixe', 'perto', 'piano', 'pilha',
-  'pista', 'plano', 'pobre', 'poder', 'ponto', 'porta', 'prato', 'preto', 'prosa', 'pulso', 'punho', 'quase',
-  'queda', 'quero', 'raiva', 'ramal', 'ramos', 'rasgo', 'regra', 'reino', 'risco', 'ritmo', 'rocha', 'roubo',
-  'sabia', 'sabor', 'salto', 'santo', 'saude', 'selva', 'senso', 'sinal', 'sonho', 'sorte', 'suave', 'tarde',
-  'tecla', 'tempo', 'tenis', 'terra', 'teste', 'tigre', 'tinta', 'toque', 'trama', 'trevo', 'trigo', 'turma',
-  'valer', 'vapor', 'verde', 'verao', 'vigor', 'volta', 'zebra'
-]);
-
-/**
- * Leitura palpito a palpito: cada letra ao lado da sua cor, para ninguém precisar
- * decifrar a grade de emoji. Ex.: "1 *SAIAS* › S 🟩 · A 🟩 · I ⬛ · S 🟨 · A 🟨".
- */
-function termoReadableRows(attempts = []) {
-  return attempts.map((attempt, index) => {
-    const letters = normalizeLetters(attempt.guess).slice(0, 5).toUpperCase().split('');
-    if (!letters.length) return null;
-    const marks = letters
-      .map((letter, position) => `${letter} ${EM[attempt.marks?.[position]] || EM.absent}`)
-      .join(' · ');
-    return `${keycap(index + 1)} *${letters.join('')}* › ${marks}`;
-  }).filter(Boolean);
-}
-
 function termoText(state, detail = '') {
-  const missing = termoMissingLetters(state.attempts);
-  const reading = termoReadableRows(state.attempts);
+  const subtitle = `${state.attempts.length}/6 tentativas${state.hintUsed ? ` · começa com ${state.word[0].toUpperCase()}` : ''}`;
   return card([
-    header('Termo', `${state.attempts.length}/6 tentativas · palavra de 5 letras`),
-    detail || (state.attempts.length ? 'Envie o próximo palpite de 5 letras.' : 'Adivinhe a palavra de cinco letras. Acentos não mudam o palpite.'),
+    header('Termo', subtitle),
+    detail,
     grid(renderTermoBoard(state.attempts)),
-    reading.length ? section('Leitura dos palpites', reading) : '',
-    missing.length ? `Fora da palavra · *${missing.join(' ')}*` : '',
-    footer(`🟩 letra certa no lugar · 🟨 letra em outra posição · ⬛ letra fora${state.hintUsed ? '' : ' · `.termo dica` pede pista'}`)
+    !state.hintUsed && !state.attempts.length ? '_Palpite de 5 letras · `.termo dica`_' : ''
   ]);
 }
 
@@ -802,7 +754,7 @@ async function handleTermo({ msg, args, reply, actor }) {
   if (first === 'dica') {
     if (!state || state.type !== 'termo') return replyMissingGame(state, 'termo', reply, 'Nenhuma partida de Termo ativa', 'inicie com `.termo`');
     state.hintUsed = true;
-    return reply(termoText(state, `Dica: começa com ${state.word[0].toUpperCase()} e tem cinco letras.`));
+    return reply(termoText(state, `Dica: começa com ${state.word[0].toUpperCase()}.`));
   }
   if (['desistir', 'sair', 'cancelar', 'encerrar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });
   if (state?.type !== 'termo') {
@@ -814,25 +766,22 @@ async function handleTermo({ msg, args, reply, actor }) {
   }
   if (state.player.id !== actor.id) return reply(warn('Partida individual', 'quem iniciou este Termo deve enviar os palpites'));
   if (!args.length) return reply(termoText(state, IN_PROGRESS_NOTE));
-  const guess = normalizeLetters(args.join(' '));
-  return applyTermoGuess(state, guess, reply);
+  return applyTermoGuess(state, args.join(' '), reply);
 }
 
 async function applyTermoGuess(state, rawGuess, reply) {
   const guess = normalizeLetters(rawGuess);
-  if (guess.length !== 5) return reply(warn('Palpite inválido', 'envie uma palavra com cinco letras; acentos são aceitos'));
+  if (guess.length !== 5) return reply(warn('Palpite inválido', 'envie uma palavra de 5 letras'));
+  if (!isValidTermoWord(guess)) return reply(warn('Palavra inválida', 'use uma palavra válida em português'));
   if (state.attempts.some((attempt) => attempt.guess === guess)) return reply(warn('Palpite repetido', 'tente uma palavra diferente'));
   const marks = evaluateWordGuess(state.word, guess);
   state.attempts.push({ guess, marks });
-  const solved = guess === state.word;
-  if (solved) {
+  if (guess === state.word) {
     const tries = state.attempts.length;
     finishSession(state, state.player.id);
     return reply(card([
       header('Termo', `vitória em ${tries} ${tries === 1 ? 'tentativa' : 'tentativas'}`),
-      'Você encontrou a palavra.',
       grid(renderTermoBoard(state.attempts)),
-      section('Leitura final', termoReadableRows(state.attempts)),
       '_+3 pontos no placar deste chat._'
     ]));
   }
@@ -841,8 +790,7 @@ async function applyTermoGuess(state, rawGuess, reply) {
     return reply(card([
       header('Termo', 'fim de jogo'),
       `A palavra era ${state.word.toUpperCase()}.`,
-      grid(renderTermoBoard(state.attempts)),
-      section('Leitura final', termoReadableRows(state.attempts))
+      grid(renderTermoBoard(state.attempts))
     ]));
   }
   return reply(termoText(state));
@@ -1834,7 +1782,7 @@ export async function tryHandleDirectGameMove(sock, msg, text, { reply, authoriz
     }
     return false;
   }
-  if (state.type === 'termo' && /^[A-Za-zÀ-ÿ]{5}$/.test(value)) {
+  if (state.type === 'termo' && /^(?:\p{L}\p{M}*){5}$/u.test(value) && normalizeLetters(value).length === 5) {
     await applyTermoGuess(state, value, reply);
     return true;
   }
