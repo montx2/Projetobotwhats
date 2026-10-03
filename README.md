@@ -99,6 +99,14 @@ Esses controles ajudam a reduzir spam e links indesejados, mas **não são moder
 
 Os comandos de IA usam provedores externos configurados (ou Pollinations quando não há outras chaves). Perguntas, trechos citados, descrições de imagem e texto de voz podem ser enviados ao provedor escolhido para gerar a resposta. **Não envie senhas, dados de pagamento ou informações sensíveis.**
 
+Detalhando o caminho de cada um:
+
+- **`.ia`** — o texto vai para o provedor de chat configurado (Groq, Gemini, OpenAI, endpoint próprio) ou, sem chaves, para o Pollinations.
+- **`.criar`** — a sua descrição é reescrita pelo provedor de chat (quando disponível) e o prompt final vai para o gerador de imagem: Gemini, OpenAI ou Pollinations.
+- **`.voz`** — o texto é falado pelo serviço "Ler em voz alta" do Microsoft Edge (grátis e sem chave; a Microsoft recebe o texto como receberia de qualquer leitor de tela) ou, se ele falhar, pelos provedores de reserva (ElevenLabs/OpenAI/StreamElements/Google/Pollinations, conforme a chave existente).
+
+Tudo isso são serviços de terceiros: a retenção e o uso do texto seguem as políticas de cada um. Em `.pools` você vê quais estão ativos no seu bot.
+
 A IA conversa em português do Brasil num tom natural e tranquilo, sem gírias ou emojis por padrão. Se a pessoa vier na brincadeira, pode acompanhar com humor e uma resposta esperta, sem imitar cada gíria; provocações inofensivas e frases vulgares entram na resenha, sem respostas automáticas de recusa. Em perguntas sérias ou situações delicadas, prioriza clareza e cuidado. A memória de conversa é isolada por chat e remetente, fica apenas em RAM por até 30 minutos e é limitada em tamanho; `.ia reset` limpa a memória daquele remetente. Prompts não são gravados nos logs. A retenção e o tratamento pelo provedor externo seguem as políticas desse provedor.
 
 ### APIs públicas de utilidades
@@ -134,8 +142,12 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .yt <link> / .ytmp3 <link>      → YouTube / áudio
 .tw <link> / .face <link>       → X/Twitter / Facebook
 .ia <pergunta>                  → IA conversa natural e entra na resenha se o contexto pedir
-.criar <descrição>              → geração de imagem
-.voz <texto>                    → texto para áudio
+.criar <descrição> [atalhos]    → geração de imagem (prompt otimizado)
+.criar anime um gato --formato 9:16 --hd  → estilo, enquadramento e nitidez
+.voz <texto>                    → texto para áudio (voz padrão do chat)
+.voz bob <texto>                → fala com uma voz do catálogo
+.vozes                          → lista as vozes · `.vozes bob` ouve a voz
+.vozpadrao bob                  → fixa a voz só neste chat (`auto` volta)
 .traduz <idioma> <texto>        → tradução
 .resumo <texto>                 → resumo
 .clima <cidade>                 → clima atual e previsão do dia
@@ -209,6 +221,14 @@ AI_KEYS=...
 AI_MODEL=...
 AI_MODELS=...
 POLLINATIONS_KEYS=...
+# imagem (opcional — sem nada aqui já funciona pelo Pollinations)
+IMAGE_MODEL=flux
+IMAGE_MODELS=flux,turbo,sana
+GEMINI_IMAGE_MODELS=
+# voz (opcional — o motor principal é grátis e não pede chave)
+VOZES_EXTRA=meuvoz=pt-BR-ThalitaNeural|pitch=+25|fx=nasal
+ELEVENLABS_KEYS=
+ELEVENLABS_VOICE_ID=
 ```
 
 `AI_BASE_URL`/`OPENAI_BASE_URL` são endpoints escolhidos pelo operador; as credenciais configuradas serão enviadas a eles. Use somente endpoints confiáveis. Para serviços locais, configure explicitamente o endereço privado apropriado.
@@ -257,6 +277,81 @@ Personalize a ordem com `GROQ_MODELS`, `GEMINI_MODELS`, `OPENAI_MODELS` e
 em uso, `.pools reset` limpa os cooldowns e as marcas de modelo na hora e
 `.pools recarregar` relê o `.env` sem reiniciar o bot.
 
+### Imagem (`.criar`) — como a qualidade subiu
+
+Sem configurar nada, o bot já gera imagem pelo Pollinations (grátis). A diferença
+está em três passos:
+
+1. **o prompt é reescrito pela IA** — o seu pedido em português vira um prompt
+   em inglês com sujeito, cenário, luz, lente e nível de detalhe (modelos de
+   imagem entendem muito melhor assim). Se a IA estiver indisponível, o pedido
+   original é usado — nunca fica sem imagem por causa disso;
+2. **o melhor motor disponível desenha** — Gemini (com `GEMINI_KEYS`) → OpenAI
+   `gpt-image-1` (com `OPENAI_KEYS`) → Pollinations (grátis, sem chave);
+3. **acabamento opcional** — `--hd` amplia a imagem com FFmpeg (lanczos +
+   nitidez) para ela não chegar borrada no celular.
+
+Atalhos do comando:
+
+```text
+--formato 1:1 | 16:9 | 9:16 | 4:3 | 3:4 | 3:2   (aceita também quadrado, vertical, paisagem…)
+--estilo realista | anime | cartoon | 3d | pintura | aquarela | desenho |
+         cyberpunk | pixel | logo | terror | cartoon3d | mangá
+--seed 1234      repete exatamente a mesma imagem
+--modelo flux    força um modelo do provedor
+--sem <coisa>    pede para evitar um elemento
+--hd             amplia no final (FFmpeg)
+--bruto          não reescreve o prompt (mais rápido, mais fiel ao seu texto)
+```
+
+O estilo também pode vir como primeira palavra (`.criar anime um gato samurai`)
+e `.menucriar` mostra esse guia no WhatsApp. A legenda da imagem diz qual motor
+e qual formato foram usados.
+
+### Voz (`.voz`) — grátis, com vozes de personagem
+
+O motor principal é o **"Ler em voz alta" do Microsoft Edge**: vozes neurais
+boas, sem chave, sem cadastro e sem custo. Sobre ele funciona um catálogo com
+nome em português, então você não precisa decorar nome técnico nenhum:
+
+```text
+.voz bom dia, pessoal          → usa a voz padrão deste chat
+.voz bob querido diário        → voz de personagem (paródia)
+.voz lula meus companheiros    → voz de personagem (paródia)
+.voz narrador em um mundo...   → locução de trailer
+.voz antonio boa tarde         → voz brasileira natural
+.voz bob                       → manda um exemplo da voz, sem gerar texto
+.voz "bob é o cara"            → aspas = texto literal, sem trocar de voz
+.vozes                         → catálogo completo (e `.vozes bob` para ouvir)
+.vozpadrao bob                 → fixa a voz neste chat · `.vozpadrao auto` volta
+```
+
+As vozes de personagem são **paródias feitas com efeitos** (tom, velocidade e
+filtros de FFmpeg) — não são as vozes originais de ninguém, e clonar voz de
+pessoa real exige autorização. São para zoeira no grupo.
+
+**Criando as suas vozes** (`.env`, sem reiniciar o catálogo é relido a cada uso):
+
+```env
+# nome=voz|pitch=+30|rate=+5|fx=nasal+ecoCurto|desc=o que aparece no .vozes
+VOZES_EXTRA=meuvoz=pt-BR-ThalitaNeural|pitch=+25|rate=+10|fx=nasal
+VOZES_EXTRA=meuvoz=pt-BR-ThalitaNeural|pitch=+25|rate=+10|fx=nasal,tio=pt-BR-AntonioNeural|pitch=-10|fx=radio
+```
+
+Efeitos disponíveis: `nasal`, `grave`, `meioGrave`, `brilho`, `vibrato`,
+`vibratoLeve`, `ecoCurto`, `ecoLongo`, `ecoFantasma`, `robotico`, `radio`,
+`teatro`, `sussurro`, `distorcao` (efeitos precisam de FFmpeg instalado; sem
+ele a voz sai sem o efeito, nunca falha).
+
+Quer voz de personagem **de verdade** (licenciada)? Configure
+`ELEVENLABS_KEYS` (plano grátis próprio) e cadastre o id em
+`VOZES_EXTRA=nome=eleven:<voiceId>`. Sem isso, tudo continua funcionando de graça.
+
+A cadeia de reserva garante que o áudio sai mesmo se o motor principal mudar:
+Edge → ElevenLabs (se houver chave) → OpenAI → StreamElements → Google →
+Pollinations. Qualquer voz do catálogo funciona em qualquer motor da cadeia; o
+bot avisa na legenda quando a voz teve de ser aproximada.
+
 ### Remoção de fundo e downloads
 
 ```env
@@ -299,7 +394,8 @@ A suíte executa os arquivos de teste em processos sequenciais, cada um com `NEX
 src/
 ├── core/       config, HTTP seguro, key pools, armazenamento, limites
 ├── wa/         cliente Baileys, cache, reenvio de mensagens (sent-store), cache de grupos e helpers de mídia em stream
-├── features/   router, jogos, View Once, Anti-Delete, IA, figurinhas e downloads
+├── features/   router, jogos, View Once, Anti-Delete, IA (chat, imagem e voz:
+│              voices.js + tts-edge.js), figurinhas e downloads
 └── util/       streams, FFmpeg, WebP e texto
 scripts/        pareamento, doctor, relatório de ambiente e runner de testes
 ```

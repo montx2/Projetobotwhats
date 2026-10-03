@@ -19,7 +19,26 @@ import { isViewOnce, onViewOnceMessage, unwrapViewOnce } from './viewonce.js';
 import { makeSticker, packInfo, isAnimatedWebp, parseFit } from './sticker.js';
 import { stickerSourcesForCommand } from './stickerlink.js';
 import { removeBackground, bgStatus, bgPools } from './bgremoval.js';
-import { aiChat, aiImage, aiVoice, aiTranslate, aiSummary, aiPoll, resetChatMemory, resetChatMemoryForChat, aiStatus, aiModelStatus, aiPoolSizes, resetAiPools, reloadAiPools } from './ai.js';
+import {
+  aiChat,
+  aiImageFull,
+  aiVoiceFull,
+  aiVoiceStatus,
+  aiImageStatus,
+  aiTranslate,
+  aiSummary,
+  aiPoll,
+  resetChatMemory,
+  resetChatMemoryForChat,
+  aiStatus,
+  aiModelStatus,
+  aiPoolSizes,
+  resetAiPools,
+  reloadAiPools,
+  voiceForChat,
+  voiceExtraList
+} from './ai.js';
+import { resolveVoice, parseVoiceRequest, voiceNameList } from './voices.js';
 import { resolveDownload, sendDownload, parseQuality, autoDownload, isKnownSocialUrl } from './download.js';
 import {
   ownerMenu,
@@ -28,6 +47,8 @@ import {
   downloadMenu,
   stickerMenu,
   antiDeleteMenu,
+  voiceMenu,
+  imageMenu,
   infoText
 } from './menu.js';
 import { extractUrls, truncate, uptimeText, isGroup, normalizeJid, parseBool } from '../util/text.js';
@@ -69,7 +90,7 @@ const EXPENSIVE_COMMANDS = new Set([
   'fundo', 'removefundo', 'rmbg', 'removebg', 'ia', 'ai', 'gpt', 'chat',
   'clima', 'tempo', 'previsao', 'previsão', 'cotacao', 'cotação', 'cambio', 'câmbio', 'feriados',
   'criar', 'img',
-  'gerar', 'imagine', 'desenhar', 'voz', 'tts', 'falar', 'traduz', 'traduzir', 'resumo', 'resumir',
+  'gerar', 'imagine', 'desenhar', 'voz', 'tts', 'falar', 'vozes', 'traduz', 'traduzir', 'resumo', 'resumir',
   'dl', 'download', 'baixar', 'tt', 'tiktok', 'tiktokdl', 'ttmp3', 'tiktokmp3', 'ttaudio',
   'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels', 'yt', 'youtube', 'ytb',
   'video', 'ytmp3', 'youtubemp3', 'ytaudio', 'mp3', 'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb'
@@ -111,6 +132,7 @@ function isExpensiveRequest(command, msg) {
     if (args[0]?.toLowerCase() === 'reset') return false;
     return Boolean(args.length || quoted);
   }
+  if (name === 'vozes') return args.length > 0; // só a prévia da voz gasta provedor
   return Boolean(args.length || quoted);
 }
 
@@ -745,6 +767,32 @@ function revokeChatFeatures(jid) {
   clearGroupSettings(jid);
 }
 
+/** Dica curta sobre o que está refinando o prompt de imagem no momento. */
+function poolsHintRefino() {
+  const sizes = aiPoolSizes();
+  if (sizes.gemini || sizes.openai || sizes.groq || sizes.custom) return 'ligado (usa a IA configurada)';
+  return 'ligado (Pollinations grátis)';
+}
+
+/**
+ * Frase de exemplo usada na prévia das vozes (`.voz bob` sem texto).
+ * Curta de propósito: gasta menos e mostra o timbre na hora.
+ */
+function voiceSample(voiceId) {
+  const samples = {
+    bob: 'Eu tô pronto! Eu tô pronto! Hoje eu vou pegar a fórmula do hambúrguer de siri!',
+    lula: 'Meus companheiros e minhas companheiras, o povo brasileiro merece respeito.',
+    narrador: 'Em um mundo dominado pelo caos, apenas um bot ousou responder no grupo.',
+    monstro: 'Raaawr! Alguém chamou o monstro aqui no grupo?',
+    robo: 'Sistema online. Processando comandos. A zoeira não pode parar.',
+    pato: 'Quá! Quá! Isso aqui é um absurdo, quá!'
+  };
+  return (
+    samples[voiceId] ||
+    'Olá! Esta é a minha voz no WhatsApp. Mande .voz e escreva o que quiser que eu falo pra você.'
+  );
+}
+
 async function runCommand(sock, msg, cmd, ctx) {
   const { name, args } = cmd;
   const { reply, isOwner, inOwnerPrivate } = ctx;
@@ -880,6 +928,14 @@ async function runCommand(sock, msg, cmd, ctx) {
       return reply({ poll: { name: question, values: options, selectableCount: 1 } });
     }
 
+    case 'menucriar':
+    case 'menuimagem':
+      return reply(imageMenu());
+
+    case 'menuvoz':
+    case 'menuvozes':
+      return reply(voiceMenu({ extra: voiceExtraList(), current: voiceForChat(jid) }));
+
     case 'menudl':
     case 'downloadmenu':
       return reply(downloadMenu());
@@ -905,6 +961,8 @@ async function runCommand(sock, msg, cmd, ctx) {
           cacheSize: messageCache.size(),
           bgRows: bgStatus(),
           aiRows: [...aiStatus(), ...aiModelStatus()],
+          imageRows: aiImageStatus(),
+          voiceRows: aiVoiceStatus(),
           poolRows: [
             'tikwm: ativo (TikTok)',
             'innertube: ativo (YouTube)',
@@ -1100,11 +1158,19 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'gerar':
     case 'imagine':
     case 'desenhar': {
-      if (!argText) return reply(usage('.criar <ideia>', '.criar um gato astronauta em marte, realista'));
-      await reply(wait('Gerando sua imagem · pode levar até 1 min'));
-      const buffer = await aiImage(argText);
+      if (!argText) return reply(imageMenu());
+      if (['ajuda', 'help', 'menus', '?', 'opcoes', 'opções'].includes(argText.trim().toLowerCase())) {
+        return reply(imageMenu());
+      }
+      await reply(wait('Refinando a ideia e gerando a imagem · pode levar até 1 min'));
+      const result = await aiImageFull(argText);
       await reply(wait('Enviando imagem'));
-      const sent = await sock.sendMessage(jid, { image: buffer, caption: `${SYM.section} Imagem criada · "${truncate(argText, 200)}"` }, { quoted: msg });
+      const caption = [
+        `${SYM.section} *Imagem criada*  ${SYM.detail}  _"${truncate(result.prompt, 160)}"_`,
+        `${SYM.dot} ${result.engine}/${result.model}${result.format ? ` · ${result.format}` : ''}${result.hd ? ' · HD' : ''}` +
+          `${result.refined ? ' · prompt otimizado' : ''}`
+      ].join('\n');
+      const sent = await sock.sendMessage(jid, { image: result.buffer, caption }, { quoted: msg });
       if (sent?.key?.id) markBotSent(sent.key.id);
       return reply(ok('Imagem pronta'));
     }
@@ -1112,24 +1178,93 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'voz':
     case 'tts':
     case 'falar': {
-      const text2 = argText || extractAnyText(msg.message?.extendedTextMessage?.contextInfo?.quotedMessage || {});
-      if (!text2) return reply(usage('.voz <texto>', '.voz bom dia, pessoal'));
-      await reply(wait('Gerando áudio'));
-      const raw = await aiVoice(truncate(text2, 900));
+      const extra = voiceExtraList();
+      const quotedText = extractAnyText(msg.message?.extendedTextMessage?.contextInfo?.quotedMessage || {});
+      const parsed = parseVoiceRequest(args, { extra });
+      let voiceName = parsed.voice || voiceForChat(jid);
+      let text2 = parsed.text;
+      // `.voz bob` sem texto = prévia da voz (o texto de exemplo é do próprio bot).
+      if (!text2 && parsed.voice) text2 = voiceSample(voiceName);
+      if (!text2) text2 = quotedText;
+      if (!text2) {
+        return reply(usage(
+          '.voz [voz] <texto>',
+          '.voz bob bom dia, pessoal',
+          `Sem voz, uso a padrão deste chat (${voiceForChat(jid)}). Vozes: ${voiceNameList({ limit: 6, extra })} — lista completa em .vozes`
+        ));
+      }
+      if (!parsed.voice) voiceName = voiceForChat(jid);
+      await reply(wait(`Gerando áudio com a voz ${voiceName}`));
+      const result = await aiVoiceFull(truncate(text2, 1_500), parsed.voice, { jid });
       await reply(wait('Enviando áudio'));
       // O WhatsApp só toca mensagem de voz (ptt) de forma confiável em OGG/Opus.
       // Sem FFmpeg, enviamos o MP3 como áudio normal (sem ptt) para não quebrar.
-      let payload = { audio: raw, mimetype: 'audio/mpeg' };
+      let payload = { audio: result.buffer, mimetype: 'audio/mpeg' };
       if (hasFfmpeg()) {
         try {
-          payload = { audio: await toVoiceOpus(raw), mimetype: 'audio/ogg; codecs=opus', ptt: true };
+          payload = { audio: await toVoiceOpus(result.buffer), mimetype: 'audio/ogg; codecs=opus', ptt: true };
         } catch (e) {
           log.warn(`voz: conversão para opus falhou (${e.message}); enviando mp3`);
         }
       }
       const sent = await sock.sendMessage(jid, payload, { quoted: msg });
       if (sent?.key?.id) markBotSent(sent.key.id);
-      return reply(ok('Áudio pronto'));
+      return reply(ok(
+        'Áudio pronto',
+        `${result.voiceLabel} · ${result.engine}${result.effects ? ' + efeitos' : ''}` +
+          `${result.fallback ? ' (voz aproximada — a voz exata não respondeu)' : ''}`
+      ));
+    }
+
+    case 'vozes':
+    case 'vozlist': {
+      const extra = voiceExtraList();
+      // `.vozes bob` (ou `.vozes ouvir bob`) manda um exemplo da voz.
+      const words = args.map((item) => String(item).toLowerCase());
+      const sampleIndex = ['ouvir', 'testar', 'preview', 'exemplo'].includes(words[0]) ? 1 : 0;
+      const maybeVoice = args[sampleIndex];
+      if (maybeVoice) {
+        const spec = resolveVoice(maybeVoice, { extra });
+        await reply(wait(`Gerando exemplo da voz ${spec.label}`));
+        const result = await aiVoiceFull(voiceSample(spec.id), spec.id, { jid });
+        let payload = { audio: result.buffer, mimetype: 'audio/mpeg' };
+        if (hasFfmpeg()) {
+          try {
+            payload = { audio: await toVoiceOpus(result.buffer), mimetype: 'audio/ogg; codecs=opus', ptt: true };
+          } catch (e) {
+            log.warn(`voz: conversão para opus falhou (${e.message}); enviando mp3`);
+          }
+        }
+        const sent = await sock.sendMessage(jid, payload, { quoted: msg });
+        if (sent?.key?.id) markBotSent(sent.key.id);
+        return reply(ok(`Exemplo: ${spec.label}`, `${result.engine}${result.fallback ? ' (aproximada)' : ''} · use .vozpadrao ${spec.id} para fixar`));
+      }
+      return reply(voiceMenu({ extra, current: voiceForChat(jid) }));
+    }
+
+    case 'vozpadrao':
+    case 'vozpadrão': {
+      const extra = voiceExtraList();
+      const target = String(args[0] || '').trim();
+      const chatId = normalizeJid(jid);
+      if (!target) {
+        return reply(usage(
+          '.vozpadrao <voz>',
+          '.vozpadrao bob',
+          `A voz vale só neste chat. Voz atual: ${voiceForChat(jid)}. Use .vozpadrao auto para voltar ao padrão do bot.`
+        ));
+      }
+      if (['auto', 'padrao', 'padrão', 'limpar', 'reset', 'nenhuma'].includes(target.toLowerCase())) {
+        delete cfg.get().ia.vozChats[chatId];
+        cfg.save();
+        return reply(ok('Voz deste chat voltou ao padrão', voiceForChat(jid)));
+      }
+      // Em grupo, trocar a voz do chat exige ser administrador (evita bagunça).
+      if (isGroup(jid) && !owner) await requireGroupAdministrator(sock, msg, { owner });
+      const spec = resolveVoice(target, { extra });
+      cfg.get().ia.vozChats[chatId] = spec.id;
+      cfg.save();
+      return reply(ok('Voz deste chat trocada', `${spec.label} — teste com .voz bom dia, pessoal`));
     }
 
     case 'traduz':
@@ -1341,6 +1476,14 @@ async function runCommand(sock, msg, cmd, ctx) {
           : [` ${SYM.detail} sem provedor com chave — usando Pollinations grátis`]),
         ` ${SYM.detail} defina a ordem com GROQ_MODELS / GEMINI_MODELS no .env`,
         ` ${SYM.detail} modelo 404 (descontinuado) é ignorado sozinho`,
+        '',
+        `${SYM.section} *IMAGEM (.criar)*`,
+        ...aiImageStatus().map((s2) => ` ${SYM.detail} ${s2}`),
+        ` ${SYM.detail} refino do prompt: ${poolsHintRefino()}`,
+        '',
+        `${SYM.section} *VOZ (.voz)*`,
+        ...aiVoiceStatus().map((s2) => ` ${SYM.detail} ${s2}`),
+        ` ${SYM.detail} vozes do catálogo: .vozes  ·  vozes extras: VOZES_EXTRA no .env`,
         '',
         `${SYM.section} *DOWNLOADS*`,
         ` ${SYM.detail} cobalt ${env.cobaltInstances} instância(s)`,

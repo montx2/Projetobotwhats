@@ -129,6 +129,71 @@ export async function toVoiceOpus(input) {
   }
 }
 
+/**
+ * Aplica uma cadeia de filtros de áudio (voz de personagem, eco, tom…).
+ * Sem FFmpeg não é erro fatal: devolve `null` e quem chamou segue sem efeito.
+ *
+ * @param {Buffer} input áudio original (mp3, ogg, wav…)
+ * @param {{filter: string, ext?: string, bitrate?: string, timeoutMs?: number}} opts
+ * @returns {Promise<Buffer|null>} áudio filtrado, ou null quando não deu
+ */
+export async function applyAudioFilter(input, { filter, ext = '.mp3', bitrate = '96k', timeoutMs = 90_000 } = {}) {
+  if (!hasFfmpeg() || !filter) return null;
+  const inFile = tmpFile('.audio-in');
+  const outFile = tmpFile(ext);
+  fs.writeFileSync(inFile, input);
+  try {
+    const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', inFile, '-vn', '-af', filter];
+    if (ext === '.mp3') args.push('-c:a', 'libmp3lame', '-b:a', bitrate, '-ar', '44100');
+    else if (ext === '.ogg') args.push('-c:a', 'libopus', '-b:a', bitrate);
+    args.push(outFile);
+    await runFfmpeg(args, { timeoutMs });
+    const buf = fs.readFileSync(outFile);
+    if (!buf.length) throw new Error('ffmpeg não gerou áudio');
+    return buf;
+  } catch (error) {
+    console.warn(`[ffmpeg] efeito de voz falhou (${String(error?.message || error).slice(0, 160)})`);
+    return null;
+  } finally {
+    fs.rmSync(inFile, { force: true });
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
+/**
+ * Aumenta a imagem (e dá uma leve nitidez) para quem pediu `--hd` no .criar.
+ * Melhora a leitura no celular sem depender das APIs de upscale por IA.
+ *
+ * @param {Buffer} input imagem original
+ * @param {{factor?: number, maxSide?: number, quality?: number}} opts
+ * @returns {Promise<Buffer|null>} PNG/JPEG ampliado, ou null quando não deu
+ */
+export async function upscaleImage(input, { factor = 2, maxSide = 3072, quality = 92 } = {}) {
+  if (!hasFfmpeg()) return null;
+  const realExt = detectMediaExt(input, '.jpg');
+  const inFile = tmpFile(realExt);
+  const outFile = tmpFile('.jpg');
+  fs.writeFileSync(inFile, input);
+  try {
+    // `scale` com lado máximo evita estourar memória no celular (Termux).
+    const filter =
+      `scale=iw*${factor}:ih*${factor}:flags=lanczos,` +
+      `scale='min(iw,${maxSide})':'min(ih,${maxSide})':flags=lanczos,` +
+      'unsharp=5:5:0.7:5:5:0.0';
+    await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', inFile, '-vf', filter, '-frames:v', '1',
+      '-q:v', String(Math.max(2, Math.min(8, Math.round((100 - quality) / 12 + 2)))), outFile], { timeoutMs: 90_000 });
+    const buf = fs.readFileSync(outFile);
+    if (!buf.length) throw new Error('ffmpeg não gerou imagem');
+    return buf.length > input.length * 8 ? null : buf; // resultado absurdo = descarta
+  } catch (error) {
+    console.warn(`[ffmpeg] upscale falhou (${String(error?.message || error).slice(0, 160)})`);
+    return null;
+  } finally {
+    fs.rmSync(inFile, { force: true });
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
 /** Detecta a extensão real pelo cabeçalho binário (magic bytes). */
 export function detectMediaExt(buf, fallback = '.jpg') {
   if (!Buffer.isBuffer(buf) || buf.length < 4) return fallback;

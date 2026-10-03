@@ -8,6 +8,7 @@ import { cfg } from '../core/config.js';
 import { PLATFORM, PLATFORM_LABEL } from '../core/platform.js';
 import { hasYtDlp } from './downloaders/ytdlp.js';
 import { SYM, header, section, cmd, footer, card, kv } from '../core/ui.js';
+import { VOICE_CATEGORIES, voiceCatalogLines } from './voices.js';
 
 const STICKER_ITEMS = [
   ['.s', 'foto, vídeo ou GIF vira figurinha'],
@@ -31,8 +32,10 @@ const AI_ITEMS = [
   ['.ia clima <cidade>', 'responde usando dados atuais do clima'],
   ['.ia cotacao <valor> <origem> <destino>', 'conversão com taxa de referência'],
   ['.ia feriados [ano] [país]', 'consulta feriados nacionais'],
-  ['.criar <ideia>', 'gera uma imagem'],
-  ['.voz <texto>', 'transforma texto em áudio'],
+  ['.criar <ideia>', 'gera imagem (prompt otimizado) · `.menucriar` para os atalhos'],
+  ['.voz [voz] <texto>', 'texto em áudio · vozes de personagem'],
+  ['.vozes', 'lista as vozes (bob, lula, narrador…) · `.vozes bob` ouve'],
+  ['.vozpadrao <voz>', 'fixa a voz só neste chat'],
   ['.traduz <idioma> <texto>', 'tradução instantânea'],
   ['.resumo <texto>', 'resume textos longos']
 ];
@@ -215,7 +218,69 @@ export function antiDeleteMenu() {
   ]);
 }
 
-export function infoText({ uptime, cacheSize, bgRows, aiRows, poolRows, ownerName }) {
+/**
+ * Catálogo de vozes em cartão. O usuário escolhe pelo NOME (`.voz bob`), então
+ * o menu mostra exatamente o que digitar — não o nome técnico da voz.
+ */
+export function voiceMenu({ extra = [], current = 'auto' } = {}) {
+  const blocos = (categoria) =>
+    section(VOICE_CATEGORIES[categoria] || categoria, voiceCatalogLines({ category: categoria, extra }));
+
+  const categorias = ['pt', 'personagens', 'idiomas'];
+  const custom = extra.length ? section('Suas vozes (VOZES_EXTRA)', voiceCatalogLines({ category: 'custom', extra })) : '';
+
+  return card([
+    header(cfg.get().nomeBot, 'vozes · escolha pelo nome'),
+    kv('Voz deste chat', current),
+    ...categorias.map((categoria) => blocos(categoria)),
+    custom,
+    section('Como usar', [
+      ['.voz <texto>', 'usa a voz padrão deste chat'],
+      ['.voz bob <texto>', 'fala com a voz escolhida'],
+      ['.voz bob', 'manda um exemplo da voz'],
+      ['.vozes bob', 'ouve o exemplo direto do catálogo'],
+      ['.vozpadrao bob', 'fixa a voz neste chat (auto volta ao padrão)'],
+      ['.voz "bob é o cara"', 'aspas = texto literal, sem trocar de voz']
+    ]),
+    footer(
+      'Personagens são paródias por efeitos de voz (não são as vozes originais). ' +
+        'Quer a sua? Cadastre em VOZES_EXTRA no .env — veja o README.'
+    )
+  ]);
+}
+
+/** Cartão com os atalhos do `.criar`. */
+export function imageMenu() {
+  return card([
+    header(cfg.get().nomeBot, 'imagem · atalhos do .criar'),
+    section('Formato', [
+      ['.criar --formato 1:1', 'quadrado (padrão)'],
+      ['.criar --formato 9:16', 'vertical · stories'],
+      ['.criar --formato 16:9', 'paisagem · cinema'],
+      ['.criar --formato 3:4', 'retrato']
+    ]),
+    section('Estilo', [
+      ['.criar anime <ideia>', 'também: realista, cartoon, 3d, pintura, aquarela'],
+      ['', 'desenho, cyberpunk, pixel, logo, terror, cartoon3d, mangá'],
+      ['.criar <ideia> --estilo anime', 'mesma coisa, em qualquer posição']
+    ]),
+    section('Qualidade', [
+      ['.criar <ideia> --hd', 'amplia no final (nitidez no celular)'],
+      ['.criar <ideia> --bruto', 'não reescreve o prompt na IA (mais rápido)'],
+      ['.criar <ideia> --seed 1234', 'repete a mesma imagem'],
+      ['.criar <ideia> --modelo flux', 'força um modelo do provedor'],
+      ['.criar <ideia> --sem <coisa>', 'pede para evitar um elemento']
+    ]),
+    section('Como funciona', [
+      '1. a IA reescreve o seu pedido em inglês, com luz, lente e detalhes',
+      '2. o melhor gerador disponível desenha (Gemini → OpenAI → Pollinations)',
+      '3. o bot manda a imagem com o modelo usado na legenda'
+    ]),
+    footer('Exemplo completo: .criar anime um gato samurai na chuva --formato 9:16 --hd')
+  ]);
+}
+
+export function infoText({ uptime, cacheSize, bgRows, aiRows, imageRows = [], voiceRows = [], poolRows, ownerName }) {
   const rows = (arr) => arr.map((r) => ` ${SYM.detail} ${r}`).join('\n');
   return card([
     header(cfg.get().nomeBot, 'status do sistema'),
@@ -228,6 +293,8 @@ export function infoText({ uptime, cacheSize, bgRows, aiRows, poolRows, ownerNam
     ].join('\n'),
     `${SYM.section} *REMOÇÃO DE FUNDO*\n${rows(bgRows)}`,
     `${SYM.section} *INTELIGÊNCIA ARTIFICIAL*\n${rows(aiRows)}`,
+    `${SYM.section} *IMAGEM (.criar)*\n${rows(imageRows)}`,
+    `${SYM.section} *VOZ (.voz)*\n${rows(voiceRows)}`,
     `${SYM.section} *DOWNLOADERS*\n${rows(poolRows)}`
   ]);
 }

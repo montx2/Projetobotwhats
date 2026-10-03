@@ -16,15 +16,33 @@
 //      Se todos os modelos conhecidos falharem, ele ainda pergunta ao provedor
 //      quais modelos existem (GET /models) e usa um deles.
 //
-// Imagem e voz: sempre Pollinations — com POLLINATIONS_KEYS se configurado,
-// senão anônimo (limite bem menor, ~1 req/15s, e sujeito a 402 em pico de uso).
+// IMAGEM (`.criar`): o prompt é refinado pela IA (em inglês, com detalhes de
+// cena/luz/lente) e depois passa pelo melhor gerador disponível —
+// Gemini → OpenAI (gpt-image-1) → Pollinations (grátis, sem chave). Formatos,
+// estilos, semente fixa e `--hd` (upscale com FFmpeg) são atalhos do comando.
+//
+// VOZ (`.voz`): motor principal é o Edge (grátis, sem chave, WebSocket nativo
+// do Node 22) sobre o catálogo de vozes de `voices.js` — `.voz bob`,
+// `.voz lula`, `.voz narrador`… Com reserva em cascata (ElevenLabs se houver
+// chave, OpenAI, StreamElements, Google e, por último, Pollinations).
+// Imagem e voz seguem funcionando só com Pollinations quando não há chave
+// nenhuma (limite menor, ~1 req/15s, e sujeito a 402 em pico de uso).
 
 import { KeyPool, isModelError, isModelMissingForEveryone, formatCooldown } from '../core/keypool.js';
 import { ENV, cfg } from '../core/config.js';
 import { loadDotEnv, ENV_FILE } from '../core/env.js';
 import { postJson, fetchJson, fetchBuffer, sleep } from '../core/http.js';
 import { log } from '../core/logger.js';
-import { normalizeJid } from '../util/text.js';
+import { normalizeJid, splitForTts } from '../util/text.js';
+import { applyAudioFilter, upscaleImage } from '../util/ffmpeg.js';
+import {
+  buildPitchSpeedFilter,
+  buildVoiceFxChain,
+  parseCustomVoices,
+  pct,
+  resolveVoice
+} from './voices.js';
+import { edgeStatus, edgeTts, isEdgeSupported } from './tts-edge.js';
 import {
   convertCurrency,
   extractCurrencyIntent,
@@ -48,7 +66,10 @@ const POOL_DEFS = {
   // Pollinations é grátis sem chave, mas sem chave o limite é ~1 req/15s por
   // IP e devolve 402 quando o uso compartilhado aperta. Com chave(s) grátis
   // (auth.pollinations.ai) o limite sobe bastante.
-  pollinations: { name: 'pollinations', read: () => ENV.pollinationsKeys, cooldownMs: 2 * 60_000 }
+  pollinations: { name: 'pollinations', read: () => ENV.pollinationsKeys, cooldownMs: 2 * 60_000 },
+  // ElevenLabs é OPCIONAL: só entra na voz se você colar uma chave. É a única
+  // forma de usar vozes de personagem que existem de verdade no catálogo deles.
+  elevenlabs: { name: 'elevenlabs', read: () => ENV.elevenLabsKeys, cooldownMs: 10 * 60_000 }
 };
 
 const pools = {};
@@ -570,46 +591,507 @@ function textProviders(messages) {
   return providers;
 }
 
-// ── Geração de imagem (Pollinations) ───────────────────────
-async function aiImageOnce(prompt, { width, height, model, seed }, key) {
+
+// ── Geração de imagem ──────────────────────────────────────
+//
+// TRÊS CAMADAS DE QUALIDADE (e nenhuma delas depende de chave paga):
+//   1) PROMPT MELHOR: o pedido em português é reescrito pela IA em inglês, com
+//      sujeito, cenário, luz, lente e nível de detalhe. Modelos de imagem são
+//      treinados em inglês — é aqui que a diferença aparece mais.
+//   2) MELHOR MOTOR: usa Gemini (se houver chave grátis do Google AI Studio) ou
+//      OpenAI gpt-image-1 (se houver OPENAI_KEYS); sem chave nenhuma, usa o
+//      Pollinations, que é grátis.
+//   3) ACABAMENTO: `--hd` amplia com FFmpeg (lanczos + nitidez) para a imagem
+//      não chegar borrada no celular.
+//
+// Formatos e estilos são atalhos: `.criar anime um gato --formato 9:16 --hd`.
+
+const IMAGE_FORMATS = Object.freeze({
+  '1:1': { width: 1024, height: 1024, label: 'quadrado 1:1' },
+  '16:9': { width: 1536, height: 864, label: 'paisagem 16:9' },
+  '9:16': { width: 864, height: 1536, label: 'vertical 9:16' },
+  '4:3': { width: 1280, height: 960, label: 'paisagem 4:3' },
+  '3:4': { width: 960, height: 1280, label: 'retrato 3:4' },
+  '3:2': { width: 1536, height: 1024, label: 'foto 3:2' }
+});
+
+const IMAGE_FORMAT_ALIASES = Object.freeze({
+  quadrado: '1:1',
+  square: '1:1',
+  paisagem: '16:9',
+  horizontal: '16:9',
+  wide: '16:9',
+  cinema: '16:9',
+  vertical: '9:16',
+  retrato: '9:16',
+  stories: '9:16',
+  story: '9:16',
+  celular: '9:16',
+  foto: '3:2',
+  tablet: '4:3'
+});
+
+const IMAGE_STYLES = Object.freeze({
+  realista: 'photorealistic, 50mm photo, natural lighting, ultra detailed, sharp focus',
+  foto: 'photorealistic, 50mm photo, natural lighting, ultra detailed, sharp focus',
+  anime: 'anime style, cel shading, vibrant colors, detailed line art, studio quality',
+  cartoon: 'cartoon illustration, bold clean outlines, flat vibrant colors',
+  '3d': '3d render, soft studio lighting, subsurface scattering, high detail',
+  pintura: 'oil painting, visible brush strokes, canvas texture, dramatic lighting',
+  aquarela: 'watercolor painting, soft washes, visible paper texture',
+  desenho: 'pencil sketch, hand drawn, hatching, monochrome',
+  cyberpunk: 'cyberpunk, neon lights, volumetric fog, cinematic, night city',
+  pixel: 'pixel art, 16-bit, crisp pixels, limited palette',
+  logo: 'minimalist vector logo, flat design, centered, clean solid background',
+  terror: 'dark horror atmosphere, moody lighting, film grain, unsettling',
+  cartoon3d: 'cute 3d cartoon character, pixar-like, soft lighting, big expressive eyes',
+  mangá: 'manga style, black and white ink, screentone shading',
+  manga: 'manga style, black and white ink, screentone shading'
+});
+
+/** Reconhece `--flag valor` e `--flag=valor` e devolve o texto limpo. */
+export function extractImageFlags(raw) {
+  const flags = {};
+  const text = String(raw || '').replace(
+    // O valor só é consumido quando ele realmente existe: assim `--hd --seed 42`
+    // não engole a flag seguinte e o espaço entre as duas é preservado.
+    /(?:^|\s)-{1,2}(modelo|model|formato|proporcao|proporção|estilo|style|seed|semente|sem|no|bruto|rapido|rápido|hd)\b(?:=(?:"([^"]*)"|'([^']*)'|(\S+))|\s+(?:"([^"]*)"|'([^']*)'|((?!--)\S+)))?/gi,
+    (match, key, dqEq, sqEq, eqValue, dqSpace, sqSpace, spaceValue) => {
+      const k = String(key).toLowerCase();
+      const value = String(eqValue ?? spaceValue ?? dqEq ?? dqSpace ?? sqEq ?? sqSpace ?? '')
+        .replace(/^["']|["']$/g, '');
+      if (['bruto', 'rapido', 'rápido'].includes(k)) flags.refine = false;
+      else if (k === 'hd') flags.hd = true;
+      else if (['modelo', 'model'].includes(k)) flags.model = value;
+      else if (['formato', 'proporcao', 'proporção'].includes(k)) flags.format = value;
+      else if (['estilo', 'style'].includes(k)) flags.style = value;
+      else if (['seed', 'semente'].includes(k)) flags.seed = value;
+      else if (['sem', 'no'].includes(k)) flags.negative = value;
+      return ' ';
+    }
+  );
+  return { flags, text: text.replace(/\s+/g, ' ').trim() };
+}
+
+/**
+ * Interpreta o pedido inteiro do usuário: texto + atalhos.
+ * @returns {{prompt: string, style: string|null, format: object, model: string|null, seed: number, refine: boolean, hd: boolean, negative: string}}
+ */
+export function parseImageRequest(raw, { defaultModel } = {}) {
+  const { flags, text } = extractImageFlags(raw);
+  let prompt = text;
+  let style = null;
+  let negative = flags.negative || '';
+
+  // Estilo também pode ser pedido como primeira palavra: `.criar anime um gato`
+  // — só quando a palavra é exatamente um estilo conhecido.
+  const first = prompt.split(/\s+/)[0]?.toLowerCase();
+  const styleKey = first ? Object.keys(IMAGE_STYLES).find((key) => key === first) : null;
+  if (styleKey && prompt.length > styleKey.length) {
+    style = styleKey;
+    prompt = prompt.slice(first.length).trim();
+  }
+
+  if (flags.style) {
+    const wanted = String(flags.style).toLowerCase();
+    const found = Object.keys(IMAGE_STYLES).find((key) => key === wanted);
+    style = found || style;
+    if (!found) prompt = `${prompt}, ${flags.style}`.trim();
+  }
+
+  const formatKey = flags.format ? IMAGE_FORMAT_ALIASES[String(flags.format).toLowerCase()] || String(flags.format) : null;
+  const format = formatKey && IMAGE_FORMATS[formatKey] ? { key: formatKey, ...IMAGE_FORMATS[formatKey] } : null;
+
+  const seedValue = Number(flags.seed);
+  const seed = Number.isFinite(seedValue) && seedValue > 0
+    ? Math.floor(seedValue) % 1_000_000_000
+    : Math.floor(Math.random() * 1_000_000_000);
+
+  if (negative) negative = String(negative).slice(0, 200);
+  if (!prompt) prompt = String(raw || '').trim();
+
+  return {
+    prompt: prompt.slice(0, 1_200),
+    style,
+    stylePrompt: style ? IMAGE_STYLES[style] : null,
+    format,
+    model: flags.model ? String(flags.model).slice(0, 80) : defaultModel || null,
+    seed,
+    refine: flags.refine !== false,
+    hd: flags.hd === true,
+    negative
+  };
+}
+
+/** Junta o pedido do usuário + estilo + enquadramento num prompt só. */
+export function composeImagePrompt({ prompt, stylePrompt, negative, format }) {
+  const parts = [String(prompt || '').trim()];
+  if (stylePrompt) parts.push(stylePrompt);
+  if (format) parts.push(`${format.label}, composition fits the frame`);
+  if (negative) parts.push(`avoid: ${negative}`);
+  return parts.filter(Boolean).join(', ').slice(0, 1_500);
+}
+
+/** Promessa com tempo máximo — usada no refino do prompt. */
+function withTimeout(promise, ms, message = 'tempo esgotado') {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    })
+  ]);
+}
+
+/**
+ * Reescreve o pedido em inglês com detalhes que os modelos de imagem gostam.
+ * Falhou? Sem drama: usa o pedido original (a imagem sai do mesmo jeito).
+ */
+async function refineImagePrompt(prompt, { style, negative } = {}) {
+  const ask = [
+    'Você é um diretor de arte que escreve prompts para geradores de imagem (Flux, Gemini, DALL-E).',
+    'Reescreva o pedido do usuário em INGLÊS, em UMA linha única e corrida, mantendo a intenção original.',
+    'Descreva o sujeito, a ação, o cenário, a iluminação, o enquadramento e o nível de detalhe.',
+    'Não use markdown, não explique, não faça perguntas e não invente texto escrito na imagem.',
+    'Responda APENAS com o prompt final, com no máximo 60 palavras.',
+    style ? `Estilo obrigatório: ${style}.` : null,
+    negative ? `Evite aparecer: ${negative}.` : null,
+    `Pedido: ${prompt}`
+  ].filter(Boolean).join('\n');
+  const result = await aiChatRaw(ask);
+  const clean = String(result || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^[^:]{0,40}:\s*/, '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean || clean.length < 8) throw new Error('prompt refinado vazio');
+  return clean.slice(0, 900);
+}
+
+// ── Pollinations (grátis, sem chave) ───────────────────────
+const POLLINATIONS_PREFERRED_MODELS = ['flux', 'turbo', 'kontext', 'sana'];
+let pollinationsModelsCache = { at: 0, models: [] };
+
+/** Lista os modelos de imagem que o serviço anuncia agora (cache de 30 min). */
+async function pollinationsImageModels({ timeoutMs = 12_000 } = {}) {
+  if (pollinationsModelsCache.at && Date.now() - pollinationsModelsCache.at < 30 * 60_000) {
+    return pollinationsModelsCache.models;
+  }
+  try {
+    const data = await fetchJson('https://image.pollinations.ai/models', { timeoutMs, maxBytes: 512 * 1024 });
+    const models = (Array.isArray(data) ? data : [])
+      .map((entry) => String(entry?.id || entry?.name || entry || '').trim())
+      .filter(Boolean);
+    pollinationsModelsCache = { at: Date.now(), models };
+    return models;
+  } catch {
+    pollinationsModelsCache = { at: Date.now(), models: [] };
+    return [];
+  }
+}
+
+/** Ordem de tentativa: preferidos que existem hoje + o resto do que o serviço lista. */
+async function pollinationsModelChain(requested) {
+  const known = (await pollinationsImageModels()).map((model) => model.toLowerCase());
+  const preferred = [requested, ...POLLINATIONS_PREFERRED_MODELS].filter(Boolean);
+  const chain = [];
+  for (const model of preferred) {
+    if (!known.length || known.includes(String(model).toLowerCase())) chain.push(model);
+  }
+  for (const model of known) if (!chain.includes(model)) chain.push(model);
+  return chain.length ? chain : [requested || 'flux'];
+}
+
+async function pollinationsImageOnce(prompt, { width, height, model, seed }, key) {
   const url =
     `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
-    `?width=${width}&height=${height}&seed=${seed}&model=${model}&nologo=true&safe=true&referrer=nexusbot`;
-  const buffer = await fetchBuffer(url, { timeoutMs: 180_000, maxBytes: 40 * 1024 * 1024, headers: pollinationsAuthHeaders(key) });
-  if (buffer.length < 1024) throw new Error('imagem gerada vazia');
+    `?width=${width}&height=${height}&seed=${seed}&model=${encodeURIComponent(model)}` +
+    '&nologo=true&private=true&safe=true&referrer=nexusbot';
+  const buffer = await fetchBuffer(url, {
+    timeoutMs: 180_000,
+    maxBytes: 40 * 1024 * 1024,
+    headers: pollinationsAuthHeaders(key)
+  });
+  if (!isImageBuffer(buffer)) throw new Error('a resposta não é uma imagem');
   return buffer;
 }
 
-export async function aiImage(prompt, { width = 1024, height = 1024, model } = {}) {
-  prompt = String(prompt || '').trim();
-  if (!prompt) throw new Error('descreva a imagem que deseja criar');
-  if (prompt.length > 1_200) throw new Error('descrição longa demais (máximo 1.200 caracteres)');
-  width = Math.min(1536, Math.max(256, Number(width) || 1024));
-  height = Math.min(1536, Math.max(256, Number(height) || 1024));
-  const m = model || cfg.get().ia.modeloImagem || 'flux';
-  const seed = Math.floor(Math.random() * 1_000_000_000);
-  log.ai('gerando imagem (prompt não é gravado nos logs)');
-  const opts = { width, height, model: m, seed };
-  if (pools.pollinations.size) {
-    return pools.pollinations.run((key) => aiImageOnce(prompt, opts, key));
+async function pollinationsImage(prompt, opts) {
+  const chain = await pollinationsModelChain(opts.model);
+  const errors = [];
+  for (const model of chain) {
+    try {
+      // Sem chave configurada o Pollinations atende anônimo (limite bem menor);
+      // com chave, o KeyPool gira as credenciais quando uma estoura o limite.
+      const buffer = pools.pollinations.size
+        ? await pools.pollinations.run((key) => pollinationsImageOnce(prompt, { ...opts, model }, key))
+        : await pollinationsImageOnce(prompt, { ...opts, model }, '');
+      return { buffer, model };
+    } catch (error) {
+      errors.push(`${model}: ${String(error?.message || error).slice(0, 60)}`);
+      log.warn(`imagem · pollinations/${model} falhou: ${error?.message || error}`);
+    }
   }
-  return aiImageOnce(prompt, opts, '');
+  throw new Error(`pollinations sem modelo de pé (${errors.join(' | ')})`);
+}
+
+// ── Gemini (chave grátis do Google AI Studio) ──────────────
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+const DEFAULT_GEMINI_IMAGE_MODELS = [
+  'gemini-3-pro-image',
+  'gemini-3-flash-image',
+  'gemini-2.5-flash-image',
+  'gemini-2.0-flash-preview-image-generation'
+];
+let geminiImageModelsCache = { at: 0, models: [] };
+
+/** Descobre na própria API quais modelos geram imagem hoje. */
+async function discoverGeminiImageModels(key, { timeoutMs = 12_000 } = {}) {
+  if (geminiImageModelsCache.at && Date.now() - geminiImageModelsCache.at < 30 * 60_000) {
+    return geminiImageModelsCache.models;
+  }
+  try {
+    const data = await fetchJson(`${GEMINI_API_BASE}/models?key=${encodeURIComponent(key)}`, {
+      timeoutMs,
+      maxBytes: 2 * 1024 * 1024
+    });
+    const models = (Array.isArray(data?.models) ? data.models : [])
+      .map((entry) => String(entry?.name || '').replace(/^models\//, ''))
+      .filter((id) => /image/i.test(id));
+    const ranked = models.sort((a, b) => Number(/pro/i.test(b)) - Number(/pro/i.test(a)));
+    geminiImageModelsCache = { at: Date.now(), models: ranked };
+    return ranked;
+  } catch (error) {
+    log.warn(`imagem · não consegui listar os modelos de imagem do Gemini: ${error?.message || error}`);
+    geminiImageModelsCache = { at: Date.now(), models: [] };
+    return [];
+  }
+}
+
+function ratioForSize(width, height) {
+  const r = Number(width) / Number(height);
+  if (r > 1.6) return '16:9';
+  if (r > 1.2) return '3:2';
+  if (r > 0.95) return '1:1';
+  if (r > 0.7) return '3:4';
+  return '9:16';
+}
+
+async function geminiImageOnce(prompt, { width, height, model }, key, { allowPrivate = false } = {}) {
+  const models = [model, ...DEFAULT_GEMINI_IMAGE_MODELS, ...ENV.geminiImageModels].filter(Boolean);
+  const discovered = await discoverGeminiImageModels(key);
+  const chain = [...new Set([...models, ...discovered])].filter((id) => !isModelBlocked('gemini-image', id));
+  const errors = [];
+  for (const id of chain) {
+    try {
+      if (/imagen/i.test(id)) {
+        const data = await postJson(
+          `${GEMINI_API_BASE}/models/${encodeURIComponent(id)}:predict?key=${encodeURIComponent(key)}`,
+          { instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: ratioForSize(width, height) } },
+          { timeoutMs: 180_000, maxResponseBytes: 40 * 1024 * 1024, allowPrivate }
+        );
+        const base64 = data?.predictions?.[0]?.bytesBase64Encoded || data?.predictions?.[0]?.image?.imageBytes;
+        if (!base64) throw new Error('resposta sem imagem');
+        return { buffer: Buffer.from(base64, 'base64'), model: id };
+      }
+      const data = await postJson(
+        `${GEMINI_API_BASE}/models/${encodeURIComponent(id)}:generateContent?key=${encodeURIComponent(key)}`,
+        {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
+        },
+        { timeoutMs: 180_000, maxResponseBytes: 40 * 1024 * 1024, allowPrivate }
+      );
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const inline = parts.find((part) => part?.inlineData?.data || part?.inline_data?.data);
+      const base64 = inline?.inlineData?.data || inline?.inline_data?.data;
+      if (!base64) throw new Error(`resposta sem imagem (${parts.map((p) => Object.keys(p).join('+')).join(',') || 'vazia'})`);
+      const buffer = Buffer.from(base64, 'base64');
+      if (!isImageBuffer(buffer)) throw new Error('imagem inválida');
+      return { buffer, model: id };
+    } catch (error) {
+      const status = Number(error?.status);
+      // Modelo inexistente/descontinuado: marca e tenta o próximo (mesma chave).
+      if (status === 404 || isModelMissingForEveryone(error)) {
+        blockModel('gemini-image', id, 30 * 60_000);
+      }
+      errors.push(`${id}: ${String(error?.message || error).slice(0, 70)}`);
+      log.warn(`imagem · gemini/${id} falhou: ${error?.message || error}`);
+      if ([401, 403, 429, 402].includes(status)) throw error; // problema de chave/cota: deixa o pool girar
+    }
+  }
+  throw new Error(`gemini sem modelo de imagem (${errors.slice(0, 2).join(' | ')})`);
+}
+
+// ── OpenAI (gpt-image-1, quando houver OPENAI_KEYS) ─────────
+async function openaiImageOnce(prompt, { width, height, model }, key) {
+  const ratio = Number(width) / Number(height);
+  const size = ratio > 1.2 ? '1536x1024' : ratio < 0.83 ? '1024x1536' : '1024x1024';
+  const data = await postJson(
+    `${OPENAI_BASE}/images/generations`,
+    { model: model || 'gpt-image-1', prompt, size, n: 1 },
+    { headers: { authorization: `Bearer ${key}` }, timeoutMs: 240_000, maxResponseBytes: 60 * 1024 * 1024 }
+  );
+  const base64 = data?.data?.[0]?.b64_json;
+  if (!base64) throw new Error('resposta sem imagem');
+  const buffer = Buffer.from(base64, 'base64');
+  if (!isImageBuffer(buffer)) throw new Error('imagem inválida');
+  return { buffer, model: model || 'gpt-image-1' };
+}
+
+/** Ordem dos geradores: Gemini → OpenAI → Pollinations (grátis, sem chave). */
+function imageProviders(prompt, opts) {
+  const list = [];
+  if (pools.gemini.size) {
+    list.push([
+      'gemini',
+      () => pools.gemini.run((key) => geminiImageOnce(prompt, opts, key, { allowPrivate: true }))
+    ]);
+  }
+  if (pools.openai.size) {
+    list.push(['openai', () => pools.openai.run((key) => openaiImageOnce(prompt, opts, key))]);
+  }
+  list.push(['pollinations', () => pollinationsImage(prompt, opts)]);
+  return list;
+}
+
+function isImageBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 512) return false;
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) return true; // JPEG
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return true; // PNG
+  const head = buffer.subarray(0, 4).toString('latin1');
+  return head === 'RIFF' || head === 'GIF8' || buffer.subarray(4, 8).toString('latin1') === 'ftyp';
+}
+
+/**
+ * Gera a imagem com o melhor motor disponível e devolve os detalhes do que
+ * foi usado (para a legenda do WhatsApp e para o log).
+ *
+ * @param {string} rawPrompt pedido do usuário (pode conter os atalhos)
+ * @param {{width?: number, height?: number, model?: string, seed?: number, refine?: boolean, hd?: boolean}} options
+ * @returns {Promise<{buffer: Buffer, engine: string, model: string, prompt: string, refined: boolean, hd: boolean, format: string|null}>}
+ */
+export async function aiImageFull(rawPrompt, options = {}) {
+  const request = {
+    ...parseImageRequest(rawPrompt, { defaultModel: options.model || cfg.get().ia.modeloImagem }),
+    ...Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined))
+  };
+  const basePrompt = String(request.prompt || '').trim();
+  if (!basePrompt) throw new Error('descreva a imagem que deseja criar');
+  if (basePrompt.length > 1_200) throw new Error('descrição longa demais (máximo 1.200 caracteres)');
+
+  // Dimensões: `--formato` manda; senão valem width/height (ou 1024x1024).
+  const clampSide = (value) => Math.min(1536, Math.max(256, Number(value) || 1024));
+  const format = request.format
+    ? { ...request.format }
+    : { key: 'custom', label: `${clampSide(request.width)}x${clampSide(request.height)}`, width: clampSide(request.width), height: clampSide(request.height) };
+
+  let text = basePrompt;
+  let refined = false;
+  if (request.refine) {
+    try {
+      text = await withTimeout(
+        refineImagePrompt(basePrompt, { style: request.style, negative: request.negative }),
+        25_000,
+        'refino demorou demais'
+      );
+      refined = true;
+    } catch (error) {
+      log.warn(`imagem · refino do prompt indisponível (${error?.message}) — usando o texto original`);
+    }
+  }
+
+  const prompt = composeImagePrompt({
+    prompt: text,
+    stylePrompt: request.stylePrompt,
+    negative: request.negative,
+    format
+  });
+  const opts = { width: format.width, height: format.height, model: request.model, seed: request.seed };
+  log.ai(`gerando imagem ${format.key} · ${refined ? 'prompt refinado' : 'prompt original'} (prompt não é gravado nos logs)`);
+
+  const errors = [];
+  for (const [name, run] of imageProviders(prompt, opts)) {
+    try {
+      const { buffer, model } = await run();
+      let final = buffer;
+      let hd = false;
+      if (request.hd) {
+        const bigger = await upscaleImage(buffer, { factor: 2 });
+        if (bigger) {
+          final = bigger;
+          hd = true;
+        }
+      }
+      log.ok(`imagem pronta via ${name}/${model}${hd ? ' (hd)' : ''}`);
+      return { buffer: final, engine: name, model, prompt, refined, hd, format: format?.key || null, style: request.style };
+    } catch (error) {
+      errors.push(`${name}: ${String(error?.message || error).slice(0, 110)}`);
+      log.warn(`imagem · ${name} falhou: ${error?.message || error}`);
+    }
+  }
+  throw new Error(`não consegui gerar a imagem agora · ${errors.join(' | ')}`);
+}
+
+export async function aiImage(prompt, options = {}) {
+  const result = await aiImageFull(prompt, options);
+  return result.buffer;
+}
+
+export function aiImageStatus() {
+  const rows = [];
+  if (pools.gemini.size) rows.push(`gemini: ${pools.gemini.available}/${pools.gemini.size} chave(s) — melhor qualidade`);
+  if (pools.openai.size) rows.push(`openai: ${pools.openai.available}/${pools.openai.size} chave(s) — gpt-image-1`);
+  rows.push(
+    pools.pollinations.size
+      ? `pollinations: ${pools.pollinations.available}/${pools.pollinations.size} chave(s)`
+      : 'pollinations: grátis sem chave'
+  );
+  return rows;
 }
 
 // ── Voz (TTS com vários provedores) ────────────────────────
 //
-// O Pollinations (`openai-audio`) passou a exigir conta/créditos e devolve
-// 402/401 com frequência — era o motivo de `.voz` simplesmente falhar. Agora há
-// uma CADEIA de provedores: o primeiro que entregar áudio válido ganha.
+// A voz mudou de patamar: o motor principal agora é o Edge (o mesmo "Ler em voz
+// alta" do Microsoft Edge) — vozes neurais boas, GRÁTIS e sem chave. Sobre ele
+// funcionam as vozes do catálogo (.voz bob, .voz lula, .voz narrador…), que usam
+// tom/velocidade no SSML e efeitos de FFmpeg.
 //
-//   1) OpenAI TTS            (se OPENAI_KEYS estiver configurado — melhor voz)
-//   2) StreamElements/Polly  (grátis, sem chave, vozes pt-BR Camila/Vitoria/Ricardo)
-//   3) Google Translate TTS  (grátis, sem chave, texto fatiado em trechos)
-//   4) Pollinations          (último recurso)
+// CADEIA DE RESERVA (o primeiro que entregar áudio válido ganha):
+//   1) Edge             (grátis, sem chave — voz principal)
+//   2) ElevenLabs       (opcional, com ELEVENLABS_KEYS — vozes de personagem reais)
+//   3) OpenAI TTS       (com OPENAI_KEYS)
+//   4) StreamElements   (grátis, vozes Polly pt-BR: Camila/Vitoria/Ricardo)
+//   5) Google Translate (grátis, sem chave)
+//   6) Pollinations     (último recurso)
 
 const OPENAI_TTS_VOICES = new Set(['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse']);
-const POLLY_VOICES = { feminina: 'Camila', camila: 'Camila', vitoria: 'Vitoria', masculina: 'Ricardo', ricardo: 'Ricardo' };
+const POLLY_VOICES = {
+  feminina: 'Camila',
+  camila: 'Camila',
+  vitoria: 'Vitoria',
+  'vitória': 'Vitoria',
+  masculina: 'Ricardo',
+  ricardo: 'Ricardo'
+};
 const GOOGLE_TTS_CHUNK = 190;
+
+/** Vozes extras cadastradas no .env (VOZES_EXTRA). */
+export function voiceExtraList() {
+  return parseCustomVoices(ENV.vozesExtra);
+}
+
+/** Voz efetiva de um chat: escolha do chat → padrão do bot → automática. */
+export function voiceForChat(jid) {
+  const config = cfg.get();
+  if (jid) {
+    const chosen = config.ia?.vozChats?.[normalizeJid(jid)];
+    if (chosen) return chosen;
+  }
+  return config.ia?.vozPadrao || 'auto';
+}
 
 function isMp3(buf) {
   return Buffer.isBuffer(buf) && buf.length > 2048 &&
@@ -623,32 +1105,6 @@ function isAudioBuffer(buf) {
   return isMp3(buf) || head === 'OggS' || head === 'RIFF' || buf.subarray(4, 8).toString('latin1') === 'ftyp';
 }
 
-/** Fatia o texto em pedaços curtos respeitando pontuação (Google TTS limita ~200 chars). */
-export function splitForTts(text, max = GOOGLE_TTS_CHUNK) {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!clean) return [];
-  const parts = [];
-  let buf = '';
-  for (const piece of clean.split(/(?<=[.!?,;:])\s+/)) {
-    let chunk = piece;
-    while (chunk.length > max) {
-      const cut = chunk.lastIndexOf(' ', max);
-      const at = cut > max * 0.5 ? cut : max;
-      if (buf) { parts.push(buf.trim()); buf = ''; }
-      parts.push(chunk.slice(0, at).trim());
-      chunk = chunk.slice(at).trim();
-    }
-    if ((buf + ' ' + chunk).trim().length > max) {
-      if (buf) parts.push(buf.trim());
-      buf = chunk;
-    } else {
-      buf = (buf ? `${buf} ` : '') + chunk;
-    }
-  }
-  if (buf.trim()) parts.push(buf.trim());
-  return parts.filter(Boolean);
-}
-
 async function openaiTtsOnce(text, voice, key) {
   const v = OPENAI_TTS_VOICES.has(String(voice).toLowerCase()) ? String(voice).toLowerCase() : 'nova';
   const buffer = await fetchBuffer(`${OPENAI_BASE}/audio/speech`, {
@@ -658,6 +1114,26 @@ async function openaiTtsOnce(text, voice, key) {
     timeoutMs: 120_000,
     maxBytes: 25 * 1024 * 1024
   });
+  if (!isAudioBuffer(buffer)) throw new Error('áudio inválido');
+  return buffer;
+}
+
+/** ElevenLabs (opcional): é o único jeito de ter voz de personagem "de verdade". */
+async function elevenLabsTtsOnce(text, voiceId, key) {
+  const buffer = await fetchBuffer(
+    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`,
+    {
+      method: 'POST',
+      headers: { 'xi-api-key': key, 'content-type': 'application/json', accept: 'audio/mpeg' },
+      body: JSON.stringify({
+        text,
+        model_id: 'eleven_multilingual_v2',
+        voice_settings: { stability: 0.45, similarity_boost: 0.8, style: 0.15, use_speaker_boost: true }
+      }),
+      timeoutMs: 180_000,
+      maxBytes: 30 * 1024 * 1024
+    }
+  );
   if (!isAudioBuffer(buffer)) throw new Error('áudio inválido');
   return buffer;
 }
@@ -705,39 +1181,141 @@ async function pollinationsTtsOnce(text, voice, key) {
   return buffer;
 }
 
-/** Lista de provedores de voz na ordem de preferência. */
-function voiceProviders(text, voice) {
-  const list = [];
-  if (pools.openai.size) {
-    list.push(['openai', () => pools.openai.run((key) => openaiTtsOnce(text, voice, key))]);
+/** Voz genérica do provedor quando a voz pedida é de outro motor. */
+function fallbackVoiceFor(spec) {
+  const female = /femin|fem|mulher|f$/i.test(`${spec.id} ${spec.label || ''}`) || /Francisca|Thalita|Camila|Vitoria|Emma|Ava|Ana|Nova/i.test(spec.voice || '');
+  if (spec.engine === 'elevenlabs') return 'Camila';
+  return female ? 'feminina' : 'masculina';
+}
+
+/**
+ * Aplica os efeitos do catálogo no áudio já sintetizado.
+ * No Edge o tom/velocidade já vão no SSML; nos outros motores o FFmpeg faz o
+ * trabalho (mudando a taxa e recompensando com `atempo`).
+ */
+async function applyVoiceEffects(buffer, spec, engineName) {
+  const fxChain = buildVoiceFxChain(spec.fx);
+  if (engineName === 'edge') {
+    if (!fxChain) return { buffer, effects: false };
+    const filtered = await applyAudioFilter(buffer, { filter: fxChain });
+    return { buffer: filtered || buffer, effects: Boolean(filtered) };
   }
-  list.push(['streamelements', () => streamElementsTts(text, voice)]);
-  list.push(['google', () => googleTts(text, cfg.get().ia?.idiomaVoz || 'pt-BR')]);
+  const filter = buildPitchSpeedFilter({ pitchPct: spec.pitchPct, speedPct: spec.speedPct, fx: spec.fx });
+  if (!filter) return { buffer, effects: false };
+  const filtered = await applyAudioFilter(buffer, { filter });
+  return { buffer: filtered || buffer, effects: Boolean(filtered) };
+}
+
+/** Lista de provedores de voz na ordem de preferência, já sabendo qual voz usar. */
+function voiceProviders(text, spec) {
+  const list = [];
+  const lang = spec.lang || cfg.get().ia?.idiomaVoz || 'pt-BR';
+
+  if (spec.engine === 'edge' && isEdgeSupported()) {
+    list.push([
+      'edge',
+      () => edgeTts(text, {
+        voice: spec.voice,
+        pitch: pct(spec.pitchPct),
+        rate: pct(spec.speedPct),
+        volume: pct(spec.volumePct),
+        lang,
+        split: splitForTts,
+        timeoutMs: 90_000
+      })
+    ]);
+  }
+
+  if (spec.engine === 'elevenlabs' && pools.elevenlabs.size) {
+    list.push([
+      'elevenlabs',
+      () => pools.elevenlabs.run((key) => elevenLabsTtsOnce(text, spec.voice, key))
+    ]);
+  }
+
+  if (spec.engine === 'openai' && pools.openai.size) {
+    list.push(['openai', () => pools.openai.run((key) => openaiTtsOnce(text, spec.voice, key))]);
+  }
+
+  // Reservas: funcionam com qualquer voz (a voz exata se perde, o áudio não).
+  if (pools.elevenlabs.size && spec.engine !== 'elevenlabs') {
+    list.push([
+      'elevenlabs',
+      () => pools.elevenlabs.run((key) => elevenLabsTtsOnce(text, ENV.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM', key))
+    ]);
+  }
+  if (pools.openai.size && spec.engine !== 'openai') {
+    list.push(['openai', () => pools.openai.run((key) => openaiTtsOnce(text, fallbackVoiceFor(spec), key))]);
+  }
+  list.push(['streamelements', () => streamElementsTts(text, fallbackVoiceFor(spec))]);
+  list.push(['google', () => googleTts(text, lang)]);
   if (pools.pollinations.size) {
-    list.push(['pollinations', () => pools.pollinations.run((key) => pollinationsTtsOnce(text, voice, key))]);
+    list.push(['pollinations', () => pools.pollinations.run((key) => pollinationsTtsOnce(text, spec.voice, key))]);
   } else {
-    list.push(['pollinations', () => pollinationsTtsOnce(text, voice, '')]);
+    list.push(['pollinations', () => pollinationsTtsOnce(text, spec.voice, '')]);
   }
   return list;
 }
 
-export async function aiVoice(text, voice) {
+/**
+ * Gera a voz e devolve também COMO ela foi feita (motor, voz, efeitos) — é o
+ * que o `.voz` mostra na legenda.
+ *
+ * @param {string} text texto falado
+ * @param {string} [voiceName] nome no catálogo (bob, lula, antonio…)
+ * @param {{jid?: string}} [options]
+ */
+export async function aiVoiceFull(text, voiceName, { jid } = {}) {
   text = String(text || '').trim();
   if (!text) throw new Error('escreva o texto para transformar em áudio');
-  if (text.length > 900) throw new Error('texto longo demais para áudio (máximo 900 caracteres)');
-  const v = voice || cfg.get().ia.vozPadrao || 'nova';
+  if (text.length > 1_500) throw new Error('texto longo demais para áudio (máximo 1.500 caracteres)');
+
+  const extra = voiceExtraList();
+  const requested = voiceName || voiceForChat(jid);
+  const spec = resolveVoice(requested, { extra });
   const errors = [];
-  for (const [name, run] of voiceProviders(text, v)) {
+  let lastError = null;
+
+  for (const [name, run] of voiceProviders(text, spec)) {
     try {
-      const buffer = await run();
-      log.ai(`voz gerada via ${name}`);
-      return buffer;
+      const raw = await run();
+      const { buffer, effects } = await applyVoiceEffects(raw, spec, name);
+      log.ai(`voz gerada via ${name}${spec.id ? ` (${spec.id})` : ''}${effects ? ' + efeitos' : ''}`);
+      return {
+        buffer,
+        engine: name,
+        voiceId: spec.id,
+        voiceLabel: spec.label || spec.id,
+        effects,
+        fallback: name !== spec.engine
+      };
     } catch (error) {
+      lastError = error;
       errors.push(`${name}: ${String(error?.message || error).slice(0, 90)}`);
       log.warn(`voz · ${name} falhou: ${error?.message || error}`);
     }
   }
-  throw new Error(`nenhum provedor de voz respondeu · ${errors.join(' | ')}`);
+  throw new Error(`nenhum provedor de voz respondeu · ${errors.join(' | ')}`, { cause: lastError });
+}
+
+export async function aiVoice(text, voice) {
+  const result = await aiVoiceFull(text, voice);
+  return result.buffer;
+}
+
+/** Situação das vozes para `.pools` / `.info`. */
+export function aiVoiceStatus() {
+  const rows = []; 
+  const edge = edgeStatus();
+  rows.push(edge.ok ? `edge (principal): ${edge.detail}` : `edge: indisponível — ${edge.detail}`);
+  rows.push(
+    pools.elevenlabs.size
+      ? `elevenlabs: ${pools.elevenlabs.available}/${pools.elevenlabs.size} chave(s) — vozes de personagem`
+      : 'elevenlabs: sem chave (opcional — ELEVENLABS_KEYS)'
+  );
+  rows.push(pools.openai.size ? `openai: ${pools.openai.available}/${pools.openai.size} chave(s)` : 'openai: reserva (opcional)');
+  rows.push('streamelements · google: reserva grátis, sem chave');
+  return rows;
 }
 
 // ── Tradução / resumo via chat ─────────────────────────────
@@ -984,6 +1562,8 @@ export function reloadAiPools() {
   blockedModels.clear();
   discoveredModels.clear();
   tokenParamByBase.clear();
+  pollinationsModelsCache = { at: 0, models: [] };
+  geminiImageModelsCache = { at: 0, models: [] };
   return { loaded: load.loaded, entries: load.entries, sizes: aiPoolSizes() };
 }
 

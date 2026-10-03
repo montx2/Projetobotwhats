@@ -71,3 +71,36 @@ export function parseBool(value) {
   if (['off', 'false', '0', 'nao', 'não', 'desativado', 'no'].includes(s)) return false;
   return null;
 }
+
+/**
+ * Fatia um texto em pedaços curtos respeitando a pontuação.
+ * Usado pela voz (Google TTS limita ~200 caracteres, Edge aceita pedaços
+ * maiores) — a pontuação entra junto para a fala não sair picada.
+ * @param {string} text texto original
+ * @param {number} max tamanho máximo de cada pedaço
+ * @returns {string[]}
+ */
+export function splitForTts(text, max = 190) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+  const parts = [];
+  let buf = '';
+  for (const piece of clean.split(/(?<=[.!?,;:])\s+/)) {
+    let chunk = piece;
+    while (chunk.length > max) {
+      const cut = chunk.lastIndexOf(' ', max);
+      const at = cut > max * 0.5 ? cut : max;
+      if (buf) { parts.push(buf.trim()); buf = ''; }
+      parts.push(chunk.slice(0, at).trim());
+      chunk = chunk.slice(at).trim();
+    }
+    if ((buf + ' ' + chunk).trim().length > max) {
+      if (buf) parts.push(buf.trim());
+      buf = chunk;
+    } else {
+      buf = (buf ? `${buf} ` : '') + chunk;
+    }
+  }
+  if (buf.trim()) parts.push(buf.trim());
+  return parts.filter(Boolean);
+}

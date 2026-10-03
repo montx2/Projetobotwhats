@@ -66,13 +66,29 @@ export const DEFAULT_CONFIG = {
   maxMB: 90,
   ia: {
     modeloImagem: 'flux',
-    vozPadrao: 'nova',
+    // Nome amigável do catálogo de vozes (`auto` = melhor voz disponível).
+    vozPadrao: 'auto',
     idiomaVoz: 'pt-BR',
+    // Voz escolhida por chat: { "5511...@s.whatsapp.net": "bob" }.
+    vozChats: {},
     sistema: DEFAULT_IA_SYSTEM
   },
   responderDesconhecido: false,
   _schemaVersion: 4
 };
+
+/** Voz pode ser trocada por chat — a chave é o JID normalizado. */
+function normalizeVoiceChats(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result = {};
+  for (const [rawJid, rawVoice] of Object.entries(value).slice(0, 500)) {
+    const jid = String(rawJid || '').trim().toLowerCase().replace(/:\d+@/, '@');
+    const voice = String(rawVoice || '').trim().toLowerCase().slice(0, 40);
+    if (!jid || !voice || jid.length > 180) continue;
+    result[jid] = voice;
+  }
+  return result;
+}
 
 const FILE = 'config.json';
 
@@ -112,8 +128,11 @@ export function normalizeConfig(saved) {
     maxMB: clampNumber(source.maxMB, 1, 200, base.maxMB),
     ia: {
       modeloImagem: typeof source.ia?.modeloImagem === 'string' ? source.ia.modeloImagem.slice(0, 80) : base.ia.modeloImagem,
-      vozPadrao: typeof source.ia?.vozPadrao === 'string' ? source.ia.vozPadrao.slice(0, 40) : base.ia.vozPadrao,
+      vozPadrao: typeof source.ia?.vozPadrao === 'string' && source.ia.vozPadrao.trim()
+        ? source.ia.vozPadrao.trim().slice(0, 40)
+        : base.ia.vozPadrao,
       idiomaVoz: typeof source.ia?.idiomaVoz === 'string' ? source.ia.idiomaVoz.slice(0, 20) : base.ia.idiomaVoz,
+      vozChats: normalizeVoiceChats(source.ia?.vozChats),
       sistema: typeof iaSystem === 'string' ? iaSystem.slice(0, 4000) : base.ia.sistema
     },
     responderDesconhecido: source.responderDesconhecido === true,
@@ -252,6 +271,16 @@ const ENV_SCHEMA = {
   aiModel: () => process.env.AI_MODEL || '',
   aiModels: () => envList('AI_MODELS'),
   pollinationsKeys: () => envList('POLLINATIONS_KEYS'),
+  // Modelo padrão de imagem (o serviço muda a lista com o tempo: o bot também
+  // descobre sozinho e cai para o próximo quando um deles sai do ar).
+  imageModel: () => process.env.IMAGE_MODEL || '',
+  imageModels: () => envList('IMAGE_MODELS'),
+  geminiImageModels: () => envList('GEMINI_IMAGE_MODELS'),
+  // Voz: chaves opcionais do ElevenLabs (vozes de personagem reais) e vozes
+  // personalizadas no formato nome=voz|pitch=+30|rate=+5|fx=nasal.
+  elevenLabsKeys: () => envListAny('ELEVENLABS_KEYS', 'ELEVENLABS_API_KEY', 'ELEVEN_LABS_KEYS', 'XI_API_KEY'),
+  elevenLabsVoiceId: () => process.env.ELEVENLABS_VOICE_ID || '',
+  vozesExtra: () => process.env.VOZES_EXTRA || '',
   cobaltInstances: () => envList('COBALT_INSTANCES'),
   cobaltApiKey: () => process.env.COBALT_API_KEY || '',
   tiktokApi: () => envList('TIKTOK_API'),
@@ -293,6 +322,11 @@ export function envSummary() {
     aiModel: ENV.aiModel,
     aiModels: ENV.aiModels.length,
     pollinationsKeys: ENV.pollinationsKeys.length,
+    imageModel: ENV.imageModel,
+    imageModels: ENV.imageModels.length,
+    geminiImageModels: ENV.geminiImageModels.length,
+    elevenLabsKeys: ENV.elevenLabsKeys.length,
+    vozesExtra: ENV.vozesExtra ? ENV.vozesExtra.split(/[,;\n]+/).filter((item) => item.includes('=')).length : 0,
     cobaltInstances: ENV.cobaltInstances.length
   };
 }
