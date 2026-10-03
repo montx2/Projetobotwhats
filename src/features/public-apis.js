@@ -4,6 +4,7 @@
 
 import { fetchJson } from '../core/http.js';
 import { SlidingWindowLimiter } from '../core/limiter.js';
+import { header, section, footer } from '../core/ui.js';
 
 const WEATHER_GEOCODE_URL = 'https://geocoding-api.open-meteo.com/v1/search';
 const WEATHER_FORECAST_URL = 'https://api.open-meteo.com/v1/forecast';
@@ -296,11 +297,11 @@ export function formatWeatherMessage(weather) {
   if (weather.rainChancePercent !== null) daily.push(`chance máxima de chuva ${decimal(weather.rainChancePercent, { max: 0 })}%`);
 
   return [
-    `🌦️ *Clima — ${weatherLocationLabel(weather)}*`,
-    `${currentTime ? `Agora (${currentTime}): ` : 'Agora: '}${weatherFacts(weather)}`,
-    daily.length ? `Hoje (${dateLabel}): ${daily.join(' · ')}` : `Hoje (${dateLabel}): previsão diária indisponível.`,
-    'Fonte: Open-Meteo · dados CC BY 4.0. A previsão pode mudar.'
-  ].join('\n');
+    header(`Clima — ${weatherLocationLabel(weather)}`, currentTime ? `agora · ${currentTime}` : 'condições atuais'),
+    section('Agora', [weatherFacts(weather)]),
+    section('Hoje', [daily.length ? `${dateLabel} · ${daily.join(' · ')}` : `${dateLabel} · previsão diária indisponível`]),
+    footer('Fonte: Open-Meteo · dados CC BY 4.0. A previsão pode mudar.')
+  ].join('\n\n');
 }
 
 /** Dados concisos e estruturados para contextualizar uma resposta da IA. */
@@ -413,15 +414,16 @@ function fmtAmount(value, max = 6) {
 
 /** Mensagem para o comando .cotacao. */
 export function formatCurrencyMessage(conversion) {
-  const lines = [
-    '💱 *Conversão de referência*',
-    `${fmtAmount(conversion.amount)} ${conversion.from} = ${fmtAmount(conversion.converted)} ${conversion.to}`,
-    `Taxa: 1 ${conversion.from} = ${fmtAmount(conversion.rate)} ${conversion.to}`
-  ];
-  if (conversion.date) lines.push(`Data da taxa: ${formatDate(conversion.date)}`);
-  else lines.push('Mesma moeda: conversão 1:1, sem consulta externa.');
-  lines.push('Fonte: Frankfurter.dev · taxa de referência diária, não é cotação em tempo real nem recomendação financeira.');
-  return lines.join('\n');
+  const result = `${fmtAmount(conversion.amount)} ${conversion.from} = ${fmtAmount(conversion.converted)} ${conversion.to}`;
+  const rate = `1 ${conversion.from} = ${fmtAmount(conversion.rate)} ${conversion.to}`;
+  const details = conversion.date
+    ? `Data da taxa · ${formatDate(conversion.date)}`
+    : 'Mesma moeda · conversão 1:1, sem consulta externa.';
+  return [
+    header('Conversão de referência', 'câmbio diário'),
+    section('Resultado', [result, `Taxa · ${rate}`, details]),
+    footer('Frankfurter.dev · taxa diária de referência; não é cotação em tempo real nem recomendação financeira.')
+  ].join('\n\n');
 }
 
 export function formatCurrencyContext(conversion) {
@@ -522,15 +524,16 @@ export function formatPublicHolidaysMessage(holidays, year, country = 'BR', toda
   const selected = Number(year) === currentYear
     ? national.filter((holiday) => holiday.date >= today).slice(0, 8)
     : national.slice(0, 12);
-  const lines = [`📅 *Feriados nacionais — ${countryName(country)} (${year})*`];
-
-  if (!selected.length) {
-    lines.push(Number(year) === currentYear ? 'Não há outros feriados nacionais listados para este ano.' : 'Nenhum feriado nacional foi listado para este período.');
-  } else {
-    for (const holiday of selected) lines.push(`• ${formatDate(holiday.date)} — ${holidayName(holiday, country)}`);
-  }
-  lines.push('Fonte: Nager.Date. A lista cobre feriados nacionais; datas estaduais e municipais podem variar.');
-  return lines.join('\n');
+  const holidayRows = selected.length
+    ? selected.map((holiday) => `${formatDate(holiday.date)} — ${holidayName(holiday, country)}`)
+    : [Number(year) === currentYear
+      ? 'Não há outros feriados nacionais listados para este ano.'
+      : 'Nenhum feriado nacional foi listado para este período.'];
+  return [
+    header(`Feriados nacionais — ${countryName(country)} (${year})`, `${selected.length} data(s) listada(s)`),
+    section(selected.length ? 'Próximas datas' : 'Calendário', holidayRows),
+    footer('Fonte: Nager.Date · feriados nacionais; datas estaduais e municipais podem variar.')
+  ].join('\n\n');
 }
 
 export function formatHolidayContext(holidays, year, country = 'BR', today = new Date().toISOString().slice(0, 10)) {

@@ -7,6 +7,7 @@
 
 import { cfg } from '../core/config.js';
 import { log } from '../core/logger.js';
+import { SYM } from '../core/ui.js';
 import { toStickerWebp, decodeWebpToPng, detectMediaExt, hasFfmpeg } from '../util/ffmpeg.js';
 import { isWebp, isAnimatedWebp, parseWebp, readStickerExif, tagSticker } from '../util/webp.js';
 import { removeBackground } from './bgremoval.js';
@@ -149,7 +150,7 @@ export async function extractStickerSource(sock, msg, { onProgress, allowViewOnc
   // 1) mídia anexada direto (ou anexada como view once / efêmera)
   const direct = pickType(m, unwrapViewOnce);
   if (direct) {
-    await onProgress?.('⏳ Baixando mídia…');
+    await onProgress?.(`${SYM.wait} Baixando mídia…`);
     const buffer = await downloadStickerMedia(sock, msg, direct);
     return { buffer, type: direct.type, node: direct.node };
   }
@@ -160,7 +161,7 @@ export async function extractStickerSource(sock, msg, { onProgress, allowViewOnc
   if (quoted) {
     const q = pickType(quoted, unwrapViewOnce);
     if (q) {
-      await onProgress?.('⏳ Baixando mídia citada…');
+      await onProgress?.(`${SYM.wait} Baixando mídia citada…`);
       const fake = {
         key: {
           remoteJid: msg.key.remoteJid,
@@ -197,7 +198,7 @@ export async function extractStickerSource(sock, msg, { onProgress, allowViewOnc
     const cached = messageCache.get(msg.key.remoteJid, ctx.stanzaId);
     const cq = cached && pickType(cached.message, unwrapViewOnce);
     if (cq) {
-      await onProgress?.('⏳ Baixando mídia do histórico…');
+      await onProgress?.(`${SYM.wait} Baixando mídia do histórico…`);
       const cachedHolder = {
         key: { remoteJid: msg.key.remoteJid, id: cached.id, fromMe: !!cached.fromMe },
         message: cached.message
@@ -226,13 +227,13 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
       if (!hasFfmpeg()) {
         throw new Error('FFmpeg não encontrado — rode `.doctor` para ver como instalar.');
       }
-      await onProgress?.('🖼️ Decodificando figurinha…');
+      await onProgress?.(`${SYM.wait} Decodificando figurinha…`);
       const { buffer: png } = await decodeWebpToPng(buffer);
-      await onProgress?.('🎭 Removendo o fundo com IA…');
+      await onProgress?.(`${SYM.wait} Removendo o fundo…`);
       const { buffer: cut, via } = await removeBackground(png);
-      await onProgress?.(`🖌️ Fundo removido (${via})! Criando figurinha 512×512…`);
+      await onProgress?.(`${SYM.wait} Fundo removido (${via}) · criando figurinha 512×512…`);
       const { buffer: webp } = await toStickerWebp(cut, { animated: false, ext: '.png', fit, onProgress });
-      await onProgress?.('🏷️ Gravando dados da figurinha…');
+      await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
       return tagSticker(webp, { pack, author, emojis });
     }
 
@@ -242,13 +243,13 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
 
     // Se for um WebP estático fora do padrão 512x512 e tivermos FFmpeg, padroniza em 512x512
     if (!info.animated && (info.width !== 512 || info.height !== 512) && hasFfmpeg()) {
-      await onProgress?.('🖌️ Ajustando figurinha para 512×512…');
+      await onProgress?.(`${SYM.wait} Ajustando figurinha para 512×512…`);
       const { buffer: webp } = await toStickerWebp(buffer, { animated: false, ext: '.webp', fit, onProgress });
-      await onProgress?.('🏷️ Gravando dados da figurinha…');
+      await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
       return tagSticker(webp, { pack, author, emojis: finalEmojis });
     }
 
-    await onProgress?.('🏷️ Gravando dados da figurinha…');
+    await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
     return tagSticker(buffer, { pack, author, emojis: finalEmojis });
   }
 
@@ -266,24 +267,24 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
     isGif;
 
   if (removeBg && isVideo) {
-    throw new Error('Remoção de fundo funciona só com *imagens*. Manda uma foto! 📸');
+    throw new Error('Remoção de fundo funciona apenas com imagens. Envie uma foto.');
   }
 
   if (removeBg) {
     log.info('sticker com remoção de fundo…');
-    await onProgress?.('🎭 Removendo o fundo com IA… (pode levar uns segundos)');
+    await onProgress?.(`${SYM.wait} Removendo o fundo… (pode levar alguns segundos)`);
     const { buffer: cut, via } = await removeBackground(buffer);
     log.ok(`fundo removido via ${via} (${formatBytes(cut.length)})`);
-    await onProgress?.(`🖌️ Fundo removido (${via})! Convertendo para figurinha 512×512…`);
+    await onProgress?.(`${SYM.wait} Fundo removido (${via}) · convertendo para figurinha 512×512…`);
     const { buffer: webp } = await toStickerWebp(cut, { animated: false, ext: '.png', fit, onProgress });
-    await onProgress?.('🏷️ Gravando dados da figurinha…');
+    await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
     return tagSticker(webp, { pack, author, emojis });
   }
 
-  await onProgress?.(isVideo ? '🎬 Convertendo vídeo/GIF em figurinha animada…' : '🖌️ Convertendo imagem em figurinha 512×512…');
+  await onProgress?.(`${SYM.wait} ${isVideo ? 'Convertendo vídeo/GIF em figurinha animada…' : 'Convertendo imagem em figurinha 512×512…'}`);
   const ext = magicExt || (isGif ? '.gif' : isVideo ? '.mp4' : mime.includes('png') ? '.png' : '.jpg');
   const { buffer: webp } = await toStickerWebp(buffer, { animated: isVideo, ext, fit, onProgress });
-  await onProgress?.('🏷️ Gravando dados da figurinha…');
+  await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
   return tagSticker(webp, { pack, author, emojis });
 }
 

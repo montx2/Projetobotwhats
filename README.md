@@ -37,7 +37,7 @@ No Windows, execute `start.bat`. No primeiro início, use o QR exibido no termin
 
 ## Acesso e privacidade
 
-Por padrão, o bot atende somente o privado do dono. O dono pode liberar um chat/grupo com `.ativar` e revogar com `.desativar`. A revogação também limpa as opções de captura e o cache daquele chat. ` .desativar tudo` revoga os demais chats.
+Por padrão, o bot atende somente o privado do dono. O dono pode liberar um chat/grupo com `.ativar` e revogar com `.desativar`. A revogação também limpa as opções de captura, o cache e o placar de jogos daquele chat. ` .desativar tudo` revoga os demais chats.
 
 ### View Once (desativado por padrão)
 
@@ -140,6 +140,31 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .enquete pergunta | opção 1 | opção 2 → enquete de escolha única no grupo
 ```
 
+### Jogos & arcade
+
+Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.jogos` para ver o catálogo; há uma partida de tabuleiro ativa por chat e `.jogos cancelar` encerra a rodada atual. Os palpites aceitos podem ser enviados com o comando ou diretamente, sem prefixo.
+
+```text
+.velha [facil|medio|dificil]      → Jogo da velha contra o bot
+.velha @oponente                  → desafio PvP; a pessoa aceita com .velha aceitar
+.velha aberto                     → abre uma partida para alguém do grupo entrar
+.termo / .wordle                  → palavra de cinco letras, seis tentativas
+.forca / .hangman                 → palavra por categoria, letras ou palavra inteira
+.minado                           → campo minado 5×5, coordenadas A1–E5
+.minado flag A1                   → marca ou desmarca uma casa
+.anagrama / .embaralhada          → descubra a palavra embaralhada
+.quiz / .trivia                   → pergunta de conhecimentos gerais
+.adivinhe / .numero               → encontre o número de 1 a 100
+.ppt pedra|papel|tesoura          → Jokenpô contra o bot; também aceita desafio PvP
+.dado / .dado 3d20                → D6 em ASCII ou rolagem de vários dados
+.moeda / .caraoucoroa             → cara ou coroa
+.roleta pizza | sushi | massa     → escolhe entre opções separadas por |
+.placar / .ranking                → ranking persistente deste chat
+.placar reset                     → zera o ranking (admin do grupo ou dono)
+```
+
+Os tabuleiros são enviados em blocos monoespaçados de largura fixa, somente com caracteres de uma coluna e bordas ASCII/Unicode geométricas; os nomes de perfil nunca entram nas grades. Partidas em andamento ficam em memória; o ranking fica persistente em `data/games-score.json`, separado por chat. `.desativar` remove a partida e o placar daquele chat.
+
 Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Faça downloads somente de conteúdo que você tem direito e autorização para acessar.
 
 ### Downloads automáticos e limites
@@ -206,7 +231,7 @@ npm test
 npm run doctor
 ```
 
-A suíte executa os arquivos de teste em processos sequenciais, cada um com `NEXUS_DATA_DIR` temporário próprio (removido ao final), incluindo testes offline de limites, cache, roteamento, migração, SSRF, redirecionamentos e streams.
+A suíte executa os arquivos de teste em processos sequenciais, cada um com `NEXUS_DATA_DIR` temporário próprio (removido ao final), incluindo testes offline de jogos e alinhamento de tabuleiros, limites, cache, roteamento, migração, SSRF, redirecionamentos e streams.
 
 ## Estrutura
 
@@ -214,7 +239,7 @@ A suíte executa os arquivos de teste em processos sequenciais, cada um com `NEX
 src/
 ├── core/       config, HTTP seguro, key pools, armazenamento, limites
 ├── wa/         cliente Baileys, cache e helpers de mídia em stream
-├── features/   router, View Once, Anti-Delete, IA, figurinhas e downloads
+├── features/   router, jogos, View Once, Anti-Delete, IA, figurinhas e downloads
 └── util/       streams, FFmpeg, WebP e texto
 scripts/        pareamento, doctor, relatório de ambiente e runner de testes
 ```

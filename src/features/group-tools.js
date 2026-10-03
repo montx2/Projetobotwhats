@@ -316,11 +316,11 @@ export async function handleGroupParticipantsUpdate(sock, update) {
       mentions = participants.slice(0, tokens.length);
       const mentionText = tokens.map((id) => `@${id}`).join(', ');
       text = isWelcome
-        ? `${participants.length === 1 ? '👋 Seja bem-vindo(a),' : '👋 Sejam bem-vindos,'} ${mentionText}!`
-        : `👋 Até mais, ${mentionText}!`;
+        ? `${participants.length === 1 ? '✦ Seja bem-vindo(a),' : '✦ Sejam bem-vindos,'} ${mentionText}!`
+        : `✦ Até mais, ${mentionText}!`;
     }
   }
-  text ||= isWelcome ? '👋 Bem-vindo(s) ao grupo!' : '👋 Até mais!';
+  text ||= isWelcome ? '✦ Bem-vindo(s) ao grupo!' : '✦ Até mais!';
 
   try {
     const sent = await sock.sendMessage(jid, { text, ...(mentions.length ? { mentions } : {}) });
