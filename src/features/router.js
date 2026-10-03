@@ -42,7 +42,7 @@ import {
   requireAuthorizedGroup,
   requireGroupAdministrator
 } from './group-tools.js';
-import { hasFfmpeg } from '../util/ffmpeg.js';
+import { hasFfmpeg, toVoiceOpus } from '../util/ffmpeg.js';
 import { cobaltPool } from './downloaders/cobalt.js';
 import { hasYtDlp, isYtdlpEnabled, findYtdlp } from './downloaders/ytdlp.js';
 import { SlidingWindowLimiter } from '../core/limiter.js';
@@ -1115,9 +1115,19 @@ async function runCommand(sock, msg, cmd, ctx) {
       const text2 = argText || extractAnyText(msg.message?.extendedTextMessage?.contextInfo?.quotedMessage || {});
       if (!text2) return reply(usage('.voz <texto>', '.voz bom dia, pessoal'));
       await reply(wait('Gerando áudio'));
-      const buffer = await aiVoice(truncate(text2, 900));
+      const raw = await aiVoice(truncate(text2, 900));
       await reply(wait('Enviando áudio'));
-      const sent = await sock.sendMessage(jid, { audio: buffer, mimetype: 'audio/mpeg', ptt: true }, { quoted: msg });
+      // O WhatsApp só toca mensagem de voz (ptt) de forma confiável em OGG/Opus.
+      // Sem FFmpeg, enviamos o MP3 como áudio normal (sem ptt) para não quebrar.
+      let payload = { audio: raw, mimetype: 'audio/mpeg' };
+      if (hasFfmpeg()) {
+        try {
+          payload = { audio: await toVoiceOpus(raw), mimetype: 'audio/ogg; codecs=opus', ptt: true };
+        } catch (e) {
+          log.warn(`voz: conversão para opus falhou (${e.message}); enviando mp3`);
+        }
+      }
+      const sent = await sock.sendMessage(jid, payload, { quoted: msg });
       if (sent?.key?.id) markBotSent(sent.key.id);
       return reply(ok('Áudio pronto'));
     }

@@ -596,12 +596,129 @@ export async function aiImage(prompt, { width = 1024, height = 1024, model } = {
   return aiImageOnce(prompt, opts, '');
 }
 
-// ── Voz (Pollinations audio) ───────────────────────────────
-async function aiVoiceOnce(text, voice, key) {
-  const url = `https://text.pollinations.ai/${encodeURIComponent(text)}?model=openai-audio&voice=${voice}&referrer=nexusbot`;
-  const buffer = await fetchBuffer(url, { timeoutMs: 120_000, maxBytes: 25 * 1024 * 1024, headers: pollinationsAuthHeaders(key) });
-  if (buffer.length < 2048) throw new Error('áudio vazio');
+// ── Voz (TTS com vários provedores) ────────────────────────
+//
+// O Pollinations (`openai-audio`) passou a exigir conta/créditos e devolve
+// 402/401 com frequência — era o motivo de `.voz` simplesmente falhar. Agora há
+// uma CADEIA de provedores: o primeiro que entregar áudio válido ganha.
+//
+//   1) OpenAI TTS            (se OPENAI_KEYS estiver configurado — melhor voz)
+//   2) StreamElements/Polly  (grátis, sem chave, vozes pt-BR Camila/Vitoria/Ricardo)
+//   3) Google Translate TTS  (grátis, sem chave, texto fatiado em trechos)
+//   4) Pollinations          (último recurso)
+
+const OPENAI_TTS_VOICES = new Set(['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse']);
+const POLLY_VOICES = { feminina: 'Camila', camila: 'Camila', vitoria: 'Vitoria', masculina: 'Ricardo', ricardo: 'Ricardo' };
+const GOOGLE_TTS_CHUNK = 190;
+
+function isMp3(buf) {
+  return Buffer.isBuffer(buf) && buf.length > 2048 &&
+    (buf.subarray(0, 3).toString('latin1') === 'ID3' || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0));
+}
+
+function isAudioBuffer(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 2048) return false;
+  const head = buf.subarray(0, 4).toString('latin1');
+  // mp3, ogg/opus, wav, m4a/mp4
+  return isMp3(buf) || head === 'OggS' || head === 'RIFF' || buf.subarray(4, 8).toString('latin1') === 'ftyp';
+}
+
+/** Fatia o texto em pedaços curtos respeitando pontuação (Google TTS limita ~200 chars). */
+export function splitForTts(text, max = GOOGLE_TTS_CHUNK) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+  const parts = [];
+  let buf = '';
+  for (const piece of clean.split(/(?<=[.!?,;:])\s+/)) {
+    let chunk = piece;
+    while (chunk.length > max) {
+      const cut = chunk.lastIndexOf(' ', max);
+      const at = cut > max * 0.5 ? cut : max;
+      if (buf) { parts.push(buf.trim()); buf = ''; }
+      parts.push(chunk.slice(0, at).trim());
+      chunk = chunk.slice(at).trim();
+    }
+    if ((buf + ' ' + chunk).trim().length > max) {
+      if (buf) parts.push(buf.trim());
+      buf = chunk;
+    } else {
+      buf = (buf ? `${buf} ` : '') + chunk;
+    }
+  }
+  if (buf.trim()) parts.push(buf.trim());
+  return parts.filter(Boolean);
+}
+
+async function openaiTtsOnce(text, voice, key) {
+  const v = OPENAI_TTS_VOICES.has(String(voice).toLowerCase()) ? String(voice).toLowerCase() : 'nova';
+  const buffer = await fetchBuffer(`${OPENAI_BASE}/audio/speech`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: v, input: text, response_format: 'mp3' }),
+    timeoutMs: 120_000,
+    maxBytes: 25 * 1024 * 1024
+  });
+  if (!isAudioBuffer(buffer)) throw new Error('áudio inválido');
   return buffer;
+}
+
+async function streamElementsTts(text, voice) {
+  const v = POLLY_VOICES[String(voice || '').toLowerCase()] || 'Camila';
+  // A API aceita textos longos, mas fatiar reduz erro 400 e timeouts.
+  const chunks = splitForTts(text, 480);
+  const buffers = [];
+  for (const chunk of chunks) {
+    const url = `https://api.streamelements.com/kappa/v2/speech?voice=${encodeURIComponent(v)}&text=${encodeURIComponent(chunk)}`;
+    const buf = await fetchBuffer(url, { timeoutMs: 60_000, maxBytes: 20 * 1024 * 1024 });
+    if (!isAudioBuffer(buf)) throw new Error('áudio inválido');
+    buffers.push(buf);
+  }
+  if (!buffers.length) throw new Error('áudio vazio');
+  return Buffer.concat(buffers);
+}
+
+async function googleTts(text, lang = 'pt-BR') {
+  const chunks = splitForTts(text, GOOGLE_TTS_CHUNK);
+  if (!chunks.length) throw new Error('áudio vazio');
+  const buffers = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const url =
+      'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob' +
+      `&tl=${encodeURIComponent(lang)}&total=${chunks.length}&idx=${i}` +
+      `&textlen=${chunks[i].length}&q=${encodeURIComponent(chunks[i])}`;
+    const buf = await fetchBuffer(url, {
+      timeoutMs: 45_000,
+      maxBytes: 10 * 1024 * 1024,
+      headers: { referer: 'https://translate.google.com/', accept: 'audio/mpeg,*/*' }
+    });
+    if (!isMp3(buf)) throw new Error('áudio inválido');
+    buffers.push(buf);
+    if (i < chunks.length - 1) await sleep(150); // evita bloqueio por rajada
+  }
+  return Buffer.concat(buffers);
+}
+
+async function pollinationsTtsOnce(text, voice, key) {
+  const url = `https://text.pollinations.ai/${encodeURIComponent(text)}?model=openai-audio&voice=${encodeURIComponent(voice)}&referrer=nexusbot`;
+  const buffer = await fetchBuffer(url, { timeoutMs: 120_000, maxBytes: 25 * 1024 * 1024, headers: pollinationsAuthHeaders(key) });
+  if (!isAudioBuffer(buffer)) throw new Error('áudio inválido (provedor devolveu texto/erro)');
+  return buffer;
+}
+
+/** Lista de provedores de voz na ordem de preferência. */
+function voiceProviders(text, voice) {
+  const list = [];
+  if (pools.openai.size) {
+    list.push(['openai', () => pools.openai.run((key) => openaiTtsOnce(text, voice, key))]);
+  }
+  list.push(['streamelements', () => streamElementsTts(text, voice)]);
+  list.push(['google', () => googleTts(text, cfg.get().ia?.idiomaVoz || 'pt-BR')]);
+  if (pools.pollinations.size) {
+    list.push(['pollinations', () => pools.pollinations.run((key) => pollinationsTtsOnce(text, voice, key))]);
+  } else {
+    list.push(['pollinations', () => pollinationsTtsOnce(text, voice, '')]);
+  }
+  return list;
 }
 
 export async function aiVoice(text, voice) {
@@ -609,10 +726,18 @@ export async function aiVoice(text, voice) {
   if (!text) throw new Error('escreva o texto para transformar em áudio');
   if (text.length > 900) throw new Error('texto longo demais para áudio (máximo 900 caracteres)');
   const v = voice || cfg.get().ia.vozPadrao || 'nova';
-  if (pools.pollinations.size) {
-    return pools.pollinations.run((key) => aiVoiceOnce(text, v, key));
+  const errors = [];
+  for (const [name, run] of voiceProviders(text, v)) {
+    try {
+      const buffer = await run();
+      log.ai(`voz gerada via ${name}`);
+      return buffer;
+    } catch (error) {
+      errors.push(`${name}: ${String(error?.message || error).slice(0, 90)}`);
+      log.warn(`voz · ${name} falhou: ${error?.message || error}`);
+    }
   }
-  return aiVoiceOnce(text, v, '');
+  throw new Error(`nenhum provedor de voz respondeu · ${errors.join(' | ')}`);
 }
 
 // ── Tradução / resumo via chat ─────────────────────────────

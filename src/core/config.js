@@ -67,6 +67,7 @@ export const DEFAULT_CONFIG = {
   ia: {
     modeloImagem: 'flux',
     vozPadrao: 'nova',
+    idiomaVoz: 'pt-BR',
     sistema: DEFAULT_IA_SYSTEM
   },
   responderDesconhecido: false,
@@ -112,6 +113,7 @@ export function normalizeConfig(saved) {
     ia: {
       modeloImagem: typeof source.ia?.modeloImagem === 'string' ? source.ia.modeloImagem.slice(0, 80) : base.ia.modeloImagem,
       vozPadrao: typeof source.ia?.vozPadrao === 'string' ? source.ia.vozPadrao.slice(0, 40) : base.ia.vozPadrao,
+      idiomaVoz: typeof source.ia?.idiomaVoz === 'string' ? source.ia.idiomaVoz.slice(0, 20) : base.ia.idiomaVoz,
       sistema: typeof iaSystem === 'string' ? iaSystem.slice(0, 4000) : base.ia.sistema
     },
     responderDesconhecido: source.responderDesconhecido === true,
