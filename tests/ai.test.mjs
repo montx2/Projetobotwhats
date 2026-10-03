@@ -25,10 +25,11 @@ test('memória da IA é isolada por remetente e pode ser apagada por chat', asyn
 
   await aiChat(alice, 'segredo da Alice');
   const systemPrompt = requests[0].messages.find((message) => message.role === 'system')?.content || '';
-  assert.match(systemPrompt, /RESENHA TOTAL/);
-  assert.match(systemPrompt, /duplo sentido/i);
-  assert.match(systemPrompt, /Lá ele/i);
-  assert.match(systemPrompt, /foda pra caralho/i);
+  assert.match(systemPrompt, /padrão é tranquilo e sem gírias/i);
+  assert.match(systemPrompt, /provocação claramente brincalhona/i);
+  assert.match(systemPrompt, /não dê sermão nem use uma recusa automática/i);
+  assert.match(systemPrompt, /no máximo um/i);
+  assert.doesNotMatch(systemPrompt, /RESENHA TOTAL|foda pra caralho/i);
   await aiChat(bob, 'pergunta do Bob');
   await aiChat(aliceElsewhere, 'pergunta em outro grupo');
   await aiChat(alice, 'continuação da Alice');

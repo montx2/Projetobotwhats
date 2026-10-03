@@ -99,7 +99,7 @@ Esses controles ajudam a reduzir spam e links indesejados, mas **não são moder
 
 Os comandos de IA usam provedores externos configurados (ou Pollinations quando não há outras chaves). Perguntas, trechos citados, descrições de imagem e texto de voz podem ser enviados ao provedor escolhido para gerar a resposta. **Não envie senhas, dados de pagamento ou informações sensíveis.**
 
-A IA vem no modo **resenha total**: conversa em português bem coloquial, improvisa com memes e gírias e pode usar palavrões como brincadeira. Em perguntas sérias ou situações delicadas, segura a zoeira e prioriza clareza e cuidado. A memória de conversa é isolada por chat e remetente, fica apenas em RAM por até 30 minutos e é limitada em tamanho; `.ia reset` limpa a memória daquele remetente. Prompts não são gravados nos logs. A retenção e o tratamento pelo provedor externo seguem as políticas desse provedor.
+A IA conversa em português do Brasil num tom natural e tranquilo, sem gírias ou emojis por padrão. Se a pessoa vier na brincadeira, pode acompanhar com humor e uma resposta esperta, sem imitar cada gíria; provocações inofensivas e frases vulgares entram na resenha, sem respostas automáticas de recusa. Em perguntas sérias ou situações delicadas, prioriza clareza e cuidado. A memória de conversa é isolada por chat e remetente, fica apenas em RAM por até 30 minutos e é limitada em tamanho; `.ia reset` limpa a memória daquele remetente. Prompts não são gravados nos logs. A retenção e o tratamento pelo provedor externo seguem as políticas desse provedor.
 
 ### APIs públicas de utilidades
 
@@ -133,7 +133,7 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .pin <link>                     → Pinterest
 .yt <link> / .ytmp3 <link>      → YouTube / áudio
 .tw <link> / .face <link>       → X/Twitter / Facebook
-.ia <pergunta>                  → IA no modo resenha total (memes, gírias e zoeira)
+.ia <pergunta>                  → IA conversa natural e entra na resenha se o contexto pedir
 .criar <descrição>              → geração de imagem
 .voz <texto>                    → texto para áudio
 .traduz <idioma> <texto>        → tradução
