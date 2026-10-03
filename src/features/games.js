@@ -91,10 +91,32 @@ function asciiName(value, fallback = 'Jogador', maxLength = 14) {
   return clean || String(fallback).replace(/[^A-Za-z0-9 _-]/g, '').slice(0, maxLength) || 'Jogador';
 }
 
+/** Parte "usuário" de um JID (sem domínio e sem :dispositivo) — base para reconhecer a mesma pessoa. */
+function userKey(jid) {
+  return String(jid || '').toLowerCase().split('@')[0].split(':')[0].trim();
+}
+
 function actorFor(msg) {
-  const id = chatKey(msg?.key?.participant || msg?.key?.remoteJid || 'jogador');
+  const key = msg?.key || {};
+  const id = chatKey(key.participant || key.remoteJid || 'jogador');
   const fallback = String(id).split('@')[0].replace(/\D/g, '').slice(-6) || 'Jogador';
-  return { id, name: asciiName(msg?.pushName || msg?.verifiedBizName, fallback) };
+  // O WhatsApp alterna entre número (@s.whatsapp.net) e LID (@lid) para a MESMA pessoa,
+  // e no grupo a identidade vem diferente de quando ela fala no privado. Guardamos todas
+  // as formas que a mensagem revelar para conseguir casar os dois lados.
+  const raw = [key.participant, key.participantPn, key.participantLid, key.senderPn, key.senderLid];
+  if (!isGroup(key.remoteJid) && !key.fromMe) raw.push(key.remoteJid);
+  let pn = null;
+  let lid = null;
+  const aliases = new Set([userKey(id)]);
+  for (const candidate of raw) {
+    const jid = chatKey(candidate || '');
+    if (!jid) continue;
+    aliases.add(userKey(jid));
+    if (jid.endsWith('@s.whatsapp.net')) pn ||= jid;
+    else if (jid.endsWith('@lid')) lid ||= jid;
+  }
+  aliases.delete('');
+  return { id, name: asciiName(msg?.pushName || msg?.verifiedBizName, fallback), aliases: [...aliases], pn, lid, self: Boolean(key.fromMe) };
 }
 
 function normalizeLetters(value) {
@@ -257,6 +279,7 @@ function setSession(jid, state) {
 function finishSession(state, winnerId = null) {
   if (state.finished) return;
   state.finished = true;
+  clearTimeout(state.timer);
   recordGameResult(state.chat, sessionPlayers(state), winnerId);
   sessions.delete(state.chat);
 }
@@ -332,7 +355,8 @@ function gameMenu() {
       ['.adivinhe', 'número secreto de 1 a 100']
     ]),
     section('Arcade', [
-      ['.ppt pedra|papel|tesoura', 'Jokenpô contra o bot ou .ppt @oponente'],
+      ['.ppt pedra|papel|tesoura', 'Jokenpô contra o bot (com sequência 🔥)'],
+      ['.ppt @oponente [1|3|5]', 'Jokenpô SECRETO: melhor de 3 (ou 1/5), jogadas no privado'],
       ['.dado [NdM]', 'dado D6 ou rolagem, por exemplo 3d20'],
       ['.moeda', 'cara ou coroa'],
       ['.roleta opção | opção', 'sorteia entre duas ou mais opções']
@@ -366,7 +390,7 @@ function opponentFromMessage(msg, actor) {
   const replied = context.quotedMessage ? context.participant : null;
   const id = chatKey(mentioned || replied || '');
   if (!id || id === actor.id) return null;
-  return { id, name: 'Oponente' };
+  return { id, name: 'Oponente', aliases: [userKey(id)].filter(Boolean) };
 }
 
 function mentionTag(id) {
@@ -1216,13 +1240,53 @@ async function applyNumberGuess(state, rawGuess, reply) {
   return reply(numberText(state, `Tente um número ${hint === 'MAIOR' ? 'maior' : 'menor'}.`));
 }
 
+// ── Jokenpô ──────────────────────────────────────────────────────────────────
+// • Contra o bot: rodada única, na hora, com sequência de vitórias 🔥.
+// • PvP SECRETO: se a jogada fosse mandada no grupo, quem joga por último veria a
+//   do outro e ganharia sempre. Então o bot chama cada jogador no PRIVADO, recebe a
+//   escolha lá e só REVELA no grupo quando os dois já travaram a jogada.
+//   Melhor de 3 por padrão (ou 1/5), empate repete a rodada, quem some perde por W.O.
+
 const PPT_CHOICES = Object.freeze(['pedra', 'papel', 'tesoura']);
+const PPT_EMOJI = Object.freeze({ pedra: '🪨', papel: '📄', tesoura: '✂️' });
+const PPT_VERB = Object.freeze({ pedra: 'amassa', papel: 'embrulha', tesoura: 'corta' });
+const PPT_MAX_ROUNDS = 7; // com empates, a série nunca passa disso
+const pptTiming = { revealMs: 1600, pickMs: 120_000, pendingMs: 180_000 };
+const pptStreaks = new Map();
+
+/** Só para testes: encurta os tempos de suspense e de espera. */
+export function setPptTimingForTests(partial = {}) {
+  Object.assign(pptTiming, partial);
+}
+
+const PPT_TAUNTS = Object.freeze({
+  win: ['Você venceu... por enquanto 😤', 'Sorte de principiante! 🍀', 'Tá bom, tá bom, você é bom 👏', 'Anotado. Vou treinar. 🤖📝'],
+  loss: ['Hahaha, o bot mandou bem 😎', 'Quase! Mas a máquina não perdoa 🤖', 'Revanche? Vai que dá 😏', 'Eu li sua mente. 🧠'],
+  draw: ['Mentes brilhantes pensam igual 🧠', 'Empate! De novo? 🤝', 'Telepatia detectada 📡'],
+  series: ['{loser}, hora de treinar a mão 💪', '{loser} vai querer revanche... 👀', 'Respeita o campeão, {loser}! 😎', '{loser}, foi por pouco! (não foi) 😅']
+});
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function pptLabel(choice) {
+  return `${PPT_EMOJI[choice]} ${String(choice).toUpperCase()}`;
+}
+
+function formatWait(ms) {
+  return ms >= 60_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : `${Math.max(1, Math.round(ms / 1000))} s`;
+}
 
 function normalizePptChoice(value) {
-  const choice = normalizePhrase(value);
-  if (['pedra', 'rocha'].includes(choice)) return 'pedra';
-  if (choice === 'papel') return 'papel';
-  if (['tesoura', 'tesouras'].includes(choice)) return 'tesoura';
+  const raw = String(value ?? '').trim();
+  if (/^(🪨|🗿)$/u.test(raw)) return 'pedra';
+  if (/^(📄|📃|📰|🧻|📜)$/u.test(raw)) return 'papel';
+  if (/^✂\uFE0F?$/u.test(raw)) return 'tesoura';
+  const choice = normalizePhrase(raw);
+  if (['1', 'pedra', 'rocha'].includes(choice)) return 'pedra';
+  if (['2', 'papel'].includes(choice)) return 'papel';
+  if (['3', 'tesoura', 'tesouras'].includes(choice)) return 'tesoura';
   return null;
 }
 
@@ -1232,63 +1296,333 @@ function pptWinner(first, second) {
   return 'second';
 }
 
-async function handlePpt({ msg, args, reply, actor }) {
-  const jid = msg.key.remoteJid;
-  const state = activeFor(jid);
-  const first = String(args[0] || '').toLowerCase();
-  if (['aceitar', 'aceito', 'accept'].includes(first)) {
-    if (!state || state.type !== 'ppt' || state.status !== 'pending' || state.players.O?.id !== actor.id) {
-      return reply(warn('Nenhum convite seu para aceitar'));
-    }
-    state.status = 'playing';
-    state.players.O = actor;
-    return reply(card([header('Jokenpô', 'desafio aceito'), `${state.players.X.name} e ${state.players.O.name}: enviem .ppt pedra, .ppt papel ou .ppt tesoura para registrar a escolha.`]));
-  }
-  if (['recusar', 'recuso'].includes(first)) {
-    if (!state || state.type !== 'ppt' || state.status !== 'pending' || state.players.O?.id !== actor.id) return reply(warn('Nenhum convite seu para recusar'));
-    sessions.delete(chatKey(jid));
-    return reply(warn('Convite recusado', 'a partida não foi iniciada'));
-  }
-  const opponent = opponentFromMessage(msg, actor);
-  if (opponent) {
-    if (!canStart(jid, 'ppt', reply)) return;
-    const game = { type: 'ppt', mode: 'pvp', status: 'pending', players: { X: actor, O: opponent }, choices: {}, creatorId: actor.id, finished: false };
-    setSession(jid, game);
-    return reply({ text: `Desafio de Jokenpô para ${mentionTag(opponent.id)}. Aceite com .ppt aceitar.`, mentions: [opponent.id] });
-  }
+/** Duas identidades são a mesma pessoa? (mesmo ID, ou qualquer número/LID em comum, ou ambos são o dono) */
+function sameActor(a, b) {
+  if (!a || !b) return false;
+  if (a.id && a.id === b.id) return true;
+  if (a.self && b.self) return true;
+  const mine = new Set(a.aliases || []);
+  return (b.aliases || []).some((alias) => mine.has(alias));
+}
 
-  const choice = normalizePptChoice(args.join(' '));
-  if (!choice) return reply(usage('.ppt pedra|papel|tesoura', '.ppt pedra', 'Contra o bot; para PvP, marque alguém com `.ppt @oponente`.'));
-  if (state?.type === 'ppt' && state.status === 'playing') return applyPptChoice(state, actor, choice, reply);
-  if (state) return reply(warn('Há uma partida em andamento', 'resolva ou cancele a partida ativa antes de começar Jokenpô'));
+function pptSeat(state, actor) {
+  if (!state?.players || !actor) return null;
+  for (const key of ['X', 'O']) if (sameActor(state.players[key], actor)) return key;
+  return null;
+}
+
+/** O dono joga pela própria conta: soma os IDs do socket para reconhecê-lo no grupo e no "Você". */
+function withSelfAliases(actor, sock) {
+  if (!actor?.self) return actor;
+  const extra = [sock?.user?.id, sock?.user?.lid, sock?.creds?.me?.id, sock?.creds?.me?.lid].map(userKey).filter(Boolean);
+  return { ...actor, aliases: [...new Set([...(actor.aliases || []), ...extra])] };
+}
+
+/** Partidas PvP em andamento (rodada valendo) de uma pessoa, em qualquer chat. */
+function findPptSessionsFor(actor) {
+  return [...sessions.values()].filter((state) => state.type === 'ppt' && state.mode === 'pvp' && state.status === 'playing' && !state.finished && pptSeat(state, actor));
+}
+
+function parsePptRounds(args) {
+  for (const token of args) {
+    const match = String(token).trim().toLowerCase().match(/^(?:md|melhor(?:de)?)?([135])$/);
+    if (match) return Number(match[1]);
+  }
+  return 3;
+}
+
+async function sendChat(sock, jid, content) {
+  if (!jid || typeof sock?.sendMessage !== 'function') return null;
+  try {
+    return await sock.sendMessage(jid, typeof content === 'string' ? { text: content } : content);
+  } catch {
+    return null;
+  }
+}
+
+function privateTargets(player, sock) {
+  if (player?.self) {
+    const mine = sock?.user?.id;
+    return mine ? [chatKey(mine)] : [];
+  }
+  const targets = [player?.pn, player?.lid].filter(Boolean);
+  if (!targets.length && player?.id && !isGroup(player.id)) targets.push(player.id);
+  return [...new Set(targets)];
+}
+
+/** Manda uma mensagem no PRIVADO do jogador (tenta número e depois LID). */
+async function sendPrivate(sock, player, text) {
+  for (const jid of privateTargets(player, sock)) {
+    if (await sendChat(sock, jid, { text })) return true;
+  }
+  return false;
+}
+
+function armPptTimer(state, ms, onExpire) {
+  clearTimeout(state.timer);
+  const timer = setTimeout(() => { Promise.resolve(onExpire()).catch(() => {}); }, ms);
+  timer.unref?.();
+  state.timer = timer;
+}
+
+function pptPrompt(state, seat) {
+  const other = seat === 'X' ? 'O' : 'X';
+  return [
+    `🤫 *JOKENPÔ SECRETO* · rodada ${state.round}`,
+    `Você × ${state.players[other].name}  ·  placar ${state.score[seat]} x ${state.score[other]}`,
+    '',
+    'Escolha sua jogada — só eu vejo isso:',
+    '1️⃣ 🪨 Pedra',
+    '2️⃣ 📄 Papel',
+    '3️⃣ ✂️ Tesoura',
+    '',
+    'Responda aqui com *1*, *2* ou *3* (ou o nome).',
+    `⏳ Você tem ${formatWait(pptTiming.pickMs)}.`
+  ].join('\n');
+}
+
+/** Abre uma rodada: zera as escolhas, liga o cronômetro e chama os dois no privado. */
+async function startPptRound(sock, state, { announce = false } = {}) {
+  state.choices = {};
+  state.resolving = false;
+  const round = state.round;
+  armPptTimer(state, pptTiming.pickMs, () => expirePptRound(sock, state, round));
+  if (announce) {
+    await sendChat(sock, state.chat, { text: `🎲 *Rodada ${round}* — olhem o privado! 📩 Escolham em segredo, eu revelo aqui. ⏳ ${formatWait(pptTiming.pickMs)}` });
+  }
+  const unreachable = [];
+  for (const seat of ['X', 'O']) {
+    if (!(await sendPrivate(sock, state.players[seat], pptPrompt(state, seat)))) unreachable.push(state.players[seat]);
+  }
+  if (unreachable.length) {
+    await sendChat(sock, state.chat, {
+      text: `⚠ Não consegui chamar ${unreachable.map((player) => mentionTag(player.id)).join(' e ')} no privado.\nChame o número do bot no privado e mande *1*, *2* ou *3* (🪨 📄 ✂️) — a jogada continua secreta.`,
+      mentions: unreachable.map((player) => player.id)
+    });
+  }
+}
+
+/** Tempo esgotado: quem jogou leva por W.O.; se ninguém jogou, a partida some sem pontos. */
+async function expirePptRound(sock, state, round) {
+  if (state.finished || state.resolving || state.round !== round || state.status !== 'playing' || sessions.get(state.chat) !== state) return;
+  const picked = ['X', 'O'].filter((seat) => state.choices[seat]);
+  if (!picked.length) {
+    state.finished = true;
+    sessions.delete(state.chat);
+    await sendChat(sock, state.chat, { text: '⌛ Ninguém jogou a tempo — Jokenpô encerrado, sem pontos. Querem tentar de novo?' });
+    return;
+  }
+  const winner = state.players[picked[0]];
+  const loser = state.players[picked[0] === 'X' ? 'O' : 'X'];
+  finishSession(state, winner.id);
+  await sendChat(sock, state.chat, { text: `⌛ ${loser.name} não jogou a tempo — *W.O.*! 🏆 ${winner.name} leva a partida. +3 pontos.` });
+}
+
+async function expirePptInvite(sock, state) {
+  if (state.finished || state.status !== 'pending' || sessions.get(state.chat) !== state) return;
+  state.finished = true;
+  sessions.delete(state.chat);
+  await sendChat(sock, state.chat, { text: '⌛ O convite de Jokenpô expirou sem resposta.' });
+}
+
+/** Registra a jogada SECRETA de um jogador e, se os dois já jogaram, revela a rodada. */
+async function submitPptChoice(sock, state, seat, choice, dmJid) {
+  if (state.finished || state.status !== 'playing') return;
+  if (state.resolving) {
+    await sendChat(sock, dmJid, { text: '⏳ A rodada está sendo revelada no grupo! Já já chega o convite da próxima.' });
+    return;
+  }
+  if (state.choices[seat]) {
+    await sendChat(sock, dmJid, { text: '🔒 Você já travou sua jogada nesta rodada. Aguarde o oponente!' });
+    return;
+  }
+  state.choices[seat] = choice;
+  const other = seat === 'X' ? 'O' : 'X';
+  const me = state.players[seat];
+  const rival = state.players[other];
+  await sendChat(sock, dmJid, { text: `🔒 Jogada travada: ${pptLabel(choice)}\nAgora é só aguardar ${rival.name}... Boa sorte! 🍀` });
+  if (!state.choices[other]) {
+    await sendChat(sock, state.chat, { text: `🔒 *${me.name}* já escolheu! Falta *${rival.name}* ⏳` });
+    return;
+  }
+  await resolvePptRound(sock, state);
+}
+
+async function resolvePptRound(sock, state) {
+  state.resolving = true;
+  clearTimeout(state.timer);
+  const x = state.choices.X;
+  const o = state.choices.O;
+  const outcome = pptWinner(x, o);
+  const seat = outcome === null ? null : outcome === 'first' ? 'X' : 'O';
+  await sendChat(sock, state.chat, { text: '🪨📄✂️ *JO... KEN... PÔ!* 🥁' });
+  await sleep(pptTiming.revealMs);
+  if (state.finished || sessions.get(state.chat) !== state) return; // partida cancelada durante o suspense
+
+  if (seat) state.score[seat] += 1;
+  state.history.push({ x, o, seat });
+  const names = { X: state.players.X.name, O: state.players.O.name };
+  const lines = [
+    `🎬 *Rodada ${state.round}*`,
+    `${names.X}: ${pptLabel(x)}`,
+    `${names.O}: ${pptLabel(o)}`
+  ];
+  if (seat) {
+    const winnerChoice = seat === 'X' ? x : o;
+    const loserChoice = seat === 'X' ? o : x;
+    lines.push(`${pptLabel(winnerChoice)} ${PPT_VERB[winnerChoice]} ${pptLabel(loserChoice)} → ponto pra *${names[seat]}*! 🎯`);
+  } else {
+    lines.push('🤝 *Empate!* Essa rodada não conta — vamos de novo.');
+  }
+  lines.push(`📊 Placar: ${names.X} ${state.score.X} x ${state.score.O} ${names.O}`);
+
+  const decided = state.score.X >= state.target || state.score.O >= state.target;
+  if (decided || state.round >= PPT_MAX_ROUNDS) {
+    const champion = state.score.X === state.score.O ? null : state.score.X > state.score.O ? 'X' : 'O';
+    finishSession(state, champion ? state.players[champion].id : null);
+    if (champion) {
+      const loserName = names[champion === 'X' ? 'O' : 'X'];
+      lines.push('', `🏆 *${names[champion]}* leva a melhor de ${state.rounds}! +3 pontos.`, chooseOne(PPT_TAUNTS.series).replace('{loser}', loserName));
+    } else {
+      lines.push('', '🤝 Série empatada! Cada um leva +1 ponto.');
+    }
+    await sendChat(sock, state.chat, { text: lines.join('\n') });
+    return;
+  }
+  state.round += 1;
+  await sendChat(sock, state.chat, { text: lines.join('\n') });
+  await startPptRound(sock, state, { announce: true });
+}
+
+function bumpPptStreak(chat, id, result) {
+  const key = `${chat}\u0000${id}`;
+  const before = pptStreaks.get(key) || 0;
+  const after = result === 'win' ? before + 1 : result === 'loss' ? 0 : before;
+  pptStreaks.delete(key);
+  if (after) pptStreaks.set(key, after);
+  while (pptStreaks.size > 1000) pptStreaks.delete(pptStreaks.keys().next().value);
+  return { before, after };
+}
+
+async function playPptAgainstBot({ jid, actor, choice, reply }) {
   const botChoice = chooseOne(PPT_CHOICES);
   const outcome = pptWinner(choice, botChoice);
+  const duel = `Você: ${pptLabel(choice)}\nBot: ${pptLabel(botChoice)}`;
   if (outcome === 'first') {
     recordGameResult(jid, [actor], actor.id);
-    return reply(card([header('Jokenpô', 'vitória'), `${choice.toUpperCase()} vence ${botChoice.toUpperCase()}. +3 pontos.`]));
+    const { after } = bumpPptStreak(jid, actor.id, 'win');
+    return reply(card([
+      header('Jokenpô', 'vitória'),
+      duel,
+      `${pptLabel(choice)} ${PPT_VERB[choice]} ${pptLabel(botChoice)}. +3 pontos.`,
+      after >= 2 ? `🔥 ${after} vitórias seguidas!` : chooseOne(PPT_TAUNTS.win)
+    ].filter(Boolean)));
   }
   if (outcome === 'second') {
     recordGameResult(jid, [actor], 'loss');
-    return reply(card([header('Jokenpô', 'desta vez não'), `${botChoice.toUpperCase()} vence ${choice.toUpperCase()}. Tente de novo.`]));
+    const { before } = bumpPptStreak(jid, actor.id, 'loss');
+    return reply(card([
+      header('Jokenpô', 'desta vez não'),
+      duel,
+      `${pptLabel(botChoice)} ${PPT_VERB[botChoice]} ${pptLabel(choice)}.`,
+      before >= 3 ? `💀 Fim da sequência de ${before} vitórias!` : chooseOne(PPT_TAUNTS.loss)
+    ]));
   }
   recordGameResult(jid, [actor], null);
-  return reply(card([header('Jokenpô', 'empate'), `Os dois escolheram ${choice.toUpperCase()}. +1 ponto.`]));
+  bumpPptStreak(jid, actor.id, 'draw');
+  return reply(card([header('Jokenpô', 'empate'), duel, `Os dois escolheram ${pptLabel(choice)}. +1 ponto.`, chooseOne(PPT_TAUNTS.draw)]));
 }
 
-async function applyPptChoice(state, actor, choice, reply) {
-  const playerKey = Object.keys(state.players).find((key) => state.players[key]?.id === actor.id);
-  if (!playerKey) return reply(warn('Você não participa deste desafio'));
-  if (state.choices[actor.id]) return reply(warn('Escolha já registrada', 'aguarde a escolha da outra pessoa'));
-  state.choices[actor.id] = choice;
-  const opponentKey = playerKey === 'X' ? 'O' : 'X';
-  const opponent = state.players[opponentKey];
-  if (!state.choices[opponent?.id]) return reply(`${SYM.wait} Escolha registrada. Aguardando ${opponent?.name || 'a outra pessoa'}.`);
-  const first = state.choices[state.players.X.id];
-  const second = state.choices[state.players.O.id];
-  const outcome = pptWinner(first, second);
-  finishSession(state, outcome === null ? null : outcome === 'first' ? state.players.X.id : state.players.O.id);
-  const summary = `${state.players.X.name}: ${first.toUpperCase()} · ${state.players.O.name}: ${second.toUpperCase()}`;
-  return reply(card([header('Jokenpô', outcome === null ? 'empate' : 'fim da rodada'), summary, outcome === null ? 'Cada pessoa recebe 1 ponto.' : `${outcome === 'first' ? state.players.X.name : state.players.O.name} venceu. +3 pontos.`]));
+async function handlePpt({ sock, msg, args, reply, actor: rawActor }) {
+  const actor = withSelfAliases(rawActor, sock);
+  const jid = msg.key.remoteJid;
+  const state = activeFor(jid);
+  const first = String(args[0] || '').toLowerCase();
+
+  if (['aceitar', 'aceito', 'accept'].includes(first)) {
+    if (state?.type !== 'ppt' || state.status !== 'pending' || pptSeat(state, actor) !== 'O') {
+      return reply(warn('Nenhum convite seu para aceitar'));
+    }
+    if (findPptSessionsFor(actor).length || findPptSessionsFor(state.players.X).length) {
+      return reply(warn('Já existe um Jokenpô em andamento', 'quem joga só pode ter uma série valendo por vez — termine a outra antes'));
+    }
+    state.status = 'playing';
+    state.players.O = actor;
+    const total = state.rounds;
+    await reply(card([
+      header('Jokenpô', `desafio aceito · melhor de ${total}`),
+      `${state.players.X.name} ⚔️ ${state.players.O.name}`,
+      '🤫 As jogadas são *SECRETAS*: o bot chamou vocês no privado. Quando os dois escolherem, eu revelo tudo aqui!'
+    ]));
+    return startPptRound(sock, state);
+  }
+  if (['recusar', 'recuso'].includes(first)) {
+    if (state?.type !== 'ppt' || state.status !== 'pending' || pptSeat(state, actor) !== 'O') return reply(warn('Nenhum convite seu para recusar'));
+    state.finished = true;
+    clearTimeout(state.timer);
+    sessions.delete(chatKey(jid));
+    return reply(warn('Convite recusado', 'a partida não foi iniciada'));
+  }
+
+  const opponent = opponentFromMessage(msg, actor);
+  if (opponent) {
+    if (!isGroup(jid)) return reply(warn('Desafio só em grupo', 'o Jokenpô PvP precisa de um grupo para marcar o oponente'));
+    if (!canStart(jid, 'ppt', reply)) return;
+    const rounds = parsePptRounds(args);
+    const game = {
+      type: 'ppt', mode: 'pvp', status: 'pending', players: { X: actor, O: opponent }, choices: {}, creatorId: actor.id, finished: false,
+      rounds, target: Math.ceil(rounds / 2), round: 1, score: { X: 0, O: 0 }, history: [], resolving: false
+    };
+    setSession(jid, game);
+    armPptTimer(game, pptTiming.pendingMs, () => expirePptInvite(sock, game));
+    return reply({
+      text: `⚔️ *${actor.name}* desafiou ${mentionTag(opponent.id)} para o *Jokenpô* (melhor de ${rounds})!\nAceite com .ppt aceitar · recuse com .ppt recusar\n🤫 As jogadas são secretas: o bot chama vocês no privado.`,
+      mentions: [opponent.id]
+    });
+  }
+
+  const choice = normalizePptChoice(args.join(' '));
+  if (!choice) return reply(usage('.ppt pedra|papel|tesoura', '.ppt pedra', 'Contra o bot; para PvP secreto, marque alguém: `.ppt @oponente` (melhor de 3, jogadas no privado).'));
+  if (state?.type === 'ppt' && state.status === 'playing' && pptSeat(state, actor)) {
+    return reply(warn('Jogada secreta! 🤫', 'não vale jogar aqui no grupo — a sua escolha vai no PRIVADO, com o bot. Olhe suas mensagens.'));
+  }
+  if (state) return reply(warn('Há uma partida em andamento', 'resolva ou cancele a partida ativa antes de começar Jokenpô'));
+  return playPptAgainstBot({ jid, actor, choice, reply });
+}
+
+/**
+ * Jogada SECRETA de Jokenpô recebida no PRIVADO (de quem o bot chamou, ou do próprio
+ * dono no chat "Você"). Aceita "pedra", "2", "🪨" ou ".ppt papel". Devolve true se tratou.
+ * Só reage a quem está numa série PvP valendo — qualquer outro privado segue ignorado.
+ */
+export async function tryHandlePrivateGameChoice(sock, msg, text, { selfChat = false } = {}) {
+  const chat = msg?.key?.remoteJid;
+  if (!chat || isGroup(chat) || !/@(s\.whatsapp\.net|lid)$/i.test(normalizeJid(chat))) return false;
+  if (msg.key.fromMe && !selfChat) return false; // dono falando com outra pessoa não é jogada
+  if (!sessions.size) return false;
+  const actor = withSelfAliases(actorFor(msg), sock);
+  const matches = findPptSessionsFor(actor);
+  if (!matches.length) return false;
+
+  const value = String(text || '').trim();
+  const body = value.replace(/^[^\p{L}\p{N}\s]{1,2}\s*(?:ppt|jokenpo|jokenpô)\s+/iu, '');
+  const choice = normalizePptChoice(body);
+  const waiting = matches.find((state) => !state.choices[pptSeat(state, actor)]) || matches[0];
+  const seat = pptSeat(waiting, actor);
+
+  if (!choice) {
+    if (selfChat) return false; // no "Você" o dono segue usando o bot normalmente
+    const now = Date.now();
+    if (!waiting.hintAt) waiting.hintAt = {};
+    if (now - (waiting.hintAt[seat] || 0) > 15_000) {
+      waiting.hintAt[seat] = now;
+      await sendChat(sock, chat, { text: 'Para jogar, responda com *1* 🪨 pedra, *2* 📄 papel ou *3* ✂️ tesoura.' });
+    }
+    return true;
+  }
+  if (selfChat && waiting.choices[seat]) return false; // já jogou: não sequestra mensagens soltas do dono
+  await submitPptChoice(sock, waiting, seat, choice, chat);
+  return true;
 }
 
 /** Face do dado em grade 3×3: 🔴 pontos sobre ⬜. */
@@ -1332,7 +1666,8 @@ async function handleRoulette({ args, reply }) {
 async function cancelCurrentGame({ jid, actor, reply, owner }) {
   const state = activeFor(jid);
   if (!state) return reply(warn('Nenhuma partida ativa neste chat'));
-  if (!owner && !isPlayer(state, actor.id) && state.creatorId !== actor.id) return reply(warn('Somente quem participa pode encerrar esta partida'));
+  const seated = state.type === 'ppt' && Boolean(pptSeat(state, actor));
+  if (!owner && !seated && !isPlayer(state, actor.id) && state.creatorId !== actor.id) return reply(warn('Somente quem participa pode encerrar esta partida'));
   sessions.delete(chatKey(jid));
   return reply(ok('Partida encerrada', 'o placar registrado permanece salvo'));
 }
@@ -1354,7 +1689,7 @@ async function handleGameCommand(context) {
   if (game === 'anagrama') return handleAnagram({ msg, args, reply, actor });
   if (game === 'quiz') return handleQuiz({ msg, args, reply, actor });
   if (game === 'numero') return handleNumberGame({ msg, args, reply, actor });
-  if (game === 'ppt') return handlePpt({ msg, args, reply, actor });
+  if (game === 'ppt') return handlePpt({ sock, msg, args, reply, actor });
   if (game === 'dado') return handleDice({ args, reply });
   if (game === 'moeda') return handleCoin({ reply });
   if (game === 'roleta') return handleRoulette({ args, reply });
@@ -1427,11 +1762,7 @@ export async function tryHandleDirectGameMove(sock, msg, text, { reply, authoriz
     else await applyNumberGuess(state, value, reply);
     return true;
   }
-  if (state.type === 'ppt' && state.status === 'playing') {
-    const choice = normalizePptChoice(value);
-    if (!choice) return false;
-    await applyPptChoice(state, actor, choice, reply);
-    return true;
-  }
+  // Jokenpô PvP: jogada digitada no grupo NÃO vale (todo mundo veria). A escolha é
+  // secreta e vem pelo privado — ver tryHandlePrivateGameChoice().
   return false;
 }

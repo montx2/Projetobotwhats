@@ -39,6 +39,8 @@ No Windows, execute `start.bat`. No primeiro início, use o QR exibido no termin
 
 Por padrão, o bot atende somente o privado do dono. O dono pode liberar um chat/grupo com `.ativar` e revogar com `.desativar`. A revogação também limpa as opções de captura, o cache e o placar de jogos daquele chat. ` .desativar tudo` revoga os demais chats.
 
+**Única exceção — Jokenpô secreto:** durante uma série PvP em andamento, o bot troca mensagens privadas com os dois jogadores (a conta do dono é quem envia) para receber a jogada em segredo. O bot só chama no privado quem digitou o comando (`.ppt @oponente` ou `.ppt aceitar`) — quem foi apenas marcado e não respondeu nunca recebe mensagem. Nesse privado só são aceitas jogadas (`1`, `2`, `3`, `pedra`…); qualquer outro assunto, comando ou pessoa continua ignorado em silêncio. Nada é gravado em disco: a série vive em memória e termina com `.jogos cancelar`, `.desativar`, W.O. por tempo ou fim da partida.
+
 ### View Once (desativado por padrão)
 
 A captura automática é **opt-in por JID**, exige que o chat esteja liberado e entrega o arquivo apenas no privado do dono. Uma resposta comum, emoji ou mensagem citada **não** dispara download. Para ativar/desativar:
@@ -155,13 +157,16 @@ Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.
 .anagrama / .embaralhada          → descubra a palavra embaralhada
 .quiz / .trivia                   → pergunta de conhecimentos gerais
 .adivinhe / .numero               → encontre o número de 1 a 100
-.ppt pedra|papel|tesoura          → Jokenpô contra o bot; também aceita desafio PvP
+.ppt pedra|papel|tesoura          → Jokenpô contra o bot, na hora (conta sequência de vitórias 🔥)
+.ppt @oponente [1|3|5]            → Jokenpô PvP SECRETO, melhor de 3 por padrão; aceite com .ppt aceitar
 .dado / .dado 3d20                → D6 em emoji ou rolagem de vários dados
 .moeda / .caraoucoroa             → cara ou coroa
 .roleta pizza | sushi | massa     → escolhe entre opções separadas por |
 .placar / .ranking                → ranking persistente deste chat
 .placar reset                     → zera o ranking (admin do grupo ou dono)
 ```
+
+**Jokenpô PvP secreto.** Se a jogada fosse digitada no grupo, quem joga por último veria a do outro e ganharia sempre. Por isso, depois do `.ppt aceitar`, o bot **chama os dois no privado**: cada um responde `1` 🪨, `2` 📄 ou `3` ✂️ (ou `pedra`, `papel`, `tesoura`, `.ppt pedra`) e o bot só **revela no grupo quando os dois já travaram a jogada** — com suspense de *JO... KEN... PÔ!*. Empate repete a rodada sem contar; quem não joga em 2 minutos perde por W.O.; o convite expira em 3 minutos; jogar no grupo não vale. O dono joga pelo próprio chat "Você". Se o bot não conseguir chamar alguém, o grupo é avisado e a pessoa pode chamar o número do bot e mandar `1`, `2` ou `3`. Cada pessoa só participa de uma série por vez.
 
 Os tabuleiros são desenhados com **emoji** (❌ ⭕ 🟩🟨⬛ 🟦 🚩 💣 🔴), que ocupam sempre a mesma largura no WhatsApp — por isso a grade nunca desalinha, em Android, iOS ou Web. Caracteres de desenho de caixa (`┌─┬┐│`) não são usados porque o WhatsApp os renderiza com fontes diferentes. Só a forca usa um bloco monoespaçado, em ASCII puro e sem moldura. Os nomes de perfil nunca entram nas grades. Partidas em andamento ficam em memória; o ranking fica persistente em `data/games-score.json`, separado por chat. `.desativar` remove a partida e o placar daquele chat.
 
@@ -238,7 +243,7 @@ A suíte executa os arquivos de teste em processos sequenciais, cada um com `NEX
 ```text
 src/
 ├── core/       config, HTTP seguro, key pools, armazenamento, limites
-├── wa/         cliente Baileys, cache e helpers de mídia em stream
+├── wa/         cliente Baileys, cache, reenvio de mensagens (sent-store), cache de grupos e helpers de mídia em stream
 ├── features/   router, jogos, View Once, Anti-Delete, IA, figurinhas e downloads
 └── util/       streams, FFmpeg, WebP e texto
 scripts/        pareamento, doctor, relatório de ambiente e runner de testes
