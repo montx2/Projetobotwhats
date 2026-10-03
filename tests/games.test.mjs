@@ -16,7 +16,7 @@ import {
   renderDiceFace,
   renderHangmanBoard,
   renderMinesweeperBoard,
-  renderNumberHistoryTable,
+  renderNumberHistory,
   renderTermoBoard,
   renderTicTacToeBoard,
   revealMinesweeperCell,
@@ -25,17 +25,21 @@ import {
   verifyMonospaceBlock
 } from '../src/features/games.js';
 
-function blockLines(value) {
-  const match = String(value).match(/```\n([\s\S]*?)\n```/);
-  assert.ok(match, 'mensagem contém um bloco monoespaçado');
-  return match[1].split('\n');
+const BOX_DRAWING = /[┌─┬┐│├┼┤└┴┘╭╮╰╯]/u;
+
+/** Grade de emoji: cada linha tem o mesmo número de células separadas por espaço e nenhum caractere de caixa. */
+function assertEmojiGrid(lines, { rows, cells }) {
+  assert.equal(lines.length, rows);
+  for (const line of lines) {
+    assert.equal(line.split(' ').length, cells, `linha com ${cells} células: "${line}"`);
+    assert.doesNotMatch(line, BOX_DRAWING, 'sem caracteres de desenho de caixa');
+  }
 }
 
-function assertBoard(value, { rows, columns }) {
-  const lines = Array.isArray(value) ? value : blockLines(value);
+/** Bloco ASCII monoespaçado: todas as linhas com a mesma largura. */
+function assertAsciiBlock(lines, { rows, columns }) {
   assert.equal(lines.length, rows);
   assert.ok(lines.every((line) => [...line].length === columns), 'todas as linhas têm a largura esperada');
-  assert.ok(lines.every((line) => /^[┌│├└]/u.test(line) && /[┐│┤┘]$/u.test(line)), 'todas as linhas começam e terminam numa borda');
   assert.equal(verifyMonospaceBlock(mono(lines)), true, 'o bloco passa pelo verificador estrito');
 }
 
@@ -61,15 +65,23 @@ function createReplyCollector() {
   };
 }
 
-test('o validador aceita tabuleiros fixos e rejeita desalinhamento, emoji e caracteres fora da caixa', () => {
-  assert.equal(verifyMonospaceBlock(mono(['┌───┐', '│ 1 │', '└───┘'])), true);
-  assert.equal(verifyMonospaceBlock('```\n┌───┐\n│ 1 │\n└──┘\n```'), false, 'larguras diferentes são rejeitadas');
-  assert.equal(verifyMonospaceBlock('```\n┌───┐\n│😀  │\n└───┘\n```'), false, 'emoji dentro do bloco é rejeitado');
-  assert.equal(verifyMonospaceBlock('```\n┌───┐\n│ 1 │\n└───┘\n```\n```\n┌─┐\n│x│\n└─┘\n```'), true, 'cada bloco é validado separadamente');
+test('o validador aceita blocos ASCII alinhados e rejeita desalinhamento, emoji e caracteres de caixa', () => {
+  assert.equal(verifyMonospaceBlock(mono(['  +---+', '  | O |', ' =+===='])), true);
+  assert.equal(verifyMonospaceBlock('```\n+---+\n| 1 |\n+--+\n```'), false, 'larguras diferentes são rejeitadas');
+  assert.equal(verifyMonospaceBlock('```\n+---+\n|😀 |\n+---+\n```'), false, 'emoji dentro do bloco é rejeitado');
+  assert.equal(verifyMonospaceBlock('```\n┌───┐\n│ 1 │\n└───┘\n```'), false, 'caracteres de caixa são rejeitados');
+  assert.equal(verifyMonospaceBlock('```\n+-+\n|x|\n+-+\n```\n```\n+--+\n|ab|\n+--+\n```'), true, 'cada bloco é validado separadamente');
 });
 
-test('Jogo da velha tem grade 7×13 e o Minimax vence ou bloqueia uma jogada imediata', () => {
-  assertBoard(renderTicTacToeBoard(Array(9).fill('')), { rows: 7, columns: 13 });
+test('Jogo da velha usa grade 3×3 em emoji (❌ e ⭕, nunca "O" ou "0") e o Minimax vence ou bloqueia', () => {
+  const empty = renderTicTacToeBoard(Array(9).fill(''));
+  assertEmojiGrid(empty, { rows: 3, cells: 3 });
+  assert.deepEqual(empty, ['1️⃣ 2️⃣ 3️⃣', '4️⃣ 5️⃣ 6️⃣', '7️⃣ 8️⃣ 9️⃣']);
+  const played = renderTicTacToeBoard(['', '', 'X', '', '', '', 'O', '', '']);
+  assertEmojiGrid(played, { rows: 3, cells: 3 });
+  assert.equal(played[0].split(' ')[2], '❌');
+  assert.equal(played[2].split(' ')[0], '⭕');
+  assert.doesNotMatch(played.join('\n'), /[OX0]/, 'nenhuma letra O/X nem zero ASCII na grade');
   assert.equal(chooseTicTacToeBotMove(['X', 'X', '', 'O', '', '', '', '', ''], 'dificil'), 2, 'vence se possível');
   assert.equal(chooseTicTacToeBotMove(['X', 'X', '', '', 'O', '', '', '', ''], 'dificil'), 2, 'bloqueia a vitória do adversário');
   const board = ['X', '', '', '', '', '', '', '', ''];
@@ -77,28 +89,37 @@ test('Jogo da velha tem grade 7×13 e o Minimax vence ou bloqueia uma jogada ime
   assert.ok(move >= 0 && !board[move], 'Minimax escolhe uma casa livre');
 });
 
-test('Termo tem grade 8×27, normaliza acentos e avalia letras repetidas em duas passagens', () => {
-  assertBoard(renderTermoBoard([]), { rows: 8, columns: 27 });
+test('Termo usa quadrados 🟩🟨⬛, normaliza acentos e avalia letras repetidas em duas passagens', () => {
+  const empty = renderTermoBoard([]);
+  assert.equal(empty.length, 6);
+  assert.ok(empty.every((line) => line === '⬜⬜⬜⬜⬜'));
   assert.equal(normalizeGameGuess('ÁRVORE'), 'arvore');
   assert.deepEqual(evaluateWordGuess('salsa', 'saias'), ['exact', 'exact', 'absent', 'present', 'present']);
   const lines = renderTermoBoard([{ guess: 'saias', marks: evaluateWordGuess('salsa', 'saias') }]);
-  assert.match(lines[1], /\[S\] \[A\] -I- \(A\) \(S\)/);
+  assert.equal(lines[0], '🟩🟩⬛🟨🟨  *SAIAS*');
+  assert.equal(lines[1], '⬜⬜⬜⬜⬜');
+  assert.doesNotMatch(lines.join('\n'), BOX_DRAWING);
 });
 
-test('Forca oferece mais de 100 palavras categorizadas e grade gallows 9×19', () => {
+test('Forca oferece mais de 100 palavras categorizadas e forca ASCII 7×10 sem moldura', () => {
   assert.ok(HANGMAN_WORDS.length >= 100);
   assert.ok(HANGMAN_WORDS.every((entry) => entry.category && /^[a-z]+$/.test(entry.word)));
-  assertBoard(renderHangmanBoard(0), { rows: 9, columns: 19 });
-  assert.match(renderHangmanBoard(0)[7], /VIDAS \[######\]/);
-  assert.match(renderHangmanBoard(6)[7], /VIDAS \[------\]/);
+  assertAsciiBlock(renderHangmanBoard(0), { rows: 7, columns: 10 });
+  assertAsciiBlock(renderHangmanBoard(6), { rows: 7, columns: 10 });
+  assert.doesNotMatch(renderHangmanBoard(0).join('\n'), /[O/\\]/, 'sem boneco no começo');
+  assert.match(renderHangmanBoard(6).join('\n'), /O[\s\S]*\/\|\\[\s\S]*\/ \\/, 'boneco completo no sexto erro');
 });
 
-test('Campo minado tem grade 13×25, primeira jogada segura, bandeira e flood-fill', () => {
+test('Campo minado usa grade 5×5 em emoji, primeira jogada segura, bandeira e flood-fill', () => {
   const player = { id: 'mines@test', name: 'Mines' };
   const game = createMinesweeperGame(player, () => 0);
-  assertBoard(renderMinesweeperBoard(game), { rows: 13, columns: 25 });
+  const fresh = renderMinesweeperBoard(game);
+  assertEmojiGrid(fresh, { rows: 6, cells: 6 });
+  assert.equal(fresh[0], '⬛ 🇦 🇧 🇨 🇩 🇪');
+  assert.equal(fresh.slice(1).join(' ').split('🟦').length - 1, 25, 'todas as 25 casas começam cobertas');
 
   assert.equal(toggleMinesweeperFlag(game, 0), true);
+  assert.match(renderMinesweeperBoard(game)[1], /^1️⃣ 🚩 /);
   assert.equal(revealMinesweeperCell(game, 0).status, 'flagged');
   assert.equal(toggleMinesweeperFlag(game, 0), false);
 
@@ -115,9 +136,15 @@ test('Campo minado tem grade 13×25, primeira jogada segura, bandeira e flood-fi
   assert.equal(floodFound, true, 'casas vazias abrem vizinhas por busca em largura');
 });
 
-test('tabela de palpites tem 35 colunas e o D6 usa somente caracteres alinháveis', () => {
-  assertBoard(renderNumberHistoryTable([{ guess: 42, hint: 'MAIOR' }, { guess: 70, hint: 'MENOR' }]), { rows: 6, columns: 35 });
-  for (let value = 1; value <= 6; value++) assertBoard(renderDiceFace(value), { rows: 7, columns: 7 });
+test('histórico de palpites usa ícones 🔼/🔽 e o D6 é uma grade 3×3 com pontos 🔴', () => {
+  const history = renderNumberHistory([{ guess: 42, hint: 'MAIOR' }, { guess: 70, hint: 'MENOR' }]);
+  assert.deepEqual(history, ['1️⃣ 🔼 *42*  ·  maior', '2️⃣ 🔽 *70*  ·  menor']);
+  assert.deepEqual(renderNumberHistory([]), ['_Sem palpites ainda._']);
+  for (let value = 1; value <= 6; value++) {
+    const face = renderDiceFace(value);
+    assertEmojiGrid(face, { rows: 3, cells: 3 });
+    assert.equal(face.join('').split('🔴').length - 1, value, `a face ${value} tem ${value} pontos`);
+  }
 });
 
 test('movimentos sem prefixo ficam limitados a chats autorizados e respeitam o turno', async () => {
@@ -215,8 +242,10 @@ test('placar persiste nomes em ASCII e clearChatGames remove os dados do chat', 
 
   const boardReply = createReplyCollector();
   await handleGameCommand({ sock: {}, msg: makeMessage(jid, player.id), name: 'placar', args: [], reply: boardReply.reply });
-  assert.equal(verifyMonospaceBlock(String(boardReply.sent.at(-1))), true);
-  assert.doesNotMatch(blockLines(String(boardReply.sent.at(-1))).join('\n'), /👑|Zoë/i);
+  const board = String(boardReply.sent.at(-1));
+  assert.equal(verifyMonospaceBlock(board), true);
+  assert.match(board, /🥇 \*Zoe\*/, 'o líder recebe medalha e o nome sai em ASCII');
+  assert.doesNotMatch(board, /👑|Zoë|[┌┬┐├┼┤└┴┘]/u, 'sem tabela de caixa nem nome com emoji/acento');
 
   const resetReply = createReplyCollector();
   await handleGameCommand({ sock: {}, msg: makeMessage(jid, player.id), name: 'placar', args: ['reset'], reply: resetReply.reply, owner: true });
