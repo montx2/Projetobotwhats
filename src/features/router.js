@@ -54,7 +54,7 @@ import {
   getPublicHolidays,
   getWeatherByCity
 } from './public-apis.js';
-import { clearChatGames, handleGameCommand, isGameCommand, tryHandleDirectGameMove } from './games.js';
+import { clearChatGames, handleGameCommand, isGameCommand, tryHandleDirectGameMove, tryHandlePrivateGameChoice } from './games.js';
 
 const STARTED_AT = Date.now();
 const expensiveLimiter = new SlidingWindowLimiter({ limit: 6, windowMs: 60_000, minIntervalMs: 2_000 });
@@ -414,6 +414,11 @@ export async function handleMessage(sock, msg, deps) {
     if (allowedChat) await handleDelete(sock, msg, { ownerJid }).catch((e) => log.warn(`antidelete: ${e.message}`));
     return;
   }
+
+  // Jokenpô SECRETO: a jogada chega no PRIVADO — de quem o bot chamou para a série ou do
+  // dono no chat "Você". Vem antes do controle de acesso porque o jogador pode ser alguém
+  // que nunca foi liberado com .ativar; só reage a quem está numa série valendo (resto: silêncio).
+  if (!isGroup(jid) && await tryHandlePrivateGameChoice(sock, msg, text, { selfChat: inOwnerPrivate })) return;
 
   // Moderação de links só roda em grupos autorizados e com opt-in explícito.
   // Se houver violação, a mensagem não segue para comandos nem auto-download.

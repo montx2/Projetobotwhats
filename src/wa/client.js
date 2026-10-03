@@ -24,6 +24,8 @@ import { log, banner, baileysLogger } from '../core/logger.js';
 import { DATA_DIR, ensureDirs, readJson, writeJsonNow } from '../core/store.js';
 import { isTermux, platformBanner } from '../core/platform.js';
 import { markBotSent, isBotSent } from './cache.js';
+import { rememberSent, getSentMessage } from './sent-store.js';
+import { createGroupMetadataCache } from './group-cache.js';
 
 export { markBotSent, isBotSent };
 
@@ -35,6 +37,11 @@ const VERSION_CACHE = path.join(DATA_DIR, 'wa-web-version.json');
 let socket = null;
 let stopping = false;
 let reconnectTimer = null;
+
+// Consulta o servidor 1x e reaproveita a lista de participantes por alguns minutos.
+const groupCache = createGroupMetadataCache({
+  fetch: (jid) => socket?.groupMetadata?.(jid)
+});
 
 export function getSocket() {
   return socket;
@@ -187,8 +194,15 @@ export async function startClient(handlers = {}) {
     // conta, então precisamos receber as mensagens fromMe. (Os próprios envios
     // do bot nunca começam com prefixo de comando, então não há loop.)
     emitOwnEvents: true,
+    // Reenvio de mensagens: quando o WhatsApp de alguém não consegue abrir uma
+    // mensagem do bot, ele pede o reenvio e o Baileys precisa recuperar o conteúdo
+    // original aqui. Sem isso a pessoa fica em "Aguardando mensagem…" para sempre.
+    getMessage: async (key) => getSentMessage(key?.id),
+    // Evita uma consulta ao servidor a cada mensagem enviada em grupo.
+    cachedGroupMetadata: (jid) => groupCache.get(jid),
     logger: baileysLogger
   });
+  groupCache.clear(); // socket novo = recomeça sem metadados velhos
   clientSocket.creds = state.creds;
 
   // Envolve sendMessage para registrar o ID ANTES que o Baileys dispare messages.upsert
@@ -200,7 +214,10 @@ export async function startClient(handlers = {}) {
       (typeof generateMessageIDV2 === 'function' ? generateMessageIDV2(clientSocket.user?.id) : undefined);
     if (msgId) markBotSent(msgId);
     const res = await origSendMessage(jid, content, msgId ? { ...options, messageId: msgId } : options);
-    if (res?.key?.id) markBotSent(res.key.id);
+    if (res?.key?.id) {
+      markBotSent(res.key.id);
+      rememberSent(res.key.id, res.message); // permite reenviar se o destinatário pedir (retry)
+    }
     return res;
   };
 
@@ -279,8 +296,17 @@ export async function startClient(handlers = {}) {
     }
   });
 
+  // Lista de participantes mudou (entrada/saída/promoção): descarta o cache daquele grupo.
+  clientSocket.ev.on('groups.update', (updates) => {
+    for (const update of updates || []) if (update?.id) groupCache.invalidate(update.id);
+  });
+  clientSocket.ev.on('groups.upsert', (groups) => {
+    for (const group of groups || []) if (group?.id) groupCache.set(group.id, group);
+  });
+
   // Entradas/saídas de membros são consumidas somente pelos recursos opt-in de grupo.
   clientSocket.ev.on('group-participants.update', async (update) => {
+    if (update?.id) groupCache.invalidate(update.id);
     if (socket !== clientSocket) return;
     try {
       await handlers.onGroupParticipantsUpdate?.(clientSocket, update);
