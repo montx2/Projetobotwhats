@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { setDnsLookupForTests } from '../src/core/http.js';
-import { aiChat, resetChatMemory, resetChatMemoryForChat } from '../src/features/ai.js';
+import { aiChat, aiPoll, parseNaturalPollFallback, resetChatMemory, resetChatMemoryForChat } from '../src/features/ai.js';
 
 setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
 
@@ -121,4 +121,31 @@ test('IA falha de forma segura quando a API de clima não encontra a localidade'
 
   await assert.rejects(aiChat('missing-weather', 'clima Unknown Weather Place'), /não consegui consultar o clima/);
   assert.deepEqual(requestedHosts, ['geocoding-api.open-meteo.com'], 'sem dados verificados, a IA não deve inventar a previsão');
+});
+
+test('aiPoll usa a IA para estruturar texto natural e cai no fallback local se a IA falhar', async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: '{"question":"Hoje tem fut?","options":["Sim","Não","Depende da hora"]}' } }]
+  }), { headers: { 'content-type': 'application/json' } });
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const fromAi = await aiPoll('Hoje tem fut , sim ou nao, ou tepende da hora');
+  assert.deepEqual(fromAi, {
+    question: 'Hoje tem fut?',
+    options: ['Sim', 'Não', 'Depende da hora']
+  });
+
+  // Se o provedor de IA falhar, o fallback local ainda interpreta a frase e corrige erros comuns
+  globalThis.fetch = async () => { throw new Error('offline'); };
+  const fromFallback = await aiPoll('Hoje tem fut , sim ou nao, ou tepende da hora');
+  assert.deepEqual(fromFallback, {
+    question: 'Hoje tem fut?',
+    options: ['Sim', 'Não', 'Depende da hora']
+  });
+
+  assert.deepEqual(parseNaturalPollFallback('Bora jogar hoje'), {
+    question: 'Bora jogar hoje?',
+    options: ['Sim', 'Não', 'Talvez']
+  });
 });

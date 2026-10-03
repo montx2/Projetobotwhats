@@ -19,7 +19,7 @@ import { isViewOnce, onViewOnceMessage, unwrapViewOnce } from './viewonce.js';
 import { makeSticker, packInfo, isAnimatedWebp, parseFit } from './sticker.js';
 import { stickerSourcesForCommand } from './stickerlink.js';
 import { removeBackground, bgStatus, bgPools } from './bgremoval.js';
-import { aiChat, aiImage, aiVoice, aiTranslate, aiSummary, resetChatMemory, resetChatMemoryForChat, aiStatus } from './ai.js';
+import { aiChat, aiImage, aiVoice, aiTranslate, aiSummary, aiPoll, resetChatMemory, resetChatMemoryForChat, aiStatus } from './ai.js';
 import { resolveDownload, sendDownload, parseQuality, autoDownload, isKnownSocialUrl } from './download.js';
 import {
   ownerMenu,
@@ -130,12 +130,8 @@ const AUTH_COMMANDS = new Set([
   'autorizados'
 ]);
 
-// Comandos BLOQUEADOS para terceiros nos chats/grupos ativados com .ativar.
-// São exatamente as duas funções 100% privadas (View Once e Anti-Delete) mais
-// os comandos que mudam o comportamento do bot (só o dono mexe neles).
-// TODO O RESTO — figurinhas, downloads de qualquer rede, IA, voz, tradução —
-// fica liberado para quem o dono autorizou.
-const OWNER_ONLY_COMMANDS = new Set([
+// Comandos 100% restritos ao privado do dono (nunca respondem em grupos, nem mesmo para o dono).
+const PRIVATE_OWNER_COMMANDS = new Set([
   // 👁️ View Once (nunca aparece nem responde para terceiros)
   'vo',
   'visu',
@@ -146,8 +142,16 @@ const OWNER_ONLY_COMMANDS = new Set([
   'antidel',
   'ad',
   'apagadas',
-  'deletadas',
-  // ⚙️ Configuração e diagnóstico do bot
+  'deletadas'
+]);
+
+// Comandos BLOQUEADOS para terceiros nos chats/grupos ativados com .ativar.
+// Só o dono do bot pode usá-los.
+const OWNER_ONLY_COMMANDS = new Set([
+  ...PRIVATE_OWNER_COMMANDS,
+  // ⚙️ Status, configuração e diagnóstico do bot
+  'info',
+  'status',
   'config',
   'pools',
   'doctor'
@@ -441,12 +445,12 @@ export async function handleMessage(sock, msg, deps) {
   //   recursos privados/de configuração seguem bloqueados ou exigem admin de grupo.
   // • Caso contrário: silêncio absoluto (0 mensagens).
   if (command) {
-    if (isAuthCmd) {
-      if (!senderIsOwner) return; // estranhos tentando dar .ativar são ignorados em silêncio
+    if (isAuthCmd || OWNER_ONLY_COMMANDS.has(command.name)) {
+      if (!senderIsOwner) return; // terceiros tentando comandos exclusivos do dono são ignorados em silêncio
+      if (!inOwnerPrivate && PRIVATE_OWNER_COMMANDS.has(command.name)) return; // View Once / Anti-Delete: 0 traços fora do privado
     } else if (!inOwnerPrivate) {
-      // Fora do privado do dono: precisa estar ativado e não ser comando exclusivo do dono
+      // Fora do privado do dono: precisa estar ativado
       if (!authorized) return;
-      if (OWNER_ONLY_COMMANDS.has(command.name)) return; // View Once / Anti-Delete: 0 traços
     }
     if (isGroup(jid) && GROUP_CONTROL_COMMANDS.has(command.name)) {
       const actor = bareId(msg.key?.participant || jid);
@@ -808,22 +812,37 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'enquete':
     case 'poll': {
       requireAuthorizedGroup(jid);
-      const parts = argText.split('|').map((part) => part.trim());
-      if (parts.length < 3 || parts.some((part) => !part)) {
-        throw new Error('uso: .enquete pergunta | opção 1 | opção 2');
+      const sourceText = (argText || extractAnyText(msg.message?.extendedTextMessage?.contextInfo?.quotedMessage || {})).trim();
+      if (!sourceText) {
+        return reply(usage(
+          '.enquete <pergunta e opções>',
+          '.enquete Hoje tem fut, sim, não ou depende da hora',
+          'Escreva livremente que a IA monta a enquete, ou separe com | (pergunta | opção 1 | opção 2).'
+        ));
       }
-      const question = parts.shift();
-      const options = parts;
-      if (question.length > 200) throw new Error('a pergunta deve ter no máximo 200 caracteres');
-      if (options.length > 12) throw new Error('a enquete aceita no máximo 12 opções');
-      if (options.some((option) => option.length > 80)) throw new Error('cada opção deve ter no máximo 80 caracteres');
-      if (new Set(options.map((option) => option.toLocaleLowerCase('pt-BR'))).size !== options.length) {
-        throw new Error('as opções da enquete devem ser diferentes');
+      let question;
+      let options;
+      if (sourceText.includes('|')) {
+        const parts = sourceText.split('|').map((part) => part.trim());
+        if (parts.length < 3 || parts.some((part) => !part)) {
+          throw new Error('uso: .enquete pergunta | opção 1 | opção 2 (ou escreva livremente sem | para a IA montar)');
+        }
+        question = parts.shift();
+        options = parts;
+        if (question.length > 200) throw new Error('a pergunta deve ter no máximo 200 caracteres');
+        if (options.length > 12) throw new Error('a enquete aceita no máximo 12 opções');
+        if (options.some((option) => option.length > 80)) throw new Error('cada opção deve ter no máximo 80 caracteres');
+        if (new Set(options.map((option) => option.toLocaleLowerCase('pt-BR'))).size !== options.length) {
+          throw new Error('as opções da enquete devem ser diferentes');
+        }
       }
       const actor = bareId(msg.key.participant || jid);
       const groupKey = bareId(jid);
       if (!pollUserLimiter.consume(`${groupKey}:${actor}`).allowed) return; // silêncio para não amplificar spam
       if (!pollGroupLimiter.consume(groupKey).allowed) return;
+      if (!question || !options) {
+        ({ question, options } = await aiPoll(sourceText));
+      }
       return reply({ poll: { name: question, values: options, selectableCount: 1 } });
     }
 
@@ -845,6 +864,7 @@ async function runCommand(sock, msg, cmd, ctx) {
 
     case 'info':
     case 'status':
+      requireOwner(ctx, msg);
       return reply(
         infoText({
           uptime: uptimeText(STARTED_AT),
@@ -865,6 +885,7 @@ async function runCommand(sock, msg, cmd, ctx) {
       );
 
     case 'doctor':
+      requireOwner(ctx, msg);
       return reply(doctorText());
 
     // ── ANTI-DELETE (100% privado: só no privado do dono, nunca em grupo/chat) ──

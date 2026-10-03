@@ -5,6 +5,7 @@ import { mono } from '../src/core/ui.js';
 import { readJson } from '../src/core/store.js';
 import {
   HANGMAN_WORDS,
+  TERMO_WORDS,
   chooseTicTacToeBotMove,
   clearChatGames,
   createMinesweeperGame,
@@ -12,6 +13,7 @@ import {
   getChatScoreboard,
   handleGameCommand,
   isGameCommand,
+  isValidTermoWord,
   normalizeGameGuess,
   renderDiceFace,
   renderHangmanBoard,
@@ -778,34 +780,48 @@ test('partida em andamento bloqueia novo jogo com aviso profissional e .encerrar
   clearChatGames(jid);
 });
 
-test('Termo explica cada palpite letra a letra e lista as letras fora da palavra', async () => {
+test('Termo é minimalista, valida palavras reais do dicionário e rejeita sequências como abcde', async () => {
   const realRandom = Math.random;
   Math.random = () => 0; // primeira palavra da lista: "abriu"
   try {
+    assert.ok(TERMO_WORDS.every((word) => isValidTermoWord(word)), 'todas as palavras sorteadas constam no dicionário');
+    assert.equal(isValidTermoWord('abcde'), false);
+    assert.equal(isValidTermoWord('aaaaa'), false);
+    assert.equal(isValidTermoWord('qwert'), false);
+    assert.equal(isValidTermoWord('saias'), true);
+    assert.equal(isValidTermoWord('avião'), true);
+
     const jid = 'termo-read-test@s.whatsapp.net';
     const player = '551100000092@s.whatsapp.net';
     const replies = createReplyCollector();
     await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: [], reply: replies.reply });
     const opened = String(replies.sent.at(-1));
-    assert.doesNotMatch(opened, /Leitura dos palpites/, 'sem palpites ainda não há leitura');
+    assert.match(opened, /0\/6 tentativas/);
+    assert.doesNotMatch(opened, /Leitura|Fora da palavra|letra certa no lugar/i);
 
+    // sequências aleatórias de 5 letras são barradas sem gastar tentativa
+    await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: ['abcde'], reply: replies.reply });
+    assert.match(String(replies.sent.at(-1)), /Palavra inválida/);
+    await tryHandleDirectGameMove({}, makeMessage(jid, player, { text: 'qwert' }), 'qwert', { reply: replies.reply, authorized: true });
+    assert.match(String(replies.sent.at(-1)), /Palavra inválida/);
+
+    // palavra válida atualiza apenas o cabeçalho e a grade minimalista
     await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: ['saias'], reply: replies.reply });
     const board = String(replies.sent.at(-1));
-    assert.match(board, /LEITURA DOS PALPITES/);
-    assert.match(board, /1️⃣ \*SAIAS\* › S ⬛ · A 🟨 · I 🟨 · A ⬛ · S ⬛/, 'cada letra ao lado da sua cor');
-    assert.match(board, /Fora da palavra · \*S\*/, 'letras descartadas ficam explícitas');
-    assert.match(board, /🟩 letra certa no lugar · 🟨 letra em outra posição · ⬛ letra fora/);
+    assert.match(board, /1\/6 tentativas/, 'palpites inválidos anteriores não gastaram tentativa');
+    assert.match(board, /⬛🟨🟨⬛⬛  \*SAIAS\*/);
+    assert.doesNotMatch(board, /LEITURA|Fora da palavra|letra certa no lugar/i, 'resposta limpa e minimalista');
 
-    // palpite direto (sem prefixo) também traz a leitura
-    await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: ['bravo'], reply: replies.reply });
-    assert.match(String(replies.sent.at(-1)), /2️⃣ \*BRAVO\* › B 🟨 · R 🟨 · A 🟨 · V ⬛ · O ⬛/);
+    await tryHandleDirectGameMove({}, makeMessage(jid, player, { text: 'bravo' }), 'bravo', { reply: replies.reply, authorized: true });
+    assert.match(String(replies.sent.at(-1)), /2\/6 tentativas/);
+    assert.match(String(replies.sent.at(-1)), /🟨🟨🟨⬛⬛  \*BRAVO\*/);
     clearChatGames(jid);
   } finally {
     Math.random = realRandom;
   }
 });
 
-test('Termo vitorioso e derrota mostram a leitura final letra a letra', async () => {
+test('Termo vitorioso e derrota mostram apenas o resultado e o tabuleiro limpo', async () => {
   const realRandom = Math.random;
   Math.random = () => 0; // "abriu"
   try {
@@ -816,8 +832,8 @@ test('Termo vitorioso e derrota mostram a leitura final letra a letra', async ()
     await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: ['abriu'], reply: replies.reply });
     const win = String(replies.sent.at(-1));
     assert.match(win, /vitória em 1 tentativa/);
-    assert.match(win, /LEITURA FINAL/);
-    assert.match(win, /1️⃣ \*ABRIU\* › A 🟩 · B 🟩 · R 🟩 · I 🟩 · U 🟩/);
+    assert.match(win, /🟩🟩🟩🟩🟩  \*ABRIU\*/);
+    assert.doesNotMatch(win, /LEITURA FINAL/i);
     assert.equal(getChatScoreboard(jid)[0].wins, 1);
     clearChatGames(jid);
 
@@ -828,7 +844,7 @@ test('Termo vitorioso e derrota mostram a leitura final letra a letra', async ()
     const loss = String(replies.sent.at(-1));
     assert.match(loss, /fim de jogo/);
     assert.match(loss, /A palavra era ABRIU/);
-    assert.match(loss, /LEITURA FINAL/);
+    assert.doesNotMatch(loss, /LEITURA FINAL/i);
     clearChatGames(jid);
   } finally {
     Math.random = realRandom;
@@ -874,9 +890,9 @@ test('as dicas dos minigames não repetem a própria instrução depois de usada
 
     // Termo
     await handleGameCommand({ sock: {}, msg: mk(), name: 'termo', args: [], reply: replies.reply });
-    assert.match(String(replies.sent.at(-1)), /`\.termo dica` pede pista/);
+    assert.match(String(replies.sent.at(-1)), /`\.termo dica`/);
     await handleGameCommand({ sock: {}, msg: mk(), name: 'termo', args: ['dica'], reply: replies.reply });
-    assert.doesNotMatch(String(replies.sent.at(-1)), /`\.termo dica` pede pista/);
+    assert.doesNotMatch(String(replies.sent.at(-1)), /`\.termo dica`/);
     assert.match(String(replies.sent.at(-1)), /Dica: começa com/);
     clearChatGames(jid);
 

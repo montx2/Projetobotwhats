@@ -86,10 +86,10 @@ O dono precisa liberar o grupo com `.ativar` antes. Boas-vindas, mensagem de sa�
 .antilink on | off                  → liga/desliga a proteção de links
 .antilink permitir exemplo.com      → permite o domínio e seus subdomínios
 .antilink remover exemplo.com       → remove o domínio permitido
-.enquete pergunta | opção 1 | opção 2 → cria uma enquete de escolha única
+.enquete <texto livre ou com |>     → cria uma enquete no grupo (IA interpreta frases soltas)
 ```
 
-A proteção de links considera URLs HTTP(S), links `www.` e domínios simples, ignora mensagens de administradores e só remove mensagens quando o próprio bot é administrador. Se perder essa permissão ou não conseguir confirmar os metadados, não tenta apagar; também não encaminha o link para comandos/downloads. A lista aceita até 50 domínios por grupo; não aceita URL completa, IP, porta ou curinga. Há limite de até 20 tentativas de remoção de links por grupo/minuto; acima disso a proteção bloqueia o processamento do link sem continuar apagando. Boas-vindas e saídas usam um cartão no mesmo estilo dos demais comandos, com o nome do grupo, a menção de quem entrou/saiu e a contagem de membros; as menções são limitadas e nenhum histórico de participantes é guardado (até 5 eventos anunciados por grupo/minuto). Enquetes aceitam de 2 a 12 opções, com limite de 2 por usuário a cada 5 minutos e 20 por grupo/hora.
+A proteção de links considera URLs HTTP(S), links `www.` e domínios simples, ignora mensagens de administradores e só remove mensagens quando o próprio bot é administrador. Se perder essa permissão ou não conseguir confirmar os metadados, não tenta apagar; também não encaminha o link para comandos/downloads. A lista aceita até 50 domínios por grupo; não aceita URL completa, IP, porta ou curinga. Há limite de até 20 tentativas de remoção de links por grupo/minuto; acima disso a proteção bloqueia o processamento do link sem continuar apagando. Boas-vindas e saídas usam um cartão no mesmo estilo dos demais comandos, com o nome do grupo, a menção de quem entrou/saiu e a contagem de membros; as menções são limitadas e nenhum histórico de participantes é guardado (até 5 eventos anunciados por grupo/minuto). Enquetes aceitam tanto o formato `pergunta | opção 1 | opção 2` quanto frases naturais (ex.: `.enquete Hoje tem fut, sim ou nao, ou depende da hora`), interpretadas e corrigidas pela IA (de 2 a 12 opções, com limite de 2 por usuário a cada 5 minutos e 20 por grupo/hora).
 
 O `.menu` se adapta ao contexto: dentro de um grupo ele traz as ferramentas de gestão (boas-vindas, anti-link e enquete); em uma conversa privada liberada essas opções ficam de fora, com uma nota de onde elas valem.
 
@@ -141,7 +141,8 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .clima <cidade>                 → clima atual e previsão do dia
 .cotacao <valor> <origem> <destino> → conversão cambial de referência
 .feriados [ano] [país]           → feriados nacionais (padrão: Brasil/ano atual)
-.enquete pergunta | opção 1 | opção 2 → enquete de escolha única no grupo
+.enquete <texto livre ou com |>  → enquete no grupo (IA entende frases naturais ou separadas por |)
+.info                            → status do bot (exclusivo do dono)
 ```
 
 ### Jogos & arcade
@@ -170,7 +171,7 @@ Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.
 
 **Jokenpô PvP secreto.** Se a jogada fosse digitada no grupo, quem joga por último veria a do outro e ganharia sempre. Por isso, depois do `.ppt aceitar`, o bot **chama os dois no privado**: cada um responde `1` 🪨, `2` 📄 ou `3` ✂️ (ou `pedra`, `papel`, `tesoura`, `.ppt pedra`) e o bot só **revela no grupo quando os dois já travaram a jogada** — com suspense de *JO... KEN... PÔ!*. Empate repete a rodada sem contar; quem não joga em 2 minutos perde por W.O.; o convite expira em 3 minutos; jogar no grupo não vale. O dono joga pelo próprio chat "Você". Se o bot não conseguir chamar alguém, o grupo é avisado e a pessoa pode chamar o número do bot e mandar `1`, `2` ou `3`. Cada pessoa só participa de uma série por vez.
 
-Os tabuleiros são desenhados com **emoji** (❌ ⭕ 🟩🟨⬛ 🟦 🚩 💣 🔴), que ocupam sempre a mesma largura no WhatsApp — por isso a grade nunca desalinha, em Android, iOS ou Web. Caracteres de desenho de caixa (`┌─┬┐│`) não são usados porque o WhatsApp os renderiza com fontes diferentes. Só a forca usa um bloco monoespaçado, em ASCII puro e sem moldura. No Termo, cada palpite também vem escrito letra a letra com a sua cor (ex.: `1 *CAVAL* › C 🟩 · A 🟩 · V ⬛ · A 🟨 · L ⬛`), além da lista de letras que não estão na palavra, para ninguém precisar decifrar a grade. Os nomes de perfil nunca entram nas grades. Partidas em andamento ficam em memória; o ranking fica persistente em `data/games-score.json`, separado por chat. `.desativar` remove a partida e o placar daquele chat.
+Os tabuleiros são desenhados com **emoji** (❌ ⭕ 🟩🟨⬛ 🟦 🚩 💣 🔴), que ocupam sempre a mesma largura no WhatsApp — por isso a grade nunca desalinha, em Android, iOS ou Web. Caracteres de desenho de caixa (`┌─┬┐│`) não são usados porque o WhatsApp os renderiza com fontes diferentes. Só a forca usa um bloco monoespaçado, em ASCII puro e sem moldura. O Termo usa visual minimalista (apenas o cabeçalho e a grade de 6 linhas) e valida cada palpite contra um dicionário de palavras reais de 5 letras em português, rejeitando sequências aleatórias como `abcde`. Os nomes de perfil nunca entram nas grades. Partidas em andamento ficam em memória; o ranking fica persistente em `data/games-score.json`, separado por chat. `.desativar` remove a partida e o placar daquele chat.
 
 Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Faça downloads somente de conteúdo que você tem direito e autorização para acessar.
 
