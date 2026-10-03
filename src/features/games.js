@@ -19,7 +19,8 @@ const sessions = new Map();
 // desenha com fontes diferentes da monoespaçada e a grade quebrava.
 const EM = Object.freeze({
   x: '❌', o: '⭕', empty: '⬜', hidden: '🟦', flag: '🚩', mine: '💣', boom: '💥',
-  exact: '🟩', present: '🟨', absent: '⬛', pip: '🔴', heartOn: '❤️', heartOff: '🖤', corner: '⬛'
+  exact: '🟩', present: '🟨', absent: '⬛', pip: '🔴', heartOn: '❤️', heartOff: '🖤', corner: '⬛',
+  spent: '⚫', target: '🎯'
 });
 const KEYCAPS = Object.freeze(['0️⃣', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣']);
 const COLUMN_LETTERS = Object.freeze(['🇦', '🇧', '🇨', '🇩', '🇪']);
@@ -187,8 +188,9 @@ function ensurePlayerScore(chat, player) {
   return record;
 }
 
-function recordGameResult(jid, players, winnerId = null) {
+function recordGameResult(jid, players, winnerId = null, bonusPoints = 0) {
   const chat = chatKey(jid);
+  const bonus = Math.max(0, Math.floor(Number(bonusPoints) || 0));
   let changed = false;
   for (const player of players.filter(Boolean)) {
     if (player.bot || player.id === 'bot') continue;
@@ -201,7 +203,7 @@ function recordGameResult(jid, players, winnerId = null) {
       record.losses += 1;
     } else if (player.id === winnerId) {
       record.wins += 1;
-      record.points += 3;
+      record.points += 3 + bonus;
     } else {
       record.losses += 1;
     }
@@ -277,6 +279,9 @@ function gameProgressLabel(state) {
     case 'numero': return `${state.history.length}/8 palpites`;
     case 'ttt': return state.status === 'playing' ? `vez de ${tttMark(state.turn)} ${state.players[state.turn]?.name || 'jogador'}` : 'aguardando jogadores';
     case 'ppt': return state.status === 'pending' ? 'convite aguardando resposta' : `rodada ${state.round} · placar ${state.score.X} x ${state.score.O}`;
+    case 'russa': return state.mode === 'pvp'
+      ? state.status === 'pending' ? 'desafio aguardando aceite' : `vez de ${state.players[state.turn]?.name || 'jogador'}`
+      : `${state.pulls} puxada(s) de ${RUSSA_CHAMBERS - state.bullets}`;
     default: return 'em andamento';
   }
 }
@@ -292,6 +297,9 @@ function gameContinueHint(state) {
     case 'numero': return 'envie um número de 1 a 100';
     case 'ttt': return state.status === 'playing' ? 'jogue com `.velha <1-9>`' : 'aceite com `.velha aceitar` ou entre com `.velha entrar`';
     case 'ppt': return state.status === 'pending' ? 'aceite com `.ppt aceitar`' : 'responda no privado com 1, 2 ou 3';
+    case 'russa': return state.mode === 'pvp'
+      ? state.status === 'pending' ? 'aceite com `.roletarussa aceitar`' : 'puxe com `.roletarussa puxar` quando for a sua vez'
+      : 'puxe com `.roletarussa puxar` ou pare com `.roletarussa parar`';
     default: return 'continue a partida atual';
   }
 }
@@ -345,11 +353,11 @@ function setSession(jid, state) {
   sessions.set(state.chat, state);
 }
 
-function finishSession(state, winnerId = null) {
+function finishSession(state, winnerId = null, bonusPoints = 0) {
   if (state.finished) return;
   state.finished = true;
   clearTimeout(state.timer);
-  recordGameResult(state.chat, sessionPlayers(state), winnerId);
+  recordGameResult(state.chat, sessionPlayers(state), winnerId, bonusPoints);
   sessions.delete(state.chat);
 }
 
@@ -361,7 +369,8 @@ const GAME_LABELS = Object.freeze({
   anagrama: 'Anagrama',
   quiz: 'Quiz',
   numero: 'Adivinhe o número',
-  ppt: 'Jokenpô'
+  ppt: 'Jokenpô',
+  russa: 'Roleta russa'
 });
 
 const ALIASES = new Map([
@@ -372,6 +381,7 @@ const ALIASES = new Map([
   ['quiz', 'quiz'], ['trivia', 'quiz'], ['pergunta', 'quiz'],
   ['adivinhe', 'numero'], ['numero', 'numero'], ['guess', 'numero'],
   ['ppt', 'ppt'], ['jokenpo', 'ppt'],
+  ['roletarussa', 'russa'], ['roleta-russa', 'russa'], ['russa', 'russa'], ['rr', 'russa'],
   ['encerrar', 'encerrar'], ['finalizar', 'encerrar'], ['terminar', 'encerrar'],
   ['dado', 'dado'], ['moeda', 'moeda'], ['caraoucoroa', 'moeda'], ['roleta', 'roleta'],
   ['placar', 'placar'], ['ranking', 'placar'], ['rank', 'placar'], ['score', 'placar']
@@ -429,7 +439,9 @@ function gameMenu() {
       ['.ppt @oponente [1|3|5]', 'Jokenpô SECRETO: melhor de 3 (ou 1/5), jogadas no privado'],
       ['.dado [NdM]', 'dado D6 ou rolagem, por exemplo 3d20'],
       ['.moeda', 'cara ou coroa'],
-      ['.roleta opção | opção', 'sorteia entre duas ou mais opções']
+      ['.roleta opção | opção', 'sorteia entre duas ou mais opções'],
+      ['.roletarussa [balas 1-5]', 'roleta russa solo · puxar ou parar'],
+      ['.roletarussa @oponente', 'duelo de roleta russa · aceite com `.roletarussa aceitar`']
     ]),
     section('Ranking', [
       ['.placar', 'placar deste chat'],
@@ -1724,6 +1736,310 @@ async function handleRoulette({ args, reply }) {
   return reply(card([header('Roleta', `${options.length} opções`), `▸ Resultado · *${selected}*`]));
 }
 
+// ── Roleta russa ─────────────────────────────────────────────────────────────
+// • SOLO (`.roletarussa [balas 1-5]`): o tambor é sorteado no início e NÃO gira entre
+//   as puxadas. Cada clique seco aproxima a bala, mas o prêmio também cresce — o
+//   jogador escolhe entre parar (vitória garantida) ou arriscar mais uma puxada.
+// • DUELO (`.roletarussa @oponente [balas 1-5]`): os dois alternam as puxadas, cada um
+//   apontando para a própria cabeça; quem encontra a bala perde. Sem giros no meio e
+//   com o tambor sorteado de uma vez, cada jogador fica com 3 das 6 câmaras: é justo.
+
+const RUSSA_CHAMBERS = 6;
+const RUSSA_MAX_BULLETS = 5;
+const RUSSA_DEFAULT_BULLETS = 1;
+const RUSSA_USAGE = '.roletarussa [balas 1-5] | @oponente | puxar | parar';
+const RUSSA_EXAMPLE = '.roletarussa 3 balas';
+// Bônus de placar (além dos 3 pontos da vitória) por puxadas sobrevividas antes de parar.
+const RUSSA_BONUS = Object.freeze([0, 0, 1, 2, 3, 5, 8]);
+const RUSSA_PULL = new Set(['puxar', 'puxa', 'puxo', 'disparar', 'atirar', 'fogo', 'gatilho', 'clique', 'puxei']);
+const RUSSA_STOP = new Set(['parar', 'paro', 'guardar', 'correr', 'fugir']);
+
+function clampRussaBullets(value) {
+  const total = Math.floor(Number(value));
+  if (!Number.isFinite(total)) return RUSSA_DEFAULT_BULLETS;
+  return Math.min(RUSSA_MAX_BULLETS, Math.max(1, total));
+}
+
+function russaMaxPulls(state) {
+  return RUSSA_CHAMBERS - (state?.bullets || RUSSA_DEFAULT_BULLETS);
+}
+
+function russaBonus(pulls) {
+  const index = Math.max(0, Math.min(RUSSA_BONUS.length - 1, Math.floor(Number(pulls) || 0)));
+  return RUSSA_BONUS[index];
+}
+
+function russaRank(pulls, maxPulls) {
+  if (pulls >= maxPulls) return 'Lenda do tambor 💀';
+  if (pulls >= 3) return 'Destemido 🔥';
+  if (pulls >= 2) return 'Corajoso 😎';
+  return 'Sortudo 🍀';
+}
+
+/** Aceita "3 balas", "balas 3" ou só "3" e devolve o resto dos argumentos como subcomando. */
+function parseRussaArgs(args = []) {
+  const tokens = (Array.isArray(args) ? args : []).map((value) => String(value ?? '')).filter(Boolean);
+  let bullets = RUSSA_DEFAULT_BULLETS;
+  let invalid = false;
+  const rest = [];
+  const apply = (value) => {
+    if (value >= 1 && value <= RUSSA_MAX_BULLETS) bullets = value;
+    else invalid = true;
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index].toLowerCase();
+    if (/^balas?$/.test(token)) {
+      const next = Number(tokens[index + 1]);
+      if (Number.isInteger(next)) {
+        index += 1;
+        apply(next);
+      }
+      continue;
+    }
+    const inline = token.match(/^(\d{1,2})\s*balas?$/);
+    if (inline) {
+      apply(Number(inline[1]));
+      continue;
+    }
+    if (/^\d{1,2}$/.test(token)) {
+      apply(Number(token));
+      continue;
+    }
+    if (token.startsWith('@')) continue; // a menção do oponente vem pelo contexto da mensagem
+    rest.push(token);
+  }
+  return { bullets, invalid, rest };
+}
+
+/** Tambor com N balas em posições sorteadas (1 bala em 6 câmaras por padrão). */
+function shuffleChambers(bullets, rng = Math.random) {
+  const chambers = Array.from({ length: RUSSA_CHAMBERS }, (_, index) => index < bullets);
+  for (let index = chambers.length - 1; index > 0; index -= 1) {
+    const other = randomIndex(index + 1, rng);
+    [chambers[index], chambers[other]] = [chambers[other], chambers[index]];
+  }
+  return chambers;
+}
+
+export function createRussianRouletteGame(player, { bullets = RUSSA_DEFAULT_BULLETS, rng = Math.random } = {}) {
+  const total = clampRussaBullets(bullets);
+  return {
+    type: 'russa', mode: 'solo', player, creatorId: player.id, bullets: total,
+    drum: shuffleChambers(total, rng), cursor: 0, pulls: 0, hit: null, finished: false, rng
+  };
+}
+
+export function createRussianRouletteDuel(players, { bullets = RUSSA_DEFAULT_BULLETS, rng = Math.random } = {}) {
+  const total = clampRussaBullets(bullets);
+  return {
+    type: 'russa', mode: 'pvp', status: 'pending', players: [players[0], players[1]], turn: 0,
+    bullets: total, drum: shuffleChambers(total, rng), cursor: 0, pulls: 0, hit: null, finished: false, rng
+  };
+}
+
+/** Puxa o gatilho: a câmara da vez pode estar vazia (clique seco) ou ter bala. */
+export function pullRussianRoulette(state) {
+  const drum = Array.isArray(state.drum) ? state.drum : [];
+  const index = Math.max(0, Math.floor(Number(state.cursor) || 0));
+  if (state.finished || Number.isInteger(state.hit) || index >= RUSSA_CHAMBERS) {
+    return { status: 'over', chamber: index, pulls: state.pulls || 0 };
+  }
+  state.pulls = (Number(state.pulls) || 0) + 1;
+  if (drum[index]) {
+    state.hit = index;
+    return { status: 'bang', chamber: index, pulls: state.pulls };
+  }
+  state.cursor = index + 1;
+  return { status: 'empty', chamber: index, pulls: state.pulls };
+}
+
+/** Tambor em uma linha de 6 emoji: 🎯 câmara da vez · ⬜ coberta · ⚫ já puxada (vazia) · 💥 bala. */
+export function renderRevolver(state = {}) {
+  const cursor = Math.max(0, Math.min(RUSSA_CHAMBERS, Math.floor(Number(state.cursor) || 0)));
+  const drum = Array.isArray(state.drum) ? state.drum : [];
+  const over = Boolean(state.finished) || Number.isInteger(state.hit);
+  return [Array.from({ length: RUSSA_CHAMBERS }, (_, index) => {
+    if (over && drum[index]) return EM.boom;
+    if (index < cursor) return EM.spent;
+    if (!over && index === cursor) return EM.target;
+    return EM.empty;
+  }).join(' ')];
+}
+
+function russaRisk(state) {
+  const remaining = Math.max(1, RUSSA_CHAMBERS - Math.max(0, Math.floor(Number(state.cursor) || 0)));
+  return Math.min(100, Math.round((state.bullets / remaining) * 100));
+}
+
+/** Nome de quem foi desafiado: antes do aceite só existe a menção. */
+function russaRivalLabel(player) {
+  if (!player) return 'o oponente';
+  return player.name && player.name !== 'Oponente' ? player.name : mentionTag(player.id);
+}
+
+function russaInfo(state) {
+  const remaining = Math.max(0, RUSSA_CHAMBERS - state.cursor);
+  if (state.mode === 'pvp') {
+    const turn = state.players[state.turn] || {};
+    return [
+      `▸ Balas: *${state.bullets}*  ·  puxadas: *${state.pulls}*  ·  risco agora: *${russaRisk(state)}%*`,
+      state.status === 'pending'
+        ? `▸ Aguardando ${russaRivalLabel(state.players[1])} aceitar o desafio.`
+        : `▸ Vez de *${turn.name || 'jogador'}* — ${remaining} câmara(s) na arma.`
+    ].join('\n');
+  }
+  return [
+    `▸ Puxadas: *${state.pulls}/${russaMaxPulls(state)}*  ·  risco agora: *${russaRisk(state)}%*`,
+    state.pulls
+      ? `▸ Parar agora garante *${3 + russaBonus(state.pulls)} pontos* no placar deste chat.`
+      : '▸ Nenhuma puxada ainda: parar agora não conta pontos.'
+  ].join('\n');
+}
+
+function russaText(state, detail = '') {
+  const duel = state.mode === 'pvp';
+  return card([
+    header('Roleta russa', `${duel ? 'duelo' : 'solo'} · ${state.bullets} bala(s) em ${RUSSA_CHAMBERS} câmaras`),
+    detail,
+    grid(renderRevolver(state)),
+    russaInfo(state),
+    duel
+      ? state.status === 'pending'
+        ? `_${russaRivalLabel(state.players[1])} aceita com \`.roletarussa aceitar\` · recusa com \`.roletarussa recusar\`._`
+        : '_`.roletarussa puxar` quando for a sua vez · não há como parar no meio de um duelo._'
+      : '_`.roletarussa puxar` para puxar o gatilho · `.roletarussa parar` para sair vivo._'
+  ]);
+}
+
+/** Vitória por parar antes da bala — o bônus cresce a cada puxada sobrevivida. */
+async function applyRussaStop(state, reply) {
+  if (!state.pulls) {
+    sessions.delete(chatKey(state.chat));
+    return reply(warn('Roleta russa encerrada', 'você parou antes da primeira puxada — nada foi para o placar'));
+  }
+  const pulls = state.pulls;
+  const bonus = russaBonus(pulls);
+  const bulletAt = Array.isArray(state.drum) ? state.drum.findIndex(Boolean) + 1 : 0;
+  finishSession(state, state.player.id, bonus);
+  return reply(card([
+    header('Roleta russa', `vitória · ${pulls} puxada(s) · ${russaRank(pulls, russaMaxPulls(state))}`),
+    `Você devolveu a arma antes da bala.`,
+    grid(renderRevolver(state)),
+    `▸ A bala estava na câmara ${bulletAt}`,
+    `▸ +${3 + bonus} pontos no placar deste chat (bônus +${bonus})`
+  ]));
+}
+
+/** Resolve uma puxada, no solo ou no duelo, com as travas de turno/jogador. */
+async function applyRussaPull(state, actor, reply) {
+  if (state.mode === 'pvp') {
+    if (state.status !== 'playing') {
+      return reply(russaText(state, 'Aguarde o aceite do desafio para começar o duelo.'));
+    }
+    const shooter = state.players[state.turn];
+    if (!shooter || shooter.id !== actor.id) {
+      return reply(warn('Não é a sua vez', `o gatilho está com ${state.players[state.turn]?.name || 'o outro jogador'}`));
+    }
+    const result = pullRussianRoulette(state);
+    if (result.status === 'bang') {
+      const winner = state.players[1 - state.turn];
+      finishSession(state, winner?.id ?? null);
+      return reply(card([
+        header('Roleta russa', 'fim do duelo'),
+        `💥 A câmara ${result.chamber + 1} tinha a bala. *${shooter.name}* caiu.`,
+        grid(renderRevolver(state)),
+        `▸ Vitória de *${winner?.name || 'o outro jogador'}* · +3 pontos no placar deste chat`
+      ]));
+    }
+    state.turn = 1 - state.turn;
+    const next = state.players[state.turn];
+    return reply({
+      text: russaText(state, `🔫 Clique seco na câmara ${result.chamber + 1}: *${shooter.name}* continua vivo.`),
+      mentions: [next?.id].filter(Boolean)
+    });
+  }
+
+  const result = pullRussianRoulette(state);
+  if (result.status === 'bang') {
+    finishSession(state, 'loss');
+    return reply(card([
+      header('Roleta russa', 'fim de jogo'),
+      `💥 A câmara ${result.chamber + 1} tinha a bala.`,
+      grid(renderRevolver(state)),
+      `▸ Puxadas sobrevividas: *${result.pulls - 1}*`,
+      '_Tente de novo com `.roletarussa`._'
+    ]));
+  }
+  return reply(russaText(state, `Clique seco na câmara ${result.chamber + 1} — estava vazia.`));
+}
+
+async function handleRussianRoulette({ msg, args, reply, actor }) {
+  const jid = msg.key.remoteJid;
+  const state = activeFor(jid);
+  const { bullets, invalid, rest } = parseRussaArgs(args);
+  const sub = rest[0] || '';
+  const opponent = opponentFromMessage(msg, actor);
+  const showUsage = () => reply(usage(RUSSA_USAGE, RUSSA_EXAMPLE, `Balas de 1 a ${RUSSA_MAX_BULLETS} · solo ou duelo contra @oponente.`));
+
+  if (state && state.type !== 'russa') return reply(activeGameNotice(state, 'russa'));
+  if (invalid) return showUsage();
+
+  if (!state) {
+    if (sub) return showUsage();
+    if (!canStart(jid, 'russa', reply)) return;
+    if (opponent) {
+      const duel = createRussianRouletteDuel([actor, opponent], { bullets });
+      setSession(jid, duel);
+      return reply({
+        text: russaText(duel, `Desafio de *${actor.name}* para ${mentionTag(opponent.id)}.`),
+        mentions: [opponent.id]
+      });
+    }
+    const game = createRussianRouletteGame(actor, { bullets });
+    setSession(jid, game);
+    return reply(russaText(game, `Tambor carregado com *${game.bullets}* bala(s): cada puxada aponta para você mesmo.`));
+  }
+
+  const duel = state.mode === 'pvp';
+  if (['aceitar', 'aceito', 'accept', 'entrar', 'join'].includes(sub)) {
+    if (!duel || state.status !== 'pending') {
+      return reply(warn('Nenhum duelo aguardando aceite', 'desafie alguém com `.roletarussa @oponente`'));
+    }
+    if (state.players[1]?.id !== actor.id) return reply(warn('Este duelo não é para você', 'somente quem foi desafiado pode aceitar'));
+    state.players[1] = actor;
+    state.status = 'playing';
+    state.turn = 0;
+    const first = state.players[0];
+    return reply({
+      text: russaText(state, `*${actor.name}* aceitou o desafio. A vez é de *${first?.name}*.`),
+      mentions: [first?.id].filter(Boolean)
+    });
+  }
+
+  if (['recusar', 'recuso', 'declinar'].includes(sub)) {
+    if (!duel || state.status !== 'pending' || state.players[1]?.id !== actor.id) {
+      return reply(warn('Nenhum convite seu para recusar'));
+    }
+    sessions.delete(chatKey(jid));
+    return reply(warn('Convite recusado', 'o duelo de roleta russa não foi iniciado'));
+  }
+
+  if (['sair', 'cancelar', 'encerrar', 'desistir'].includes(sub)) {
+    return cancelCurrentGame({ jid, actor, reply, owner: false });
+  }
+
+  if (!sub || sub === 'status' || sub === 'mesa') return reply(russaText(state, IN_PROGRESS_NOTE));
+
+  if (RUSSA_STOP.has(sub)) {
+    if (duel) return reply(warn('No duelo não dá para parar', 'quem está com a arma precisa puxar o gatilho'));
+    if (state.player.id !== actor.id) return reply(warn('Partida individual', 'quem iniciou esta Roleta russa decide quando parar'));
+    return applyRussaStop(state, reply);
+  }
+
+  if (RUSSA_PULL.has(sub)) return applyRussaPull(state, actor, reply);
+  return showUsage();
+}
+
 async function cancelCurrentGame({ jid, actor, reply, owner }) {
   const state = activeFor(jid);
   if (!state) return reply(warn('Nenhuma partida ativa', 'não há partida em andamento neste chat'));
@@ -1756,6 +2072,7 @@ async function handleGameCommand(context) {
   if (game === 'dado') return handleDice({ args, reply });
   if (game === 'moeda') return handleCoin({ reply });
   if (game === 'roleta') return handleRoulette({ args, reply });
+  if (game === 'russa') return handleRussianRoulette({ msg, args, reply, actor });
 }
 
 export { handleGameCommand };
@@ -1824,6 +2141,27 @@ export async function tryHandleDirectGameMove(sock, msg, text, { reply, authoriz
     if (state.player.id !== actor.id) await reply(warn('Partida individual', 'quem iniciou esta rodada deve jogar'));
     else await applyNumberGuess(state, value, reply);
     return true;
+  }
+  if (state.type === 'russa') {
+    const action = value.toLowerCase();
+    const duel = state.mode === 'pvp';
+    const seated = duel
+      ? state.players.some((player) => player?.id === actor.id)
+      : state.player?.id === actor.id;
+    if (!seated) return false; // quem não está na partida continua no silêncio
+    if (RUSSA_PULL.has(action)) {
+      await applyRussaPull(state, actor, reply);
+      return true;
+    }
+    if (!duel && RUSSA_STOP.has(action)) {
+      await applyRussaStop(state, reply);
+      return true;
+    }
+    if (duel && state.status === 'pending' && /^(aceitar|aceito|entro|entrar|join)$/.test(action)) {
+      await handleRussianRoulette({ msg, args: ['aceitar'], reply, actor });
+      return true;
+    }
+    return false;
   }
   // Jokenpô PvP: jogada digitada no grupo NÃO vale (todo mundo veria). A escolha é
   // secreta e vem pelo privado — ver tryHandlePrivateGameChoice().
