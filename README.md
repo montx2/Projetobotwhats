@@ -156,14 +156,14 @@ Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.
 .quiz / .trivia                   → pergunta de conhecimentos gerais
 .adivinhe / .numero               → encontre o número de 1 a 100
 .ppt pedra|papel|tesoura          → Jokenpô contra o bot; também aceita desafio PvP
-.dado / .dado 3d20                → D6 em ASCII ou rolagem de vários dados
+.dado / .dado 3d20                → D6 em emoji ou rolagem de vários dados
 .moeda / .caraoucoroa             → cara ou coroa
 .roleta pizza | sushi | massa     → escolhe entre opções separadas por |
 .placar / .ranking                → ranking persistente deste chat
 .placar reset                     → zera o ranking (admin do grupo ou dono)
 ```
 
-Os tabuleiros são enviados em blocos monoespaçados de largura fixa, somente com caracteres de uma coluna e bordas ASCII/Unicode geométricas; os nomes de perfil nunca entram nas grades. Partidas em andamento ficam em memória; o ranking fica persistente em `data/games-score.json`, separado por chat. `.desativar` remove a partida e o placar daquele chat.
+Os tabuleiros são desenhados com **emoji** (❌ ⭕ 🟩🟨⬛ 🟦 🚩 💣 🔴), que ocupam sempre a mesma largura no WhatsApp — por isso a grade nunca desalinha, em Android, iOS ou Web. Caracteres de desenho de caixa (`┌─┬┐│`) não são usados porque o WhatsApp os renderiza com fontes diferentes. Só a forca usa um bloco monoespaçado, em ASCII puro e sem moldura. Os nomes de perfil nunca entram nas grades. Partidas em andamento ficam em memória; o ranking fica persistente em `data/games-score.json`, separado por chat. `.desativar` remove a partida e o placar daquele chat.
 
 Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Faça downloads somente de conteúdo que você tem direito e autorização para acessar.
 

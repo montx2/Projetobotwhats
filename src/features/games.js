@@ -9,14 +9,31 @@ import { requireGroupAdministrator } from './group-tools.js';
 const SCORE_FILE = 'games-score.json';
 const MAX_SCORE_PLAYERS = 1_000;
 const sessions = new Map();
-const BOX_CHARS = new Set(Array.from('┌─┬┐│├┼┤└┴┘'));
-const BOX_STARTS = new Set(Array.from('┌│├└'));
-const BOX_ENDS = new Set(Array.from('┐│┤┘'));
+
+// Visual dos jogos: os tabuleiros são feitos de EMOJI. Cada emoji ocupa sempre a
+// mesma largura no WhatsApp (Android, iOS e Web), então a grade nunca desalinha.
+// Caracteres de desenho de caixa (┌─┬┐│) ficam de fora de propósito: o WhatsApp os
+// desenha com fontes diferentes da monoespaçada e a grade quebrava.
+const EM = Object.freeze({
+  x: '❌', o: '⭕', empty: '⬜', hidden: '🟦', flag: '🚩', mine: '💣', boom: '💥',
+  exact: '🟩', present: '🟨', absent: '⬛', pip: '🔴', heartOn: '❤️', heartOff: '🖤', corner: '⬛'
+});
+const KEYCAPS = Object.freeze(['0️⃣', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣']);
+const COLUMN_LETTERS = Object.freeze(['🇦', '🇧', '🇨', '🇩', '🇪']);
+
+function keycap(value) {
+  return KEYCAPS[Math.max(0, Math.min(9, Math.floor(Number(value) || 0)))];
+}
+
+/** Junta as linhas de uma grade de emoji (fora de bloco monoespaçado). */
+function grid(lines) {
+  return (Array.isArray(lines) ? lines : [lines]).join('\n');
+}
 
 /**
- * Valida cada bloco ```...``` enviado pelos jogos.
- * Cada linha deve ter a mesma largura, começar/terminar em uma borda e usar
- * somente ASCII imprimível ou caracteres de desenho de caixa de uma coluna.
+ * Valida cada bloco ```...``` monoespaçado enviado pelos jogos.
+ * Só ASCII imprimível (largura de uma coluna em qualquer fonte) e todas as
+ * linhas com a mesma largura. Emoji e caracteres de caixa são rejeitados.
  */
 export function verifyMonospaceBlock(text) {
   const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
@@ -27,13 +44,9 @@ export function verifyMonospaceBlock(text) {
   const validBlock = (rows) => {
     if (!rows.length || rows.some((row) => !row.length)) return false;
     const width = Array.from(rows[0]).length;
-    if (!width) return false;
     return rows.every((row) => {
       const chars = Array.from(row);
-      return chars.length === width &&
-        BOX_STARTS.has(chars[0]) &&
-        BOX_ENDS.has(chars.at(-1)) &&
-        chars.every((char) => (char.codePointAt(0) >= 0x20 && char.codePointAt(0) <= 0x7e) || BOX_CHARS.has(char));
+      return chars.length === width && chars.every((char) => char.codePointAt(0) >= 0x20 && char.codePointAt(0) <= 0x7e);
     });
   };
 
@@ -56,7 +69,7 @@ export function verifyMonospaceBlock(text) {
 
 function mono(lines) {
   const block = wrapMonospace(lines);
-  if (!verifyMonospaceBlock(block)) throw new Error('tabuleiro fora do padrão monoespaçado seguro');
+  if (!verifyMonospaceBlock(block)) throw new Error('bloco monoespaçado fora do padrão seguro');
   return block;
 }
 
@@ -276,23 +289,13 @@ export function isGameCommand(name) {
   return GAME_COMMANDS.has(String(name || '').toLocaleLowerCase('pt-BR'));
 }
 
-function renderScoreTable(players) {
-  const width = 33;
-  const top = `┌${'─'.repeat(width)}┐`;
-  const divider = `├${'─'.repeat(width)}┤`;
-  const row = (text) => `│${String(text).slice(0, width).padEnd(width)}│`;
-  const headerRow = ['NOME'.padEnd(11), 'V'.padStart(2), 'D'.padStart(2), 'E'.padStart(2), 'PTS'.padStart(4)].join(' | ');
-  const count = (value, digits) => String(Math.min(10 ** digits - 1, Math.max(0, Math.floor(Number(value) || 0)))).padStart(digits);
-  const rows = players.slice(0, 10).map((player) =>
-    [
-      asciiName(player.name, 'Jogador', 11).padEnd(11),
-      count(player.wins, 2),
-      count(player.losses, 2),
-      count(player.draws, 2),
-      count(player.points, 4)
-    ].join(' | ')
-  );
-  return mono([top, row(headerRow), divider, ...(rows.length ? rows.map(row) : [row('Sem partidas registradas ainda.')]), `└${'─'.repeat(width)}┘`]);
+function renderScoreList(players) {
+  if (!players.length) return '_Sem partidas registradas ainda._';
+  const medals = ['🥇', '🥈', '🥉'];
+  return players.slice(0, 10).map((player, index) => {
+    const place = medals[index] || `${index + 1}º`;
+    return `${place} *${asciiName(player.name, 'Jogador', 14)}*  ·  *${player.points}* pts  ·  ${player.wins}V ${player.losses}D ${player.draws}E`;
+  }).join('\n');
 }
 
 async function handleScoreboard({ sock, msg, args, reply, owner }) {
@@ -308,8 +311,8 @@ async function handleScoreboard({ sock, msg, args, reply, owner }) {
   const players = getChatScoreboard(jid);
   return reply(card([
     header('Placar', `${players.length} jogador(es) · pontuação por chat`),
-    renderScoreTable(players),
-    footer('Vitória: 3 pontos  ·  empate: 1 ponto  ·  .placar reset (admin/dono)')
+    renderScoreList(players),
+    footer('V vitória (3 pts) · D derrota · E empate (1 pt) · .placar reset (admin/dono)')
   ]));
 }
 
@@ -377,20 +380,13 @@ function tttWinner(board) {
   return null;
 }
 
+/** Grade 3×3 em emoji: ❌ e ⭕ para as marcas, números (keycaps) para as casas livres. */
 export function renderTicTacToeBoard(board) {
-  const cells = Array.from({ length: 9 }, (_, index) => {
+  const cell = (index) => {
     const value = Array.isArray(board) ? board[index] : '';
-    return value === 'X' || value === 'O' ? value : String(index + 1);
-  });
-  return [
-    '┌───┬───┬───┐',
-    `│ ${cells[0]} │ ${cells[1]} │ ${cells[2]} │`,
-    '├───┼───┼───┤',
-    `│ ${cells[3]} │ ${cells[4]} │ ${cells[5]} │`,
-    '├───┼───┼───┤',
-    `│ ${cells[6]} │ ${cells[7]} │ ${cells[8]} │`,
-    '└───┴───┴───┘'
-  ];
+    return value === 'X' ? EM.x : value === 'O' ? EM.o : keycap(index + 1);
+  };
+  return [0, 1, 2].map((row) => [0, 1, 2].map((col) => cell(row * 3 + col)).join(' '));
 }
 
 function chooseRandomMove(board, rng = Math.random) {
@@ -456,18 +452,26 @@ function normalizeDifficulty(value) {
   return 'medio';
 }
 
+function difficultyLabel(level) {
+  return { facil: 'fácil', medio: 'médio', dificil: 'difícil' }[level] || level;
+}
+
+function tttMark(symbol) {
+  return symbol === 'X' ? EM.x : EM.o;
+}
+
 function tttText(state, detail = '') {
   const x = state.players.X?.name || 'Jogador X';
   const o = state.players.O?.name || (state.status === 'open' ? 'aguardando...' : 'Oponente');
-  const mode = state.mode === 'bot' ? `bot ${state.difficulty}` : state.status === 'open' ? 'partida aberta' : 'PvP';
+  const mode = state.mode === 'bot' ? `bot ${difficultyLabel(state.difficulty)}` : state.status === 'open' ? 'partida aberta' : 'PvP';
   const turn = state.status === 'playing'
-    ? `Vez de ${state.turn} · ${state.players[state.turn]?.name || 'jogador'}`
+    ? `Vez de ${tttMark(state.turn)} ${state.players[state.turn]?.name || 'jogador'}`
     : state.status === 'pending' ? 'Aguardando aceite do desafio.' : 'Aguardando outro jogador entrar.';
   return card([
     header('Jogo da velha', mode),
     detail || turn,
-    mono(renderTicTacToeBoard(state.board)),
-    `X · ${x}   /   O · ${o}`,
+    grid(renderTicTacToeBoard(state.board)),
+    `${EM.x} ${x}   ${EM.o} ${o}`,
     state.status === 'playing' ? '_Escolha uma casa de 1 a 9 com `.velha 5` ou envie apenas o número._' : ''
   ]);
 }
@@ -496,12 +500,12 @@ async function tttPlayerAction(state, player, position, reply) {
   if (winner) {
     const winnerPlayer = state.players[winner];
     finishSession(state, winnerPlayer?.bot ? 'loss' : winnerPlayer?.id || null);
-    await reply(card([header('Jogo da velha', 'fim de partida'), `${winnerPlayer?.name || winner} venceu.`, mono(renderTicTacToeBoard(state.board)), '_Próxima: `.velha` · placar: `.placar`_']));
+    await reply(card([header('Jogo da velha', 'fim de partida'), `${tttMark(winner)} ${winnerPlayer?.name || winner} venceu.`, grid(renderTicTacToeBoard(state.board)), '_Próxima: `.velha` · placar: `.placar`_']));
     return true;
   }
   if (state.board.every(Boolean)) {
     finishSession(state, null);
-    await reply(card([header('Jogo da velha', 'empate'), 'Deu velha. Boa partida.', mono(renderTicTacToeBoard(state.board)), '_Próxima: `.velha` · placar: `.placar`_']));
+    await reply(card([header('Jogo da velha', 'empate'), 'Deu velha. Boa partida.', grid(renderTicTacToeBoard(state.board)), '_Próxima: `.velha` · placar: `.placar`_']));
     return true;
   }
 
@@ -511,16 +515,16 @@ async function tttPlayerAction(state, player, position, reply) {
     winner = tttWinner(state.board);
     if (winner) {
       finishSession(state, 'loss');
-      await reply(card([header('Jogo da velha', 'fim de partida'), 'O bot venceu desta vez. Tente outra estratégia.', mono(renderTicTacToeBoard(state.board)), '_Próxima: `.velha` · placar: `.placar`_']));
+      await reply(card([header('Jogo da velha', 'fim de partida'), `${EM.o} O bot venceu desta vez. Tente outra estratégia.`, grid(renderTicTacToeBoard(state.board)), '_Próxima: `.velha` · placar: `.placar`_']));
       return true;
     }
     if (state.board.every(Boolean)) {
       finishSession(state, null);
-      await reply(card([header('Jogo da velha', 'empate'), 'Deu velha. Boa partida.', mono(renderTicTacToeBoard(state.board)), '_Próxima: `.velha` · placar: `.placar`_']));
+      await reply(card([header('Jogo da velha', 'empate'), 'Deu velha. Boa partida.', grid(renderTicTacToeBoard(state.board)), '_Próxima: `.velha` · placar: `.placar`_']));
       return true;
     }
     state.turn = 'X';
-    await reply(tttText(state, `Você marcou X; o bot respondeu em ${move + 1}.`));
+    await reply(tttText(state, `${EM.x} Você marcou ${position}  ·  ${EM.o} o bot respondeu em ${move + 1}.`));
     return true;
   }
   state.turn = symbol === 'X' ? 'O' : 'X';
@@ -540,13 +544,13 @@ async function handleTicTacToe({ sock, msg, args, reply, actor }) {
       state.players.O = actor;
       state.status = 'playing';
       state.turn = 'X';
-      return reply(tttText(state, `${actor.name} entrou. ${state.players.X.name} começa como X.`));
+      return reply(tttText(state, `${actor.name} entrou. ${state.players.X.name} começa com ${EM.x}.`));
     }
     if (state.status === 'pending' && state.players.O?.id === actor.id) {
       state.players.O = actor;
       state.status = 'playing';
       state.turn = 'X';
-      return reply(tttText(state, `${actor.name} aceitou. ${state.players.X.name} começa como X.`));
+      return reply(tttText(state, `${actor.name} aceitou. ${state.players.X.name} começa com ${EM.x}.`));
     }
     return reply(warn('Este convite não é para você', 'somente a pessoa desafiada pode aceitar'));
   }
@@ -600,7 +604,7 @@ async function handleTicTacToe({ sock, msg, args, reply, actor }) {
       creatorId: actor.id, finished: false
     };
     setSession(jid, game);
-    return reply(tttText(game, `Você é X · nível ${difficulty}.`));
+    return reply(tttText(game, `Você joga com ${EM.x} · nível ${difficultyLabel(difficulty)}.`));
   }
   return reply(usage('.velha [facil|medio|dificil] | @oponente | aberto', '.velha dificil', 'No modo PvP, use `.velha entrar` em partidas abertas ou `.velha aceitar` no desafio.'));
 }
@@ -628,23 +632,28 @@ function evaluateWordGuess(target, guess) {
 
 export { evaluateWordGuess };
 
+/** Seis linhas de cinco quadrados: 🟩 posição certa · 🟨 outra posição · ⬛ não tem. */
 export function renderTermoBoard(attempts = []) {
-  const top = `┌${'─'.repeat(25)}┐`;
-  const bottom = `└${'─'.repeat(25)}┘`;
-  const empty = '...';
-  const rows = Array.from({ length: 6 }, (_, rowIndex) => {
+  return Array.from({ length: 6 }, (_, rowIndex) => {
     const attempt = attempts[rowIndex];
-    const letters = attempt ? normalizeLetters(attempt.guess).slice(0, 5) : '';
-    const marks = attempt?.marks || [];
-    const tiles = Array.from({ length: 5 }, (_, index) => {
-      const letter = letters[index] || ' ';
-      if (!attempt) return empty;
-      const mark = marks[index] || 'absent';
-      return mark === 'exact' ? `[${letter.toUpperCase()}]` : mark === 'present' ? `(${letter.toUpperCase()})` : `-${letter.toUpperCase()}-`;
-    });
-    return `│   ${tiles.join(' ')}   │`;
+    if (!attempt) return EM.empty.repeat(5);
+    const word = normalizeLetters(attempt.guess).slice(0, 5).toUpperCase();
+    const squares = Array.from({ length: 5 }, (_, index) => EM[attempt.marks?.[index]] || EM.absent).join('');
+    return `${squares}  *${word}*`;
   });
-  return [top, ...rows, bottom];
+}
+
+function termoMissingLetters(attempts = []) {
+  const known = new Set();
+  const missing = new Set();
+  for (const { guess, marks } of attempts) {
+    const letters = normalizeLetters(guess);
+    for (let index = 0; index < letters.length; index++) {
+      if (marks?.[index] === 'absent') missing.add(letters[index]);
+      else known.add(letters[index]);
+    }
+  }
+  return [...missing].filter((letter) => !known.has(letter)).sort().map((letter) => letter.toUpperCase());
 }
 
 const TERMO_WORDS = Object.freeze([
@@ -668,11 +677,13 @@ const TERMO_WORDS = Object.freeze([
 ]);
 
 function termoText(state, detail = '') {
+  const missing = termoMissingLetters(state.attempts);
   return card([
     header('Termo', `${state.attempts.length}/6 tentativas`),
     detail || 'Adivinhe a palavra de cinco letras. Acentos não mudam o palpite.',
-    mono(renderTermoBoard(state.attempts)),
-    '_[L] na posição certa · (L) existe em outra posição · -L- não aparece_'
+    grid(renderTermoBoard(state.attempts)),
+    missing.length ? `Fora · ${missing.join(' ')}` : '',
+    `_${EM.exact} posição certa · ${EM.present} outra posição · ${EM.absent} não tem_`
   ]);
 }
 
@@ -707,11 +718,11 @@ async function applyTermoGuess(state, rawGuess, reply) {
   const solved = guess === state.word;
   if (solved) {
     finishSession(state, state.player.id);
-    return reply(card([header('Termo', 'vitória'), 'Você encontrou a palavra.', mono(renderTermoBoard(state.attempts)), '_+3 pontos no placar deste chat._']));
+    return reply(card([header('Termo', 'vitória'), 'Você encontrou a palavra.', grid(renderTermoBoard(state.attempts)), '_+3 pontos no placar deste chat._']));
   }
   if (state.attempts.length >= 6) {
     finishSession(state, 'loss');
-    return reply(card([header('Termo', 'fim de jogo'), `A palavra era ${state.word.toUpperCase()}.`, mono(renderTermoBoard(state.attempts))]));
+    return reply(card([header('Termo', 'fim de jogo'), `A palavra era ${state.word.toUpperCase()}.`, grid(renderTermoBoard(state.attempts))]));
   }
   return reply(termoText(state, `Palpite ${state.attempts.length}/6 registrado.`));
 }
@@ -765,31 +776,29 @@ export const HANGMAN_WORDS = Object.freeze(Object.entries(WORD_CATEGORIES).flatM
   words.map((word) => Object.freeze({ word: normalizeLetters(word), category }))
 ));
 
-function renderHangmanRows(wrong = 0) {
+/** Forca em ASCII puro (sem moldura), pensada para o bloco monoespaçado do WhatsApp. */
+export function renderHangmanBoard(wrong = 0) {
   const miss = Math.max(0, Math.min(6, Number(wrong) || 0));
-  const line = (text) => `│${String(text).slice(0, 17).padEnd(17)}│`;
   const head = miss >= 1 ? 'O' : ' ';
   const torso = miss >= 2 ? '|' : ' ';
   const leftArm = miss >= 3 ? '/' : ' ';
   const rightArm = miss >= 4 ? '\\' : ' ';
   const leftLeg = miss >= 5 ? '/' : ' ';
   const rightLeg = miss >= 6 ? '\\' : ' ';
-  const lives = `[${'#'.repeat(6 - miss)}${'-'.repeat(miss)}]`;
   return [
-    `┌${'─'.repeat(17)}┐`,
-    line('      +---+'),
-    line('      |   |'),
-    line(`      ${head}   |`),
-    line(`      ${leftArm}${torso}${rightArm}  |`),
-    line(`      ${leftLeg} ${rightLeg}   |`),
-    line('     _____|'),
-    line(` VIDAS ${lives}`),
-    `└${'─'.repeat(17)}┘`
+    '  +----+  ',
+    '  |    |  ',
+    `  |    ${head}  `,
+    `  |   ${leftArm}${torso}${rightArm} `,
+    `  |   ${leftLeg} ${rightLeg} `,
+    '  |       ',
+    ' =+=====  '
   ];
 }
 
-export function renderHangmanBoard(wrong = 0) {
-  return renderHangmanRows(wrong);
+function hangmanLives(wrong) {
+  const miss = Math.max(0, Math.min(6, Number(wrong) || 0));
+  return `${EM.heartOn.repeat(6 - miss)}${EM.heartOff.repeat(miss)}`;
 }
 
 function hangmanText(state, detail = '') {
@@ -798,8 +807,9 @@ function hangmanText(state, detail = '') {
     header('Forca', `${state.wrong}/6 erros`),
     detail || `Categoria: ${state.category}.`,
     mono(renderHangmanBoard(state.wrong)),
-    `Palavra · ${masked}`,
-    state.guessed.length ? `Letras tentadas · ${state.guessed.map((letter) => letter.toUpperCase()).join(' ')}` : '',
+    hangmanLives(state.wrong),
+    `Palavra · \`${masked}\``,
+    state.guessed.length ? `Letras · ${state.guessed.map((letter) => letter.toUpperCase()).join(' ')}` : '',
     '_Envie uma letra ou tente a palavra inteira. Use `.forca dica` para a categoria._'
   ]);
 }
@@ -913,6 +923,7 @@ export function revealMinesweeperCell(state, index, rng = state.rng || Math.rand
   initializeMines(state, index, rng);
   if (state.mines[index]) {
     state.revealed[index] = true;
+    state.explodedAt = index;
     return { status: 'mine', revealed: [index] };
   }
   const queue = [index];
@@ -931,25 +942,27 @@ export function revealMinesweeperCell(state, index, rng = state.rng || Math.rand
   return { status: revealedSafe >= safeSquares ? 'won' : 'safe', revealed: opened };
 }
 
+/** Grade 5×5 em emoji: 🟦 coberta · 🚩 bandeira · ⬜ vazia · 1️⃣–8️⃣ vizinhas · 💣 mina · 💥 explodiu. */
 export function renderMinesweeperBoard(state) {
-  const width = 23;
-  const top = `┌${'─'.repeat(width)}┐`;
-  const divider = `├${'─'.repeat(width)}┤`;
-  const headerRow = `│${'   A   B   C   D   E   '}│`;
-  const rows = [];
-  for (let row = 0; row < 5; row++) {
+  const headerRow = [EM.corner, ...COLUMN_LETTERS].join(' ');
+  const rows = Array.from({ length: 5 }, (_, row) => {
     const cells = Array.from({ length: 5 }, (_, col) => {
       const index = row * 5 + col;
-      if (state.flags[index]) return '[F]';
-      if (!state.revealed[index]) return '[?]';
-      if (state.mines[index]) return '[*]';
-      const count = state.initialized ? adjacentMineCount(state, index) : 0;
-      return count ? `[${count}]` : '[ ]';
+      if (state.revealed[index]) {
+        if (state.mines[index]) return index === state.explodedAt ? EM.boom : EM.mine;
+        const count = state.initialized ? adjacentMineCount(state, index) : 0;
+        return count ? keycap(count) : EM.empty;
+      }
+      return state.flags[index] ? EM.flag : EM.hidden;
     });
-    rows.push(`│${`${row + 1} ${cells.join(' ')}`.padEnd(width)}│`);
-    if (row < 4) rows.push(divider);
-  }
-  return [top, headerRow, divider, ...rows, `└${'─'.repeat(width)}┘`];
+    return `${keycap(row + 1)} ${cells.join(' ')}`;
+  });
+  return [headerRow, ...rows];
+}
+
+function mineGrid(state) {
+  const flags = state.flags.filter(Boolean).length;
+  return `${grid(renderMinesweeperBoard(state))}\n\n${EM.mine} ${state.mineCount} minas  ·  ${EM.flag} ${flags} bandeira(s)`;
 }
 
 async function handleMinesweeper({ msg, args, reply, actor }) {
@@ -958,7 +971,7 @@ async function handleMinesweeper({ msg, args, reply, actor }) {
   const sub = String(args[0] || '').toLowerCase();
   if (['dica', 'ajuda', 'help'].includes(sub)) {
     if (!state || state.type !== 'minado') return reply(warn('Nenhuma partida de Campo minado ativa', 'inicie com `.minado`'));
-    return reply(card([header('Campo minado', 'controles'), mono(renderMinesweeperBoard(state)), 'Revele A1–E5 com `.minado A1` ou envie a coordenada. Marque com `flag A1`.']));
+    return reply(card([header('Campo minado', 'controles'), mineGrid(state), 'Revele A1–E5 com `.minado A1` ou envie a coordenada. Marque com `flag A1`.']));
   }
   if (['sair', 'cancelar', 'desistir'].includes(sub)) return cancelCurrentGame({ jid, actor, reply, owner: false });
   if (state?.type !== 'minado') {
@@ -966,10 +979,10 @@ async function handleMinesweeper({ msg, args, reply, actor }) {
     if (!canStart(jid, 'minado', reply)) return;
     const game = createMinesweeperGame(actor);
     setSession(jid, game);
-    return reply(card([header('Campo minado', '5×5 · primeira casa segura'), mono(renderMinesweeperBoard(game)), '_Coordenadas A1–E5 · `.minado flag A1` marca uma casa._']));
+    return reply(card([header('Campo minado', '5×5 · primeira casa segura'), mineGrid(game), '_Coordenadas A1–E5 · `.minado flag A1` marca uma casa._']));
   }
   if (state.player.id !== actor.id) return reply(warn('Partida individual', 'quem iniciou este Campo minado deve jogar'));
-  if (!args.length) return reply(card([header('Campo minado', '5×5 · primeira casa segura'), mono(renderMinesweeperBoard(state)), '_Coordenadas A1–E5 · marque com `flag A1`._']));
+  if (!args.length) return reply(card([header('Campo minado', '5×5 · primeira casa segura'), mineGrid(state), '_Coordenadas A1–E5 · marque com `flag A1`._']));
   let action = 'reveal';
   let coordinate = args[0] || '';
   if (['flag', 'bandeira', 'marcar'].includes(sub)) {
@@ -983,7 +996,7 @@ async function handleMinesweeper({ msg, args, reply, actor }) {
   if (action === 'flag') {
     const flagged = toggleMinesweeperFlag(state, index);
     if (flagged === false && state.revealed[index]) return reply(warn('Casa já revelada', 'não é possível marcar uma casa aberta'));
-    return reply(card([header('Campo minado', flagged ? `bandeira em ${coordinateName(index)}` : `bandeira removida de ${coordinateName(index)}`), mono(renderMinesweeperBoard(state))]));
+    return reply(card([header('Campo minado', flagged ? `bandeira em ${coordinateName(index)}` : `bandeira removida de ${coordinateName(index)}`), mineGrid(state)]));
   }
   return applyMineReveal(state, index, reply);
 }
@@ -995,14 +1008,14 @@ async function applyMineReveal(state, index, reply) {
   if (result.status === 'mine') {
     for (let cell = 0; cell < 25; cell++) if (state.mines[cell]) state.revealed[cell] = true;
     finishSession(state, 'loss');
-    return reply(card([header('Campo minado', 'mina encontrada'), `A casa ${coordinateName(index)} tinha uma mina.`, mono(renderMinesweeperBoard(state))]));
+    return reply(card([header('Campo minado', 'mina encontrada'), `A casa ${coordinateName(index)} tinha uma mina.`, mineGrid(state)]));
   }
   if (result.status === 'won') {
     finishSession(state, state.player.id);
-    return reply(card([header('Campo minado', 'vitória'), 'Todas as casas seguras foram abertas.', mono(renderMinesweeperBoard(state)), '_+3 pontos no placar deste chat._']));
+    return reply(card([header('Campo minado', 'vitória'), 'Todas as casas seguras foram abertas.', mineGrid(state), '_+3 pontos no placar deste chat._']));
   }
   const count = adjacentMineCount(state, index);
-  return reply(card([header('Campo minado', 'jogada segura'), `${coordinateName(index)} · ${count ? `${count} mina(s) por perto` : 'área livre aberta'}.`, mono(renderMinesweeperBoard(state))]));
+  return reply(card([header('Campo minado', 'jogada segura'), `${coordinateName(index)} · ${count ? `${count} mina(s) por perto` : 'área livre aberta'}.`, mineGrid(state)]));
 }
 
 const ANAGRAM_WORDS = Object.freeze([
@@ -1141,25 +1154,22 @@ async function applyQuizGuess(state, rawGuess, reply) {
   return reply(quizText(state, `Ainda não · ${3 - state.attempts} tentativa(s) restante(s).`));
 }
 
-function renderNumberHistoryTable(history = []) {
-  const width = 33;
-  const top = `┌${'─'.repeat(width)}┐`;
-  const divider = `├${'─'.repeat(width)}┤`;
-  const row = (text) => `│${String(text).slice(0, width).padEnd(width)}│`;
-  const rows = history.slice(-8).map((entry, index) =>
-    `${String(index + 1).padStart(2, '0')} | ${String(entry.guess).padStart(3, ' ')}   | ${String(entry.hint).toUpperCase()}`
+/** Histórico de palpites em linhas curtas: 🔼 maior · 🔽 menor · 🎯 acerto. */
+export function renderNumberHistory(history = []) {
+  if (!history.length) return ['_Sem palpites ainda._'];
+  const icons = { MAIOR: '🔼', MENOR: '🔽', ACERTO: '🎯' };
+  const labels = { MAIOR: 'maior', MENOR: 'menor', ACERTO: 'acertou' };
+  return history.slice(-8).map((entry, index) =>
+    `${keycap(index + 1)} ${icons[entry.hint] || '▫️'} *${entry.guess}*  ·  ${labels[entry.hint] || entry.hint}`
   );
-  return mono([top, row('N  | PALPITE | PISTA'), divider, ...(rows.length ? rows.map(row) : [row('Sem palpites ainda.')]), `└${'─'.repeat(width)}┘`]);
 }
-
-export { renderNumberHistoryTable };
 
 function numberText(state, detail = '') {
   const remaining = Math.max(0, 8 - state.history.length);
   return card([
     header('Adivinhe o número', `${state.history.length}/8 palpites`),
     detail || `Pensei em um número de 1 a 100. Restam ${remaining} tentativa(s).`,
-    renderNumberHistoryTable(state.history),
+    grid(renderNumberHistory(state.history)),
     '_Envie apenas o número ou use `.adivinhe <número>`._'
   ]);
 }
@@ -1195,13 +1205,13 @@ async function applyNumberGuess(state, rawGuess, reply) {
   state.history.push({ guess, hint });
   if (hint === 'ACERTO') {
     finishSession(state, state.player.id);
-    return reply(card([header('Adivinhe o número', 'vitória'), `O número era ${guess}.`, renderNumberHistoryTable(state.history), '_+3 pontos no placar deste chat._']));
+    return reply(card([header('Adivinhe o número', 'vitória'), `O número era ${guess}.`, grid(renderNumberHistory(state.history)), '_+3 pontos no placar deste chat._']));
   }
   if (guess < state.secret) state.low = Math.max(state.low, guess + 1);
   else state.high = Math.min(state.high, guess - 1);
   if (state.history.length >= 8) {
     finishSession(state, 'loss');
-    return reply(card([header('Adivinhe o número', 'fim de jogo'), `O número era ${state.secret}.`, renderNumberHistoryTable(state.history)]));
+    return reply(card([header('Adivinhe o número', 'fim de jogo'), `O número era ${state.secret}.`, grid(renderNumberHistory(state.history))]));
   }
   return reply(numberText(state, `Tente um número ${hint === 'MAIOR' ? 'maior' : 'menor'}.`));
 }
@@ -1281,26 +1291,18 @@ async function applyPptChoice(state, actor, choice, reply) {
   return reply(card([header('Jokenpô', outcome === null ? 'empate' : 'fim da rodada'), summary, outcome === null ? 'Cada pessoa recebe 1 ponto.' : `${outcome === 'first' ? state.players.X.name : state.players.O.name} venceu. +3 pontos.`]));
 }
 
-function renderDiceFace(value) {
-  const patterns = {
-    1: ['     ', '     ', '  *  ', '     ', '     '],
-    2: ['*    ', '     ', '     ', '     ', '    *'],
-    3: ['*    ', '     ', '  *  ', '     ', '    *'],
-    4: ['*   *', '     ', '     ', '     ', '*   *'],
-    5: ['*   *', '     ', '  *  ', '     ', '*   *'],
-    6: ['*   *', '     ', '*   *', '     ', '*   *']
-  };
-  const face = patterns[value] || patterns[1];
-  return [`┌${'─'.repeat(5)}┐`, ...face.map((row) => `│${row}│`), `└${'─'.repeat(5)}┘`];
+/** Face do dado em grade 3×3: 🔴 pontos sobre ⬜. */
+export function renderDiceFace(value) {
+  const patterns = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
+  const pips = new Set(patterns[value] || patterns[1]);
+  return [0, 1, 2].map((row) => [0, 1, 2].map((col) => pips.has(row * 3 + col) ? EM.pip : EM.empty).join(' '));
 }
-
-export { renderDiceFace };
 
 async function handleDice({ args, reply }) {
   const notation = String(args[0] || '').trim().toLowerCase();
   if (!notation) {
     const value = 1 + randomIndex(6);
-    return reply(card([header('Dado', 'D6'), `Resultado · ${value}`, mono(renderDiceFace(value))]));
+    return reply(card([header('Dado', 'D6'), `Resultado · ${value}`, grid(renderDiceFace(value))]));
   }
   const match = notation.match(/^(\d{0,2})d(\d{1,4})$/);
   if (!match) return reply(usage('.dado [NdM]', '.dado 3d20', 'Até 20 dados por rolagem e 1.000 lados por dado.'));
@@ -1310,7 +1312,7 @@ async function handleDice({ args, reply }) {
   const results = Array.from({ length: count }, () => 1 + randomIndex(sides));
   const total = results.reduce((sum, value) => sum + value, 0);
   const detail = `${count}d${sides} · [${results.join(', ')}] · total ${total}`;
-  return reply(card([header('Dado', `${count}d${sides}`), detail, count === 1 && sides === 6 ? mono(renderDiceFace(results[0])) : '']));
+  return reply(card([header('Dado', `${count}d${sides}`), detail, count === 1 && sides === 6 ? grid(renderDiceFace(results[0])) : '']));
 }
 
 async function handleCoin({ reply }) {
@@ -1399,7 +1401,7 @@ export async function tryHandleDirectGameMove(sock, msg, text, { reply, authoriz
       else {
         const flagged = toggleMinesweeperFlag(state, index);
         if (flagged === false && state.revealed[index]) await reply(warn('Casa já revelada', 'não é possível marcar uma casa aberta'));
-        else await reply(card([header('Campo minado', flagged ? `bandeira em ${coordinateName(index)}` : `bandeira removida de ${coordinateName(index)}`), mono(renderMinesweeperBoard(state))]));
+        else await reply(card([header('Campo minado', flagged ? `bandeira em ${coordinateName(index)}` : `bandeira removida de ${coordinateName(index)}`), mineGrid(state)]));
       }
       return true;
     }
