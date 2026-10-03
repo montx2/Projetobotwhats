@@ -61,9 +61,12 @@ export function parseDotEnv(text) {
  * hospedagem e em `export X=` no .bashrc) NÃO bloqueia mais o .env.
  *
  * @param {string} [file] caminho do arquivo .env
+ * @param {{override?: boolean}} [opts] `override: true` reescreve variáveis que
+ *   já existem, mas SOMENTE as que aparecem no arquivo (usado pelo
+ *   `.pools recarregar` para pegar chaves novas sem reiniciar o bot).
  * @returns {{file: string, loaded: boolean, entries: number, applied: number}}
  */
-export function loadDotEnv(file = ENV_FILE) {
+export function loadDotEnv(file = ENV_FILE, { override = false } = {}) {
   const result = { file, loaded: false, entries: 0, applied: 0 };
   let raw;
   try {
@@ -76,9 +79,9 @@ export function loadDotEnv(file = ENV_FILE) {
   result.entries = pairs.length;
   for (const [key, value] of pairs) {
     const existing = process.env[key];
-    if (existing === undefined || existing === '') {
+    if (override || existing === undefined || existing === '') {
+      if (existing !== value) result.applied += 1;
       process.env[key] = value;
-      result.applied += 1;
     }
   }
   return result;
@@ -96,6 +99,37 @@ export function envList(name) {
     .split(/[,\s]+/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/**
+ * Junta várias variáveis em UMA lista só (sem duplicatas, ordem preservada).
+ *
+ * Serve para o caso "quero colocar mais chaves do mesmo provedor": o operador
+ * pode usar a lista canônica (`GROQ_KEYS=a,b,c`) ou espalhar em variáveis
+ * avulsas (`GROQ_API_KEY=...`, `GROQ_KEY_1=...`) — todas entram no mesmo pool.
+ */
+export function envListAny(...names) {
+  const out = [];
+  for (const name of names.flat()) {
+    for (const value of envList(name)) {
+      if (!out.includes(value)) out.push(value);
+    }
+  }
+  return out;
+}
+
+/**
+ * Variante "numerada": lê `NOME`, `NOME_1`…`NOME_<max>` de cada apelido.
+ * Ex.: envListNumbered('GROQ_KEY', { aliases: ['GROQ_API_KEY'] }) aceita
+ * GROQ_KEY, GROQ_API_KEY, GROQ_KEY_1, GROQ_API_KEY_1, GROQ_KEY_2…
+ */
+export function envListNumbered(base, { aliases = [], max = 12 } = {}) {
+  const names = [base, ...aliases];
+  const expanded = [...names];
+  for (let i = 1; i <= max; i++) {
+    for (const name of names) expanded.push(`${name}_${i}`);
+  }
+  return envListAny(expanded);
 }
 
 export function envBool(name, fallback = false) {

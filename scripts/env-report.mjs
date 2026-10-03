@@ -27,12 +27,15 @@ if (!s.removeBgKeys && !s.removeBgUrls && !s.localRembg) {
 }
 
 console.log('\n  ── IA (.ia / .criar / .voz) ──');
-line('GEMINI_KEYS', String(envList('GEMINI_KEYS').length));
-line('GROQ_KEYS', String(envList('GROQ_KEYS').length));
-line('OPENAI_KEYS', String(envList('OPENAI_KEYS').length));
-line('AI_KEYS', String(envList('AI_KEYS').length));
-line('POLLINATIONS_KEYS', String(envList('POLLINATIONS_KEYS').length));
+line('GEMINI_KEYS', s.geminiKeys ? `✅ ${s.geminiKeys} chave(s)` : '— vazio');
+line('GROQ_KEYS', s.groqKeys ? `✅ ${s.groqKeys} chave(s)` : '— vazio (aceita várias: GROQ_KEYS=gsk_1,gsk_2)');
+line('OPENAI_KEYS', s.openaiKeys ? `✅ ${s.openaiKeys} chave(s)` : '— vazio');
+line('AI_KEYS', s.aiKeys ? `✅ ${s.aiKeys} chave(s)` : '— vazio');
+line('POLLINATIONS_KEYS', s.pollinationsKeys ? `✅ ${s.pollinationsKeys} chave(s)` : '— vazio (usa Pollinations grátis)');
 line('AI_BASE_URL / AI_MODEL', `${process.env.AI_BASE_URL || '—'} / ${process.env.AI_MODEL || '—'}`);
+line('GROQ_MODELS', s.groqModels ? `${s.groqModels} modelo(s) fixado(s)` : '— padrão do bot (gpt-oss-120b → reservas)');
+line('GEMINI_MODELS', s.geminiModels ? `${s.geminiModels} modelo(s) fixado(s)` : '— padrão do bot (gemini-3.8-flash → reservas)');
+line('AI_MODELS', s.aiModels ? `${s.aiModels} modelo(s) fixado(s)` : '— padrão do bot');
 
 console.log('\n  ── Downloads ──');
 line('COBALT_INSTANCES', String(envList('COBALT_INSTANCES').length));

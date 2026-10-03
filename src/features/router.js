@@ -19,7 +19,7 @@ import { isViewOnce, onViewOnceMessage, unwrapViewOnce } from './viewonce.js';
 import { makeSticker, packInfo, isAnimatedWebp, parseFit } from './sticker.js';
 import { stickerSourcesForCommand } from './stickerlink.js';
 import { removeBackground, bgStatus, bgPools } from './bgremoval.js';
-import { aiChat, aiImage, aiVoice, aiTranslate, aiSummary, aiPoll, resetChatMemory, resetChatMemoryForChat, aiStatus } from './ai.js';
+import { aiChat, aiImage, aiVoice, aiTranslate, aiSummary, aiPoll, resetChatMemory, resetChatMemoryForChat, aiStatus, aiModelStatus, aiPoolSizes, resetAiPools, reloadAiPools } from './ai.js';
 import { resolveDownload, sendDownload, parseQuality, autoDownload, isKnownSocialUrl } from './download.js';
 import {
   ownerMenu,
@@ -870,7 +870,7 @@ async function runCommand(sock, msg, cmd, ctx) {
           uptime: uptimeText(STARTED_AT),
           cacheSize: messageCache.size(),
           bgRows: bgStatus(),
-          aiRows: aiStatus(),
+          aiRows: [...aiStatus(), ...aiModelStatus()],
           poolRows: [
             'tikwm: ativo (TikTok)',
             'innertube: ativo (YouTube)',
@@ -1245,6 +1245,27 @@ async function runCommand(sock, msg, cmd, ctx) {
       requireOwner(ctx, msg);
       const env = envSummary();
       const { removebg, endpoints } = bgPools();
+
+      // `.pools reset` — libera na hora as chaves em cooldown e os modelos
+      // marcados como fora do ar, sem precisar reiniciar o bot.
+      if (['reset', 'limpar', 'clear'].includes(String(args[0] || '').toLowerCase())) {
+        const cleared = resetAiPools();
+        return reply(ok('Pools reiniciados', `cooldowns liberados: ${cleared.keys} chave(s) · ${cleared.models} modelo(s) marcado(s)`));
+      }
+
+      // `.pools recarregar` — relê o .env e remonta os pools: dá para colar
+      // chaves novas (GROQ_KEYS=gsk_1,gsk_2) sem derrubar o bot.
+      if (['recarregar', 'reload', 'recarrega', 'atualizar'].includes(String(args[0] || '').toLowerCase())) {
+        const reloaded = reloadAiPools();
+        const sizes = aiPoolSizes();
+        return reply(ok(
+          'Pools recarregados do .env',
+          reloaded.loaded
+            ? `groq ${sizes.groq} · gemini ${sizes.gemini} · openai ${sizes.openai} · custom ${sizes.custom} · pollinations ${sizes.pollinations}`
+            : 'nenhum .env encontrado na raiz do bot — pools ficaram como estavam'
+        ));
+      }
+
       const lines = [
         header('Pools de APIs', 'chaves e provedores'),
         '',
@@ -1265,9 +1286,23 @@ async function runCommand(sock, msg, cmd, ctx) {
         `${SYM.section} *REMBG LOCAL*`,
         ` ${SYM.detail} ${env.localRembg ? 'ativo (LOCAL_REMBG=1)' : 'desligado — opcional: LOCAL_REMBG=1'}`,
         '',
-        `${SYM.section} *OUTRAS CHAVES*`,
-        ` ${SYM.detail} IA: gemini ${env.geminiKeys} · groq ${env.groqKeys} · openai ${env.openaiKeys} · pollinations ${env.pollinationsKeys}`,
-        ` ${SYM.detail} downloads: cobalt ${env.cobaltInstances}`
+        `${SYM.section} *IA — CHAVES*`,
+        ` ${SYM.detail} groq ${env.groqKeys} · gemini ${env.geminiKeys} · openai ${env.openaiKeys}`,
+        ` ${SYM.detail} custom ${env.aiKeys} · pollinations ${env.pollinationsKeys}`,
+        ` ${SYM.detail} dica: aceita várias chaves — GROQ_KEYS=gsk_1,gsk_2,gsk_3`,
+        '',
+        `${SYM.section} *IA — MODELOS (ordem de tentativa)*`,
+        ...(aiModelStatus().length
+          ? aiModelStatus().map((s) => ` ${SYM.detail} ${s}`)
+          : [` ${SYM.detail} sem provedor com chave — usando Pollinations grátis`]),
+        ` ${SYM.detail} defina a ordem com GROQ_MODELS / GEMINI_MODELS no .env`,
+        ` ${SYM.detail} modelo 404 (descontinuado) é ignorado sozinho`,
+        '',
+        `${SYM.section} *DOWNLOADS*`,
+        ` ${SYM.detail} cobalt ${env.cobaltInstances} instância(s)`,
+        '',
+        ` ${SYM.detail} .pools reset libera os cooldowns agora`,
+        ` ${SYM.detail} .pools recarregar relê o .env sem reiniciar`
       ];
       return reply(lines.join('\n'));
     }
