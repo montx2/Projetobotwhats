@@ -9,6 +9,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { log } from '../../core/logger.js';
+import { envBool } from '../../core/env.js';
 
 const run = promisify(execFile);
 
@@ -49,8 +50,12 @@ export function findYtdlp() {
   return null;
 }
 
+export function isYtdlpEnabled() {
+  return !envBool('NEXUS_DISABLE_YTDLP', false) && envBool('NEXUS_ENABLE_YTDLP', false);
+}
+
 export function hasYtDlp() {
-  return Boolean(process.env.NEXUS_DISABLE_YTDLP !== 'true' && findYtdlp());
+  return Boolean(isYtdlpEnabled() && findYtdlp());
 }
 
 const VIDEO_FORMAT = 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best';
@@ -60,7 +65,9 @@ const AUDIO_FORMAT = 'bestaudio/best';
  * Baixa (ou extrai o áudio de) uma URL usando o yt-dlp local.
  * @returns {Promise<{buffer: Buffer}>}
  */
-export async function ytdlpBuffer(url, { audioOnly = false, timeoutMs = 240_000 } = {}) {
+export async function ytdlpBuffer(url, { audioOnly = false, timeoutMs = 240_000, maxBytes = 90 * 1024 * 1024 } = {}) {
+  if (!isYtdlpEnabled()) throw new Error('yt-dlp local está desativado; habilite NEXUS_ENABLE_YTDLP somente se confiar nos links usados');
+  const limit = Math.min(200 * 1024 * 1024, Math.max(1, Number(maxBytes) || 90 * 1024 * 1024));
   const cmd = findYtdlp();
   if (!cmd) throw new Error('yt-dlp não instalado');
 
@@ -70,6 +77,8 @@ export async function ytdlpBuffer(url, { audioOnly = false, timeoutMs = 240_000 
     '--no-playlist',
     '--no-part',
     '--no-mtime',
+    '--max-filesize',
+    `${Math.ceil(limit / (1024 * 1024))}M`,
     '-q',
     '-f',
     audioOnly ? AUDIO_FORMAT : VIDEO_FORMAT,
@@ -82,12 +91,13 @@ export async function ytdlpBuffer(url, { audioOnly = false, timeoutMs = 240_000 
   try {
     const { stdout } = await run(cmd[0], args, {
       encoding: 'buffer',
-      maxBuffer: 260 * 1024 * 1024,
+      maxBuffer: Math.min(210 * 1024 * 1024, limit + 1024 * 1024),
       timeout: timeoutMs,
       windowsHide: true
     });
     const buffer = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout || '');
     if (!buffer.length) throw new Error('yt-dlp não devolveu bytes');
+    if (buffer.length > limit) throw new Error(`yt-dlp excedeu o limite de ${Math.floor(limit / (1024 * 1024))} MB`);
     return { buffer };
   } catch (error) {
     const stderr = String(error?.stderr?.toString?.('utf8') || error?.message || error).trim();
@@ -97,6 +107,7 @@ export async function ytdlpBuffer(url, { audioOnly = false, timeoutMs = 240_000 
 
 /** Metadados sem baixar a mídia (rápido, usado só para enriquecer). */
 export async function ytdlpInfo(url, { timeoutMs = 45_000 } = {}) {
+  if (!isYtdlpEnabled()) return null;
   const cmd = findYtdlp();
   if (!cmd) return null;
   try {

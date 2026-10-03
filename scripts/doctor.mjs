@@ -1,4 +1,4 @@
-// 🩺 Doctor: verifica o ambiente antes de rodar o NEXUS.
+// 🩺 Doctor: verifica o ambiente antes de rodar o MontxBOT.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,10 +10,14 @@ const bad = (m) => console.log(`❌ ${m}`);
 
 console.log('\n🩺 NEXUS DOCTOR\n');
 
+// Load the same .env the bot uses before inspecting opt-in runtime flags.
+const { ENV_FILE, loadDotEnv, envList, envBool } = await import('../src/core/env.js');
+const envLoad = loadDotEnv();
+
 // Node
 const major = Number(process.versions.node.split('.')[0]);
-if (major >= 20) ok(`Node ${process.version}`);
-else bad(`Node ${process.version} — precisa do Node 20+ (pkg install nodejs-lts)`);
+if (major >= 22) ok(`Node ${process.version}`);
+else bad(`Node ${process.version} — precisa do Node 22+ (pkg install nodejs-lts)`);
 
 // FFmpeg
 const ff = spawnSync(process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg', ['-version'], { timeout: 8000 });
@@ -24,21 +28,21 @@ if (ff.status === 0) {
   bad('FFmpeg ausente — figurinhas e conversões precisam dele.\n   Termux: pkg install ffmpeg · Linux: apt install ffmpeg · Windows: winget install ffmpeg');
 }
 
-// yt-dlp (opcional, modo turbo dos downloads)
-const { hasYtDlp, findYtdlp } = await import('../src/features/downloaders/ytdlp.js');
+// yt-dlp (opcional e desligado por padrão por segurança)
+const { hasYtDlp, findYtdlp, isYtdlpEnabled } = await import('../src/features/downloaders/ytdlp.js');
 const ytdlp = findYtdlp();
-if (hasYtDlp()) ok(`yt-dlp instalado (modo turbo dos downloads): ${ytdlp.join(' ')}`);
-else warn('yt-dlp ausente (opcional) — dá uma reserva fortíssima nos downloads.\n   Termux/Linux: pip install -U yt-dlp');
+if (!isYtdlpEnabled()) {
+  warn(`yt-dlp ${ytdlp ? `detectado (${ytdlp.join(' ')})` : 'não detectado'}, mas desativado por padrão. Habilite conscientemente com NEXUS_ENABLE_YTDLP=true.`);
+} else if (hasYtDlp()) ok(`yt-dlp habilitado: ${ytdlp.join(' ')}`);
+else warn('yt-dlp habilitado, mas não encontrado — Termux/Linux: pip install -U yt-dlp');
 
 // Dependências
 if (fs.existsSync(path.join(ROOT, 'node_modules', '@whiskeysockets', 'baileys'))) ok('Dependências npm instaladas');
-else bad('Dependências ausentes — rode: npm install');
+else bad('Dependências ausentes — rode: npm ci');
 
 // .env — validado com O MESMO carregador que o bot usa (src/core/env.js).
 // Antes o doctor lia o arquivo "na mão" e podia dizer "configurado" enquanto o
 // bot dizia "sem chaves"; agora os dois enxergam exatamente a mesma coisa.
-const { ENV_FILE, loadDotEnv, envList, envBool } = await import('../src/core/env.js');
-const envLoad = loadDotEnv();
 if (!envLoad.loaded) {
   warn(`.env ausente em ${ENV_FILE} — copie o .env.example para .env e preencha (opcional mas recomendado)`);
 } else {

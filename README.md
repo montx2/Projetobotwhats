@@ -1,272 +1,182 @@
-# ⚡ NEXUS BOT
+# MontxBOT
 
-**O bot de WhatsApp mais completo da sua vida.** Multi-Device (Baileys), feito para
-**Termux** (pareamento por código, sem QR), e também roda em **Linux** e **Windows** (com QR).
+Bot de WhatsApp Multi-Device baseado em **Baileys 6.7.24**. Inclui figurinhas, downloads de links, utilitários de IA e funções de moderação/retensão **desativadas por padrão quando copiam mensagens**. Feito para Termux, Linux e Windows.
 
-Tudo que importa, nada que atrapalha:
+> **Aviso importante:** Baileys é uma integração não oficial. O WhatsApp pode alterar o protocolo, limitar ou encerrar sessões. Use uma conta sob seu controle, respeite as regras do WhatsApp, a legislação local, direitos autorais e a privacidade/consentimento das pessoas. Este projeto não promete disponibilidade nem proteção contra bloqueios.
 
-| Recurso | Descrição |
-|---|---|
-| 👁️ **View Once** | Captura automática + responda qualquer view once com qualquer mensagem — **100% silenciosa, vai SÓ pro seu privado (0 rastros)** |
-| 🛡️ **Anti-Delete** | **Ligado em tudo por padrão** — tudo que apagarem vai **SÓ pro seu privado (0 rastros)**, com filtros de ignorar |
-| 🖼️ **Figurinhas** | Imagem, vídeo, GIF e figurinha→figurinha, **com remoção de fundo por IA** — e **figurinha automática direto de um link** (`.s <link>`), sem baixar nada antes |
-| 🎭 **Remoção de fundo** | Pool de APIs com várias contas girando (estilo "requisições ilimitadas") |
-| 🧠 **IA completa** | Chat, geração de imagens, voz, tradução e resumo — com pool de chaves + fallback grátis |
-| ⬇️ **Downloader universal** | TikTok, Instagram, Pinterest, YouTube, X, Facebook, Threads, Reddit, Twitch, Vimeo e a cauda longa |
-| 🎚️ **Qualidade** | Sempre a **MELHOR por padrão**; peça `baixa` para reduzir |
-| 🔒 **Privacidade** | Só você manda. Quem você liberar com `.ativar` usa tudo, **menos View Once e Anti-Delete** (que nunca aparecem pra ninguém) |
-| 🎨 **Menu duplo** | Um menu completo só no seu privado e um menu público nos chats liberados |
+## Requisitos e instalação
 
----
+- Node.js **22 ou superior** (22/24 LTS recomendados).
+- FFmpeg para conversão de figurinhas e áudio/vídeo.
+- A dependência Baileys fica fixada em `6.7.24`; não é atualizada automaticamente para releases candidatas da v7.
 
-## 🚀 Instalação rápida
-
-### 📱 Termux (recomendado)
+### Termux
 
 ```bash
 pkg update -y && pkg upgrade -y
-pkg install -y git nodejs-lts ffmpeg
+pkg install -y git nodejs-lts ffmpeg procps
 git clone https://github.com/montx2/Bot-zap-zap.git
 cd Bot-zap-zap
-./install-termux.sh        # instala tudo
-./bot.sh pair 55SEUNUMERO  # salva seu número (sem QR no Termux!)
-./bot.sh start             # mostra o código de 8 letras
+./install-termux.sh
+./bot.sh pair 55SEUNUMERO
+./bot.sh start
 ```
 
-No WhatsApp: **Dispositivos conectados → Conectar com número de telefone** → digite o código.
+No WhatsApp, abra **Dispositivos conectados → Conectar com número de telefone** e digite o código exibido. Para manter o Android acordado, use `termux-wake-lock`.
 
-> 💡 Precisa manter o Termux vivo? Rode `termux-wake-lock` antes do `./bot.sh start`.
+### Linux / Windows
 
-### 🐧 Linux
+Instale Node.js 22+ e FFmpeg. Em seguida:
 
 ```bash
-sudo apt install nodejs npm ffmpeg   # Node 20+
-npm install
-npm start                            # escaneie o QR no terminal
+npm ci
+npm start
 ```
 
-### 🪟 Windows
+No Windows, execute `start.bat`. No primeiro início, use o QR exibido no terminal. Para conferir o ambiente antes do pareamento: `npm run doctor`.
 
-1. Instale o [Node.js LTS 20+](https://nodejs.org) e FFmpeg (`winget install ffmpeg`).
-2. Dê dois cliques em `start.bat` (ele instala as dependências sozinho).
-3. Escaneie o QR Code que aparece no terminal.
+## Acesso e privacidade
 
----
+Por padrão, o bot atende somente o privado do dono. O dono pode liberar um chat/grupo com `.ativar` e revogar com `.desativar`. A revogação também limpa as opções de captura e o cache daquele chat. ` .desativar tudo` revoga os demais chats.
 
-## 🎮 Como usar
+### View Once (desativado por padrão)
 
-Mande **`.menu`** no WhatsApp. Resumo:
+A captura automática é **opt-in por JID**, exige que o chat esteja liberado e entrega o arquivo apenas no privado do dono. Uma resposta comum, emoji ou mensagem citada **não** dispara download. Para ativar/desativar:
 
-### 👁️ View Once — 100% silenciosa
-- **Captura automática**: toda view once recebida é baixada e enviada **somente para o seu privado**.
-- **Por resposta**: responda a view once com *qualquer mensagem* (um "oi", um emoji, `.s`…) **em qualquer conversa ou grupo** e o bot baixa a mídia e manda direto pro seu privado.
-- **Zero rastros**: o bot nunca reenvia a mídia no grupo nem na conversa da outra pessoa, e nunca responde nada lá.
-- Configurar: `.vo` (status) · `.vo on` · `.vo off`
-
-### 🛡️ Anti-Delete — 100% silencioso
-Vem **ligado em todos os chats**. Quando alguém apaga, o bot manda o conteúdo recuperado **somente para o seu privado** — nada volta pro grupo ou pro chat de origem.
-
-```
-.antidelete                    → status
-.antidelete ignorar grupos     → para de proteger grupos
-.antidelete ignorar privado    → para de proteger PVs
-.antidelete ignorar aqui       → ignora o chat atual
-.antidelete ignorar <número>   → ignora um contato específico
-.antidelete remover grupos     → volta a proteger
-.antidelete lista              → ver filtros
-.antidelete on | off           → liga/desliga global (só o dono)
+```text
+.vo                         → status do chat atual
+.vo on aqui                 → habilita no privado atual
+.vo on <JID>                → habilita um chat já autorizado
+.vo off aqui
+.vo off todos               → desliga em todos os chats
 ```
 
-### 🖼️ Figurinhas
-```
-.s / .fig / !sticker    → foto, vídeo, GIF ou figurinha → figurinha
-.s <link>               → baixa o link e JÁ monta a figurinha (novo 🔥)
-.sfundo                 → figurinha SEM FUNDO (IA remove o fundo)
-.fundo                  → devolve PNG transparente (sem virar figurinha)
-```
+O comando `.s` pode baixar uma View Once citada **somente no privado do dono e por ação explícita**; em grupo ou chat de terceiros a conversão é bloqueada. Considere a expectativa de privacidade de quem enviou o conteúdo antes de habilitar qualquer captura.
 
-**Figurinha direto do link** — manda o link, recebe a figurinha pronta, sem baixar nada antes:
-```
-.s https://br.pinterest.com/pin/123456789/     → figurinha do pin
-.s pin.it/abc123                               → aceita link curto e até sem https://
-.s inteira https://pin.it/abc123               → imagem completa, sem esticar
-.s cortar https://pin.it/abc123                → preenche o quadrado cortando as bordas
-.sfundo https://i.pinimg.com/originals/a/b/c.jpg → baixa e remove o fundo com IA
-.s <link1> <link2> <link3>                     → até 3 links de uma vez
-```
-- Funciona com **qualquer** link que o `.dl` baixa: Pinterest, TikTok, Instagram,
-  YouTube, X/Twitter, Facebook, Threads, Reddit, GIFs (Giphy/Tenor) e sites em geral.
-- Link que já é arquivo (termina em `.jpg`, `.png`, `.gif`, `.mp4`…) é baixado na hora,
-  sem passar pelos extratores — o caminho mais rápido.
-- **Carrossel/slideshow** vira figurinha da primeira foto; **vídeo** vira figurinha animada (até 7 s).
-- Também funciona **respondendo** a uma mensagem que contém o link: responde com `.s` e pronto.
-- Se o link for só áudio, o bot avisa e sugere `.dl <link>`.
-- Antes de montar, o bot **confere o conteúdo da imagem baixada**: se a rede social
-  devolver a página de login/preview (o caso clássico é um gradiente de marca da
-  própria rede, ou link compartilhado do tipo `/sent/`) em vez do post, ele tenta
-  outra versão do mesmo arquivo e, se não houver, avisa que não conseguiu —
-  nunca entrega uma figurinha colorida sem nada a ver.
+### Anti-Delete (desativado por padrão)
 
-> O nome do pacote e o autor da figurinha são fixos (definidos em `nomePack` /
-> `autorPack`, no `data/config.json`). Não existe mais comando para trocar por
-> figurinha — se quiser mudar, edite o config e reinicie o bot.
-Dica: dá pra responder uma **view once** com `.s` e transformar em figurinha. 😉
+A retenção também é opt-in por chat. Mensagens recuperáveis são encaminhadas somente ao privado do dono, nunca de volta ao chat de origem. View Once é excluída. Ao desligar o recurso ou revogar o chat, o cache correspondente é apagado.
 
-### ⬇️ Downloads (sempre na melhor qualidade)
-```
-.dl <link> [qualidade]      → universal (qualquer rede)
-.tiktok <link> [qualidade]  → TikTok sem marca d'água (HD original)
-.ttmp3 <link>               → só a música do TikTok
-.pin <link> [qualidade]     → Pinterest (foto original, vídeo e GIF)
-.insta <link> [qualidade]   → Instagram (reels, posts, carrossel)
-.yt <link> [qualidade]      → YouTube
-.ytmp3 <link>               → só o áudio do YouTube
-.tw <link>                  → X/Twitter (vídeo, GIF e fotos)
-.face <link>                → Facebook (vídeos e reels públicos)
-```
-- **Qualidades**: `melhor` (padrão 👑), `alta`, `media`, `baixa` — em qualquer ordem: `.tiktok baixa <link>`
-- **Auto-download**: cole o link solto no chat que ele baixa sozinho.
-- Redes com extrator próprio: TikTok, Instagram, Pinterest, YouTube, X, Facebook,
-  Threads, Reddit, Twitch e Vimeo. A cauda longa (Snapchat, SoundCloud,
-  Dailymotion e centenas de sites) passa pelo Cobalt e pelo yt-dlp.
-
-**Como cada rede é baixada** (métodos reais, não chute):
-
-| Rede | Estratégia principal | Reservas |
-|---|---|---|
-| TikTok | TikWM (`/api/` com `hd=1`, sem `web:1`) | Cobalt (túnel) → scraping direto |
-| Instagram | Página de incorporação (`/p/<code>/embed/captioned/`) lendo o `contextJSON` | Visão de crawler com UA do facebookexternalhit → Cobalt |
-| Pinterest | Widget API (`widgets.pinterest.com/v3/pidgets/pins/info/`) | SSR `__PWS_DATA__` → savepin → Cobalt |
-| YouTube | Innertube (clientes ANDROID_VR e IOS) | Cobalt → yt-dlp |
-| X/Twitter | vxtwitter (`api.vxtwitter.com`) | fxtwitter → Cobalt |
-| Facebook | Plugin público de vídeo (`browser_native_hd_url`) | Página direta → Cobalt |
-| Threads/Reddit/Twitch/Vimeo | Embed público de cada um | Cobalt |
-
-> 🧰 **Modo turbo**: se você tiver o `yt-dlp` instalado (`pip install -U yt-dlp` no
-> Termux), o bot detecta e usa como reserva fortíssima para qualquer site.
-
-### 🧠 IA
-```
-.ia <pergunta>            → conversa (com memória no chat · .ia reset limpa)
-.criar <descrição>        → gera imagem
-.voz <texto>              → áudio falando o texto
-.traduz inglês <texto>    → tradução
-.resumo <texto>           → resumão em bullets
+```text
+.antidelete                         → status
+.antidelete on aqui                 → ativa no privado atual
+.antidelete on <JID>                → ativa em chat previamente autorizado
+.antidelete off aqui                → desativa e limpa o cache desse chat
+.antidelete off todos               → desativa em todos os chats
+.antidelete ignorar grupos          → exclui e limpa todos os grupos
+.antidelete ignorar privado         → exclui e limpa os privados
+.antidelete ignorar <JID>           → exclui um chat
+.antidelete remover <JID>           → remove o filtro
+.antidelete lista                   → mostra a configuração (somente ao dono)
 ```
 
----
+**Retenção local:** até 24 horas, no máximo 100 mensagens por chat e 1.000 no total. A mídia do WhatsApp é lida em stream, limitada a 64 MiB. A persistência em `data/cache/messages.json` ocorre somente para chats com Anti-Delete habilitado; a configuração e os dados de runtime ficam em `data/`, ignorados pelo Git. Não coloque backups dessa pasta em local público.
 
-## 🔑 O sistema de POOLS (requisições "ilimitadas")
+### IA e dados enviados a terceiros
 
-A mágica do NEXUS: em vez de UMA conta/API, você configura **VÁRIAS** e o bot
-gira entre elas. Quando uma estoura o limite, ela entra em "geladeira" e a
-próxima assume. Copie `.env.example` para `.env` e preencha:
+Os comandos de IA usam provedores externos configurados (ou Pollinations quando não há outras chaves). Perguntas, trechos citados, descrições de imagem e texto de voz podem ser enviados ao provedor escolhido para gerar a resposta. **Não envie senhas, dados de pagamento ou informações sensíveis.**
+
+A memória de conversa é isolada por chat e remetente, fica apenas em RAM por até 30 minutos e é limitada em tamanho; `.ia reset` limpa a memória daquele remetente. Prompts não são gravados nos logs. A retenção e o tratamento pelo provedor externo seguem as políticas desse provedor.
+
+## Comandos
+
+```text
+.menu                         → comandos disponíveis
+.ping                         → teste simples
+.s                             → responde a uma imagem/vídeo/GIF com uma figurinha
+.s <link>                      → baixa mídia pública e cria figurinha
+.s inteira <link>              → preserva a proporção
+.s cortar <link>               → preenche o quadrado cortando as bordas
+.sfundo <imagem ou link>        → figurinha sem fundo
+.fundo <imagem ou link>         → PNG sem fundo
+.dl <link> [qualidade]          → download de mídia pública
+.tiktok <link>                  → TikTok
+.insta <link>                   → Instagram
+.pin <link>                     → Pinterest
+.yt <link> / .ytmp3 <link>      → YouTube / áudio
+.tw <link> / .face <link>       → X/Twitter / Facebook
+.ia <pergunta>                  → conversa com IA
+.criar <descrição>              → geração de imagem
+.voz <texto>                    → texto para áudio
+.traduz <idioma> <texto>        → tradução
+.resumo <texto>                 → resumo
+```
+
+Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Faça downloads somente de conteúdo que você tem direito e autorização para acessar.
+
+### Downloads automáticos e limites
+
+- Auto-download de links soltos vem **desligado**. Para ativar conscientemente: `.config autoDownload true`.
+- O bot limita cada arquivo a `maxMB` (90 MiB por padrão, configurável entre 1 e 200). Lotes também têm teto agregado de 200 MiB. Figurinhas e mídias recebidas do WhatsApp usam limites próprios.
+- Comandos de alto custo têm limitação de frequência e concorrência para reduzir spam e consumo de memória.
+- URLs fornecidas por usuários precisam ser HTTP/HTTPS e o destino inicial não pode ser local/privado. O cliente HTTP do bot valida cada redirecionamento e limita o corpo das respostas.
+- O `yt-dlp` local fica **desligado por padrão**: o binário segue redirecionamentos próprios que não passam pela validação por salto do bot. Só habilite com `NEXUS_ENABLE_YTDLP=true` se confiar nos links e puder controlar a rede de saída; `NEXUS_DISABLE_YTDLP=true` desliga mesmo assim.
+
+## Configuração
+
+Copie o exemplo e proteja o arquivo:
 
 ```bash
 cp .env.example .env
-nano .env
 ```
 
-### 🎭 Remoção de fundo (para .sfundo / .fundo)
-Crie quantas contas grátis quiser em <https://www.remove.bg/api> (50 créditos/mês cada):
+`.env` é local e ignorado pelo Git. Alterações exigem reinicialização. `npm run env` mostra somente contagens e caminhos, não imprime chaves.
+
+### Provedores de IA
+
 ```env
-REMOVE_BG_KEYS=chave_da_conta1,chave_da_conta2,chave_da_conta3
+GEMINI_KEYS=...
+GROQ_KEYS=...
+OPENAI_KEYS=...
+AI_BASE_URL=https://openrouter.ai/api/v1
+AI_KEYS=...
+AI_MODEL=...
+POLLINATIONS_KEYS=...
 ```
-> ⚠️ O `.env` fica **na raiz do bot** (a mesma pasta do `package.json`) e é lido na
-> **inicialização**: depois de colar as chaves, reinicie o bot. Confira o que ele
-> enxergou com **`.pools`** no WhatsApp ou **`npm run env`** no terminal.
-Alternativas:
+
+`AI_BASE_URL`/`OPENAI_BASE_URL` são endpoints escolhidos pelo operador; as credenciais configuradas serão enviadas a eles. Use somente endpoints confiáveis. Para serviços locais, configure explicitamente o endereço privado apropriado.
+
+### Remoção de fundo e downloads
+
 ```env
-REMOVE_BG_URLS=https://sua-api-própria/removebg   # POST multipart campo "image"
-LOCAL_REMBG=true                                   # usa o rembg local (pip install rembg)
+REMOVE_BG_KEYS=...
+REMOVE_BG_URLS=https://seu-endpoint-confiavel/rembg
+LOCAL_REMBG=false
+COBALT_INSTANCES=https://sua-instancia-cobalt
+COBALT_API_KEY=
+TIKTOK_API=https://seu-endpoint-tiktok
 ```
 
-### 🧠 IA (opcional — sem nada, usa Pollinations grátis)
-```env
-GEMINI_KEYS=key1,key2        # aistudio.google.com (grátis)
-GROQ_KEYS=key1               # console.groq.com (grátis, rápido)
-OPENAI_KEYS=key1             # OpenAI
-AI_BASE_URL=https://openrouter.ai/api/v1   # qualquer API compatível com OpenAI
-AI_KEYS=key1,key2
-AI_MODEL=anthropic/claude-3.5-sonnet
-```
-Ordem de uso: suas chaves → Gemini → Groq → OpenAI → **Pollinations (grátis, sempre)**.
+Endpoints customizados são considerados confiáveis pelo operador e podem usar rede local. Não aponte o bot para serviços desconhecidos. Chaves e instâncias em pool respeitam cooldowns e limites reportados pelo provedor; **adicionar contas não torna uma cota ilimitada nem deve contornar regras do serviço**. A chave Cobalt só é enviada às instâncias definidas em `COBALT_INSTANCES`, nunca às instâncias públicas padrão.
 
-### ⬇️ Downloads universais (Cobalt)
-O bot já vem com instâncias públicas. Para ficar 100% confiável, adicione as suas
-(veja a lista em <https://instances.cobalt.best> ou suba a sua: <https://github.com/imputnet/cobalt>):
-```env
-COBALT_INSTANCES=https://sua-instancia.cobalt,https://outra-instancia
+### Comandos locais de configuração
+
+```text
+.config                         → ver preferências e contagens
+.config autoDownload false      → desligar downloads automáticos
+.config qualidadePadrao media   → qualidade padrão
+.config maxMB 120               → limite por arquivo (1–200 MiB)
+.doctor                         → diagnóstico no WhatsApp (dono)
+.pools                          → status dos provedores (dono)
 ```
 
-> 📊 Veja a saúde dos pools no WhatsApp: **`.pools`** (dono) e **`.info`**
-> 🩺 No terminal: **`npm run env`** mostra o caminho do `.env` e quantas chaves de
-> cada tipo o bot encontrou; **`.doctor`** / `npm run doctor` faz o diagnóstico completo.
-
----
-
-## ⚙️ Comandos de configuração
-
-```
-.config                       → ver tudo
-.config autoDownload false    → desligar auto-download de links
-.config qualidadePadrao media → qualidade padrão dos downloads
-.config maxMB 50              → limite de tamanho por arquivo
-.menu · .ping · .info · .doctor · .pools
-```
-
----
-
-## 🧪 Testes
+## Desenvolvimento e validação
 
 ```bash
-npm test          # 102 testes offline (lógica, roteamento, anti-delete, view once,
-                  # figurinhas WebP/EXIF, figurinha a partir de link, extratores de
-                  # redes sociais e carregamento do .env)
-npm run doctor    # diagnóstico do ambiente
-npm run env       # mostra o que o bot leu do .env (chaves, caminhos, contagens)
+npm ci
+npm test
+npm run doctor
 ```
 
-## 🩺 Problemas comuns
+A suíte executa os arquivos de teste em processos sequenciais, cada um com `NEXUS_DATA_DIR` temporário próprio (removido ao final), incluindo testes offline de limites, cache, roteamento, migração, SSRF, redirecionamentos e streams.
 
-| Sintoma | Solução |
-|---|---|
-| QR não aparece no Termux | Normal! Termux usa código: `./bot.sh pair SEUNUMERO` |
-| Código de pareamento não aparece | Confira o número: só dígitos, com DDI (ex. 55…) |
-| Loop de 405 ao conectar | O bot já faz cache da versão do WA Web; se persistir: `WA_VERSION_OVERRIDE=2,3000,REVISAO` |
-| Figurinha não sai | Falta FFmpeg: `pkg install ffmpeg` / `apt install ffmpeg` / `winget install ffmpeg` |
-| `.s <link>` não sai a figurinha | Confira se o link abre no navegador. Vídeos muito longos passam do teto de 64 MB do `.s` — use um link curto (TikTok/Reels/Pin) ou baixe com `.dl <link>` |
-| `.fundo` / `.sfundo` diz "Nenhum provedor configurado" | Confira se o `.env` está **na raiz do bot** e reinicie. Veja o que o bot enxerga com `.pools` (dono) ou `npm run env` |
-| Coloquei a chave e nada mudou | O `.env` só é lido na **inicialização** — depois de salvar, reinicie (`./bot.sh stop` + `./bot.sh start`) |
-| Download falha em alguma rede | O bot tenta em cascata (extrator da rede → Cobalt → yt-dlp → scraping). Tente de novo ou use `.dl <link>` |
-| Download do Instagram falha | IG bloqueia muitos IPs; o bot tenta incorporação → visão de crawler → Cobalt |
-| Áudio do YouTube não sai | Instale o yt-dlp (`pip install -U yt-dlp`) para destravar o modo turbo |
-| Ninguém do grupo consegue usar | Dê `.ativar` dentro do grupo (tem que ser você, o dono) |
-| Bot cai no Termux ao fechar | `termux-wake-lock` e não mate o app nas configurações de bateria |
+## Estrutura
 
-## 🧱 Estrutura
-
-```
+```text
 src/
-├── main.js               # boot, dono, handlers
-├── core/                 # config, env, http, keypool (motor de contas), store
-├── wa/                   # conexão Baileys (QR/código) + cache de mensagens
-├── features/             # viewonce, antidelete, sticker, stickerlink (figurinha de
-│                         # link), bgremoval, ai, download
-│   └── downloaders/      # tiktok, instagram, pinterest, youtube, twitter,
-│                         # facebook, generic, cobalt, ytdlp, media, qualidade
-└── util/                 # ffmpeg, webp (exif), texto
+├── core/       config, HTTP seguro, key pools, armazenamento, limites
+├── wa/         cliente Baileys, cache e helpers de mídia em stream
+├── features/   router, View Once, Anti-Delete, IA, figurinhas e downloads
+└── util/       streams, FFmpeg, WebP e texto
+scripts/        pareamento, doctor, relatório de ambiente e runner de testes
 ```
-
-Zero bancos externos, zero módulos nativos obrigatórios: instala em qualquer lugar.
-
-## 🙏 Créditos e inspiração
-
-Construído sobre [Baileys](https://github.com/WhiskeySockets/Baileys). Ideias e
-padrões estudados nos melhores bots abertos da comunidade (Atlas-MD, ChisatoBOT,
-KIRA X MD e cia.) — e depois refeitos do zero, mais simples e mais rápidos.
-APIs: TikWM, Pollinations, Cobalt, remove.bg.
-
----
-
-**Feito com ⚡ para ser o bot, não um botzinho.**

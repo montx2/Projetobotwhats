@@ -5,14 +5,14 @@
 // ou baixada de um LINK pelo `stickerlink.js` — as duas chegam aqui no mesmo
 // formato `{ buffer, type, node }`, então o motor não precisa saber a diferença.
 
-import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
 import { cfg } from '../core/config.js';
-import { log, baileysLogger } from '../core/logger.js';
+import { log } from '../core/logger.js';
 import { toStickerWebp, decodeWebpToPng, detectMediaExt, hasFfmpeg } from '../util/ffmpeg.js';
 import { isWebp, isAnimatedWebp, parseWebp, readStickerExif, tagSticker } from '../util/webp.js';
 import { removeBackground } from './bgremoval.js';
 import { formatBytes } from '../core/http.js';
 import { messageCache } from '../wa/cache.js';
+import { downloadWhatsAppMedia, MAX_WHATSAPP_MEDIA_BYTES } from '../wa/media.js';
 
 const MEDIA_MAP = {
   imageMessage: 'image',
@@ -108,37 +108,21 @@ async function downloadStickerMedia(sock, holder, picked) {
   const { rawType, node } = picked;
   const mediaKind = String(rawType || 'imageMessage').replace(/Message$/, '');
   const errors = [];
+  try {
+    return await downloadWhatsAppMedia(node, mediaKind, { maxBytes: MAX_WHATSAPP_MEDIA_BYTES });
+  } catch (error) {
+    errors.push(String(error?.message || error).slice(0, 100));
+  }
 
-  const strategies = [
-    () =>
-      downloadMediaMessage(holder, 'buffer', {}, {
-        logger: baileysLogger,
-        reuploadRequest: sock?.updateMediaMessage
-      }),
-    () =>
-      downloadMediaMessage(
-        { key: holder.key, message: { [rawType]: node } },
-        'buffer',
-        {},
-        {
-          logger: baileysLogger,
-          reuploadRequest: sock?.updateMediaMessage
-        }
-      ),
-    async () => {
-      const stream = await downloadContentFromMessage(node, mediaKind);
-      const chunks = [];
-      for await (const chunk of stream) chunks.push(chunk);
-      return Buffer.concat(chunks);
-    }
-  ];
-
-  for (const run of strategies) {
+  if (typeof sock?.updateMediaMessage === 'function') {
     try {
-      const buf = await run();
-      if (Buffer.isBuffer(buf) && buf.length > 0) return buf;
-    } catch (err) {
-      errors.push(String(err?.message || err).slice(0, 100));
+      const refreshed = await sock.updateMediaMessage(holder);
+      const message = unwrapMessage(refreshed?.message);
+      const refreshedNode = message?.[rawType];
+      if (!refreshedNode) throw new Error('mídia não encontrada após atualizar');
+      return await downloadWhatsAppMedia(refreshedNode, mediaKind, { maxBytes: MAX_WHATSAPP_MEDIA_BYTES });
+    } catch (error) {
+      errors.push(String(error?.message || error).slice(0, 100));
     }
   }
   throw new Error(`Não consegui baixar a mídia (${errors[0] || 'erro desconhecido'})`);
@@ -192,7 +176,7 @@ export async function extractStickerSource(sock, msg, { onProgress, allowViewOnc
       } catch (err) {
         // Fallback: tenta recuperar do cache de mensagens se a citação veio incompleta
         if (ctx.stanzaId) {
-          const cached = messageCache.get(msg.key.remoteJid, ctx.stanzaId) || messageCache.getById(ctx.stanzaId);
+          const cached = messageCache.get(msg.key.remoteJid, ctx.stanzaId);
           const cq = cached && pickType(cached.message, unwrapViewOnce);
           if (cq) {
             const cachedHolder = {
@@ -210,7 +194,7 @@ export async function extractStickerSource(sock, msg, { onProgress, allowViewOnc
 
   // 3) Citação veio como placeholder vazio — procura no messageCache pelo stanzaId
   if (ctx?.stanzaId) {
-    const cached = messageCache.get(msg.key.remoteJid, ctx.stanzaId) || messageCache.getById(ctx.stanzaId);
+    const cached = messageCache.get(msg.key.remoteJid, ctx.stanzaId);
     const cq = cached && pickType(cached.message, unwrapViewOnce);
     if (cq) {
       await onProgress?.('⏳ Baixando mídia do histórico…');

@@ -1,7 +1,7 @@
-// 🎭 REMOÇÃO DE FUNDO — pool de provedores estilo "contas ilimitadas".
+// 🎭 REMOÇÃO DE FUNDO — provedores configurados pelo operador, com cooldown.
 //
 // Provedores, em ordem de tentativa:
-//   1. remove.bg   → REMOVE_BG_KEYS=key1,key2,key3  (varias contas = ilimitado)
+//   1. remove.bg   → REMOVE_BG_KEYS=key1,key2,key3 (respeita limites do serviço)
 //   2. endpoints   → REMOVE_BG_URLS=https://sua-api/removebg (POST multipart campo "image")
 //   3. local       → LOCAL_REMBG=1 usa o CLI `rembg` instalado via pip (offline)
 //
@@ -19,6 +19,7 @@ import { postMultipart } from '../core/http.js';
 import { log } from '../core/logger.js';
 
 const REMOVE_BG_URL = 'https://api.remove.bg/v1.0/removebg';
+const MAX_BG_INPUT_BYTES = 20 * 1024 * 1024;
 
 const keyPool = new KeyPool('remove.bg', ENV.removeBgKeys, { cooldownMs: 10 * 60_000 });
 const urlPool = new KeyPool('removebg-urls', ENV.removeBgUrls, { cooldownMs: 5 * 60_000 });
@@ -48,6 +49,7 @@ async function removeBgWithKey(apiKey, imageBuffer) {
     const detalhe = detalheRemoveBg(error);
     const err = new Error(detalhe || error.message);
     err.status = error.status;
+    err.retryAfterMs = error.retryAfterMs;
     throw err;
   }
   const { json, buffer } = resposta;
@@ -100,14 +102,14 @@ async function customEndpoint(url, imageBuffer) {
     url,
     {},
     { image: { buffer: imageBuffer, filename: 'foto.jpg', type: 'image/jpeg' } },
-    { timeoutMs: 90_000 }
+    { timeoutMs: 90_000, allowPrivate: true }
   );
   if (buffer && looksLikePng(buffer)) return buffer;
   // algumas APIs devolvem JSON com a URL do resultado
   const candidate = json?.result || json?.url || json?.image || json?.data?.url;
   if (typeof candidate === 'string' && candidate.startsWith('http')) {
     const { fetchBuffer } = await import('../core/http.js');
-    const dl = await fetchBuffer(candidate, { timeoutMs: 60_000 });
+    const dl = await fetchBuffer(candidate, { timeoutMs: 60_000, allowPrivate: true });
     if (looksLikePng(dl)) return dl;
   }
   throw new Error('endpoint não devolveu PNG');
@@ -118,24 +120,29 @@ function localRembg(imageBuffer) {
   return new Promise((resolve, reject) => {
     const inFile = path.join(os.tmpdir(), `nexus-bg-${crypto.randomBytes(4).toString('hex')}.jpg`);
     const outFile = inFile.replace('.jpg', '.png');
-    fs.writeFileSync(inFile, imageBuffer);
+    const cleanup = () => {
+      fs.rmSync(inFile, { force: true });
+      fs.rmSync(outFile, { force: true });
+    };
+    try { fs.writeFileSync(inFile, imageBuffer); }
+    catch (error) { cleanup(); reject(new Error(`não consegui preparar a imagem local (${error.message})`)); return; }
     const proc = spawn('rembg', ['i', inFile, outFile], { stdio: 'ignore' });
     const timer = setTimeout(() => proc.kill('SIGKILL'), 180_000);
-    proc.on('error', (e) => {
+    timer.unref?.();
+    proc.on('error', (error) => {
       clearTimeout(timer);
-      reject(new Error(`rembg indisponível (${e.message}). Instale com: pip install rembg`));
+      cleanup();
+      reject(new Error(`rembg indisponível (${error.message}). Instale com: pip install rembg`));
     });
     proc.on('close', (code) => {
       clearTimeout(timer);
       try {
-        if (code === 0 && fs.existsSync(outFile)) {
-          resolve(fs.readFileSync(outFile));
-        } else {
-          reject(new Error(`rembg saiu com código ${code}`));
-        }
+        if (code === 0 && fs.existsSync(outFile)) resolve(fs.readFileSync(outFile));
+        else reject(new Error(`rembg saiu com código ${code}`));
+      } catch (error) {
+        reject(new Error(`não consegui ler o resultado local (${error.message})`));
       } finally {
-        fs.rmSync(inFile, { force: true });
-        fs.rmSync(outFile, { force: true });
+        cleanup();
       }
     });
   });
@@ -146,6 +153,8 @@ function localRembg(imageBuffer) {
  * @returns {Promise<{buffer: Buffer, via: string}>}
  */
 export async function removeBackground(imageBuffer) {
+  if (!Buffer.isBuffer(imageBuffer) || !imageBuffer.length) throw new Error('imagem inválida');
+  if (imageBuffer.length > MAX_BG_INPUT_BYTES) throw new Error('imagem excede o limite de 20 MB para remoção de fundo');
   const errors = [];
 
   // 1) pool remove.bg (várias contas)

@@ -1,18 +1,18 @@
 {
   "name": "nexus-bot",
   "version": "7.0.0",
-  "description": "⚡ NEXUS — WhatsApp Multi-Device bot: View Once, Anti-Delete com filtros, Stickers com remoção de fundo por IA (pool de APIs), figurinha automática direto de um link (.s <link>), IA completa (chat, imagens, voz, tradução) e downloader universal (Pinterest, TikTok, Instagram e mais), com melhor qualidade por padrão. Termux-first, também roda em Linux e Windows.",
+  "description": "MontxBOT — WhatsApp Multi-Device bot for stickers, downloads and opt-in chat utilities. Termux-first, also runs on Linux and Windows.",
   "type": "module",
   "main": "src/main.js",
   "scripts": {
     "start": "node src/main.js",
     "pair": "node scripts/pair.mjs",
     "doctor": "node scripts/doctor.mjs",
-    "test": "node --test tests/unit.test.mjs tests/integration.test.mjs tests/downloaders.test.mjs tests/freshness.test.mjs tests/sticker-fit.test.mjs tests/sticker-link.test.mjs tests/env-loading.test.mjs tests/bgremoval.test.mjs",
+    "test": "node scripts/test.mjs",
     "env": "node scripts/env-report.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.0.0"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "6.7.24",

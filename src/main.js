@@ -118,7 +118,7 @@ async function boot() {
   await startClient({
     onOpen(sock) {
       owner.setFromSocket(sock);
-      log.ok(`MontxBOT no ar  ·  modo privado exclusivo (${owner.jid || 'dono'})`);
+      log.ok('MontxBOT no ar · modo privado exclusivo do dono');
     },
     onMessage: async (sock, msg, type) => {
       owner.setFromSocket(sock);
@@ -143,20 +143,27 @@ async function boot() {
 
 boot().catch((error) => {
   log.error('falha fatal no boot', error);
-  process.exit(1);
+  shutdown('falha no boot', 1);
 });
 
 // ── encerramento limpo ─────────────────────────────────────
 let exiting = false;
-function shutdown(signal) {
-  if (exiting) process.exit(0);
+function shutdown(signal, exitCode = 0) {
+  if (exiting) return;
   exiting = true;
-  log.warn(`recebido ${signal} — salvando e saindo…`);
-  flushStore();
+  process.exitCode = exitCode;
+  log.warn(`recebido ${signal} — salvando e encerrando…`);
   stopClient();
-  setTimeout(() => process.exit(0), 500).unref();
+  flushStore();
+  setTimeout(() => process.exit(exitCode), 750).unref();
 }
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('uncaughtException', (err) => log.error('exceção não tratada', err));
-process.on('unhandledRejection', (err) => log.error('promise rejeitada', err));
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.on('uncaughtException', (error) => {
+  log.error('exceção não tratada; encerrando para evitar estado inconsistente', error);
+  shutdown('uncaughtException', 1);
+});
+process.on('unhandledRejection', (error) => {
+  log.error('promise rejeitada sem tratamento; encerrando para evitar estado inconsistente', error);
+  shutdown('unhandledRejection', 1);
+});

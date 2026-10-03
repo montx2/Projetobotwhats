@@ -2,14 +2,21 @@
 // Verifica: modo privado exclusivo do dono, bloqueio total em grupos/terceiros
 // não autorizados, .autorizar/.desautorizar, edição de progresso e anti-delete no privado.
 
-import test from 'node:test';
+import { beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { setDnsLookupForTests } from '../src/core/http.js';
 
-process.env.NEXUS_DATA_DIR = new URL('./tmp-data', import.meta.url).pathname;
+process.env.NEXUS_DATA_DIR ||= new URL('./tmp-data', import.meta.url).pathname;
+setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
 
-import { handleMessage } from '../src/features/router.js';
-import { messageCache } from '../src/wa/cache.js';
-import { cfg } from '../src/core/config.js';
+const { DEFAULT_CONFIG, cfg } = await import('../src/core/config.js');
+const { handleMessage } = await import('../src/features/router.js');
+const { messageCache } = await import('../src/wa/cache.js');
+
+beforeEach(() => {
+  Object.assign(cfg.get(), structuredClone(DEFAULT_CONFIG));
+  messageCache.clearAll();
+});
 
 const OWNER_JID = '5511900000000@s.whatsapp.net';
 
@@ -164,9 +171,19 @@ test('autorização: ". ativar" libera TUDO no grupo/privado, MENOS View Once e 
   assert.equal(sock.sent.length, afterDeactivate, 'Após .desativar, o grupo volta a ficar 100% silencioso');
 });
 
-test('anti-delete: envia mensagem apagada SOMENTE para o privado do dono (nunca no grupo)', async () => {
+test('anti-delete: sem opt-in mensagens não entram no cache', async () => {
+  const sock = makeSock();
+  const original = textMsg(OWNER_JID, 'não reter por padrão', { id: 'NO_OPT_IN' });
+  await handleMessage(sock, original, makeDeps(sock, 'notify'));
+  assert.equal(messageCache.get(OWNER_JID, 'NO_OPT_IN'), null);
+  assert.equal(sock.sent.length, 0);
+});
+
+test('anti-delete: opt-in por chat envia mensagem apagada SOMENTE ao privado do dono', async () => {
   const sock = makeSock();
   const chat = 'grupo-teste@g.us';
+  cfg.get().autorizados = [chat];
+  cfg.get().antiDelete.chats = [chat];
   const deps = makeDeps(sock);
 
   // mensagem original chega e é cacheada
@@ -194,6 +211,8 @@ test('anti-delete: filtro "grupos" impede restauração em grupo', async () => {
   cfg.get().antiDelete.ignorar = ['grupos'];
   const sock = makeSock();
   const chat = 'grupo2@g.us';
+  cfg.get().autorizados = [chat];
+  cfg.get().antiDelete.chats = [chat];
   const deps = makeDeps(sock);
 
   const original = textMsg(chat, 'segredo do grupo', { id: 'ORIG2', fromMe: false });
@@ -212,6 +231,8 @@ test('anti-delete: filtro "grupos" impede restauração em grupo', async () => {
 test('anti-delete: mensagem própria apagada não é reportada', async () => {
   const sock = makeSock();
   const chat = '5533@s.whatsapp.net';
+  cfg.get().autorizados = [chat];
+  cfg.get().antiDelete.chats = [chat];
   const deps = makeDeps(sock);
   const mine = textMsg(chat, 'minha msg', { id: 'ORIG3', fromMe: true });
   messageCache.put(mine);
@@ -223,7 +244,7 @@ test('anti-delete: mensagem própria apagada não é reportada', async () => {
   assert.ok(!sock.sent.some((s) => JSON.stringify(s.content).includes('minha msg')));
 });
 
-test('view once: responder com qualquer mensagem no privado do dono dispara captura', async () => {
+test('privacidade: responder a uma View Once com texto comum não dispara captura', async () => {
   const sock = makeSock();
   const deps = makeDeps(sock);
 
@@ -242,7 +263,7 @@ test('view once: responder com qualquer mensagem no privado do dono dispara capt
     }
   };
   await handleMessage(sock, replyMsg, deps);
-  assert.ok(true);
+  assert.equal(sock.sent.length, 0, 'captura automática não é iniciada por resposta livre');
 });
 
 test('view once: texto comum sem citação NÃO dispara captura', async () => {
@@ -270,6 +291,24 @@ test('dono pode adicionar e remover filtros de ignorar', async () => {
   assert.ok(!cfg.get().antiDelete.ignorar.includes('grupos'));
 });
 
+test('automação é habilitada e desabilitada por chat, com limpeza do cache', async () => {
+  const sock = makeSock();
+  const deps = makeDeps(sock);
+
+  await handleMessage(sock, textMsg(OWNER_JID, '.vo on aqui'), deps);
+  assert.deepEqual(cfg.get().viewOnce.autoChats, [OWNER_JID]);
+  await handleMessage(sock, textMsg(OWNER_JID, '.vo off aqui'), deps);
+  assert.deepEqual(cfg.get().viewOnce.autoChats, []);
+
+  const cached = textMsg(OWNER_JID, 'apagável', { id: 'CLEAR1' });
+  cfg.get().antiDelete.chats = [OWNER_JID];
+  messageCache.put(cached, { persist: true });
+  assert.ok(messageCache.get(OWNER_JID, 'CLEAR1'));
+  await handleMessage(sock, textMsg(OWNER_JID, '.antidelete off aqui'), deps);
+  assert.equal(messageCache.get(OWNER_JID, 'CLEAR1'), null);
+  assert.deepEqual(cfg.get().antiDelete.chats, []);
+});
+
 test('sticker sem mídia responde instruções no privado do dono', async () => {
   const sock = makeSock();
   await handleMessage(sock, textMsg(OWNER_JID, '.s'), makeDeps(sock));
@@ -291,6 +330,8 @@ test('comando desconhecido não responde por padrão', async () => {
 test('anti-delete: revoke com a MESMA key da original (upsert) envia ao privado do dono', async () => {
   const sock = makeSock();
   const chat = '5560@s.whatsapp.net';
+  cfg.get().autorizados = [chat];
+  cfg.get().antiDelete.chats = [chat];
   const keyOfOriginal = { remoteJid: chat, id: 'REVUPD1', fromMe: false };
 
   await handleMessage(
@@ -313,6 +354,8 @@ test('anti-delete: revoke com a MESMA key da original (upsert) envia ao privado 
 test('anti-delete: revoke via messages.update (type update) envia ao privado do dono', async () => {
   const sock = makeSock();
   const chat = '5563@s.whatsapp.net';
+  cfg.get().autorizados = [chat];
+  cfg.get().antiDelete.chats = [chat];
   const keyOfOriginal = { remoteJid: chat, id: 'REVUPD2', fromMe: false };
 
   await handleMessage(
@@ -331,8 +374,9 @@ test('anti-delete: revoke via messages.update (type update) envia ao privado do 
   assert.equal(restored.jid, OWNER_JID);
 });
 
-test('backlog (append) não executa comando nem responde, mas fica no cache', async () => {
+test('backlog (append) não executa comando nem responde, mas fica no cache se Anti-Delete está opt-in', async () => {
   const sock = makeSock();
+  cfg.get().antiDelete.chats = [OWNER_JID];
   const msg = textMsg(OWNER_JID, '.menu', { id: 'APPEND1' });
   await handleMessage(sock, msg, makeDeps(sock, 'append'));
 
@@ -353,30 +397,19 @@ test('reentrega da mesma mensagem ao vivo não responde duas vezes', async () =>
 
 function jsonRes(body, { status = 200 } = {}) {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
-  return {
-    status,
-    ok: status >= 200 && status < 300,
-    url: 'https://mock/',
-    headers: { get: (k) => ({ 'content-type': 'application/json' })[String(k).toLowerCase()] ?? null },
-    text: async () => text,
-    body: null
-  };
+  return new Response(text, { status, headers: { 'content-type': 'application/json' } });
 }
 
 function bufferRes(buf) {
-  return {
+  return new Response(buf, {
     status: 200,
-    ok: true,
-    url: 'https://mock/',
-    headers: { get: (k) => ({ 'content-type': 'video/mp4', 'content-length': String(buf.length) })[String(k).toLowerCase()] ?? null },
-    text: async () => buf.toString('latin1'),
-    body: new ReadableStream({
-      start(c) {
-        c.enqueue(new Uint8Array(buf));
-        c.close();
-      }
-    })
-  };
+    headers: { 'content-type': 'video/mp4', 'content-length': String(buf.length) }
+  });
+}
+
+async function freshResponse(response) {
+  const body = response.body ? await response.clone().arrayBuffer() : null;
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 async function withMockedFetch(routes, fn) {
@@ -385,7 +418,8 @@ async function withMockedFetch(routes, fn) {
     const u = String(url);
     for (const [matcher, responder] of routes) {
       if (typeof matcher === 'string' ? u.includes(matcher) : matcher.test(u)) {
-        return typeof responder === 'function' ? responder(u) : responder;
+        const response = typeof responder === 'function' ? responder(u) : responder;
+        return response instanceof Response ? freshResponse(response) : response;
       }
     }
     return jsonRes({}, { status: 404 });

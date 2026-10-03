@@ -14,7 +14,7 @@
 import { SYM, ok, warn, fail, wait } from '../core/ui.js';
 import { cfg } from '../core/config.js';
 import { log } from '../core/logger.js';
-import { fetchBuffer, formatBytes, mediaReferer } from '../core/http.js';
+import { assertPublicHttpUrl, fetchBuffer, formatBytes, mediaReferer, shortUrl } from '../core/http.js';
 import { truncate } from '../util/text.js';
 import { parseQuality, qualityLabel } from './downloaders/quality.js';
 import { isTikTokUrl, downloadTikTok, tiktokAudio } from './downloaders/tiktok.js';
@@ -29,6 +29,8 @@ import { hasYtDlp, ytdlpBuffer, ytdlpInfo } from './downloaders/ytdlp.js';
 import { probeStream } from './downloaders/media.js';
 
 export { parseQuality };
+
+const HARD_DOWNLOAD_LIMIT = 200 * 1024 * 1024;
 
 const PLATFORM_DETECT = [
   { test: isTikTokUrl, name: 'TikTok' },
@@ -59,7 +61,7 @@ export function isKnownSocialUrl(url) {
 /** Baixa uma URL de mídia aplicando o Referer que o CDN costuma exigir. */
 async function downloadMedia(url, onProgress, maxBytes = 200 * 1024 * 1024) {
   const referer = mediaReferer(url);
-  log.dl(`baixando ${String(url).slice(0, 70)}…`);
+  log.dl(`baixando ${shortUrl(url)}…`);
   return fetchBuffer(url, {
     timeoutMs: 180_000,
     maxBytes,
@@ -68,20 +70,20 @@ async function downloadMedia(url, onProgress, maxBytes = 200 * 1024 * 1024) {
 }
 
 /** Extrator dedicado por plataforma (null = usa o caminho genérico). */
-async function byPlatform(url, platform, quality, audioOnly) {
+async function byPlatform(url, platform, quality, audioOnly, maxBytes) {
   switch (platform) {
     case 'TikTok':
-      return audioOnly ? tiktokAudio(url) : downloadTikTok(url, quality);
+      return audioOnly ? tiktokAudio(url, { maxBytes }) : downloadTikTok(url, quality, { maxBytes });
     case 'Instagram':
-      return downloadInstagram(url, quality);
+      return downloadInstagram(url, quality, { maxBytes });
     case 'Pinterest':
-      return downloadPinterest(url, quality);
+      return downloadPinterest(url, quality, { maxBytes });
     case 'YouTube':
-      return downloadYouTube(url, quality, { audioOnly });
+      return downloadYouTube(url, quality, { audioOnly, maxBytes });
     case 'X (Twitter)':
-      return downloadTwitter(url, quality);
+      return downloadTwitter(url, quality, { maxBytes });
     case 'Facebook':
-      return downloadFacebook(url, quality);
+      return downloadFacebook(url, quality, { maxBytes });
     default:
       return null;
   }
@@ -111,21 +113,27 @@ async function downloadItemWithAlternates(item, alternates, onProgress, maxBytes
 
 /** Baixa os buffers de resultados que vieram só com URLs. */
 async function withBuffers(result, onProgress, maxBytes) {
-  if (result.buffers?.length) return result;
+  if (result.buffers?.length) return validateResultBufferLimits(result, maxBytes);
   const items = (result.media || []).slice(0, 10);
   if (!items.length) throw new Error('o extrator não devolveu mídia');
+  const perFileLimit = Math.min(HARD_DOWNLOAD_LIMIT, Math.max(1, Number(maxBytes) || 1));
+  const totalLimit = Math.min(HARD_DOWNLOAD_LIMIT, perFileLimit * 2);
   const buffers = [];
+  let total = 0;
   for (let i = 0; i < items.length; i++) {
+    const remaining = totalLimit - total;
+    if (remaining < 1) throw new Error(`lote excede o limite agregado de ${formatBytes(totalLimit)}`);
     if (items.length > 1) {
       await onProgress?.(wait(`Baixando mídia ${i + 1}/${items.length}`));
     }
-    buffers.push(
-      i === 0
-        ? await downloadItemWithAlternates(items[i], result.alternates, onProgress, maxBytes)
-        : await downloadMedia(items[i].url, onProgress, maxBytes)
-    );
+    const limit = Math.min(perFileLimit, remaining);
+    const buffer = i === 0
+      ? await downloadItemWithAlternates(items[i], result.alternates, onProgress, limit)
+      : await downloadMedia(items[i].url, onProgress, limit);
+    total += buffer.length;
+    buffers.push(buffer);
   }
-  return { ...result, buffers };
+  return validateResultBufferLimits({ ...result, buffers }, perFileLimit);
 }
 
 /**
@@ -141,12 +149,25 @@ async function firstOf(strategies) {
       errors.push(`${label}: sem mídia`);
     } catch (error) {
       errors.push(`${label}: ${String(error.message || error).slice(0, 110)}`);
-      log.warn(`${label} falhou: ${error.message}`);
+      log.warn(`${label} falhou`, { name: error?.name, status: error?.status, code: error?.code });
     }
   }
   const err = new Error(errors.join(' | ') || 'nenhum extrator disponível');
   err.details = errors;
   throw err;
+}
+
+function validateResultBufferLimits(result, maxBytes) {
+  const buffers = [...(result?.buffers || []), ...(result?.audioBuffer ? [result.audioBuffer] : [])];
+  const perFileLimit = Math.min(HARD_DOWNLOAD_LIMIT, Math.max(1, Number(maxBytes) || 1));
+  const totalLimit = Math.min(HARD_DOWNLOAD_LIMIT, perFileLimit * 2);
+  let total = 0;
+  for (const buffer of buffers) {
+    total += buffer?.length || 0;
+    if ((buffer?.length || 0) > perFileLimit) throw new Error(`arquivo excede o limite de ${formatBytes(perFileLimit)}`);
+  }
+  if (total > totalLimit) throw new Error(`lote excede o limite agregado de ${formatBytes(totalLimit)}`);
+  return result;
 }
 
 /**
@@ -159,20 +180,26 @@ async function firstOf(strategies) {
  * @returns {Promise<{platform,title,author,duration,kind,buffers,audioBuffer,media}>}
  */
 export async function resolveDownload(url, quality = 'melhor', { audioOnly = false, onProgress, maxBytes } = {}) {
+  const requestedUrl = String(url || '').trim();
+  if (!requestedUrl) throw new Error('informe uma URL para baixar');
+  url = await assertPublicHttpUrl(requestedUrl);
+  const configuredLimit = Math.min(HARD_DOWNLOAD_LIMIT, Math.max(1, Number(cfg.get().maxMB || 90) * 1024 * 1024));
+  const requestedLimit = Number(maxBytes);
+  maxBytes = Math.min(HARD_DOWNLOAD_LIMIT, Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.max(1, Math.floor(requestedLimit)) : configuredLimit);
   const platform = detectPlatform(url) || 'Web';
   const qLabel = qualityLabel(quality);
   await onProgress?.(wait(`Buscando em ${platform} · ${qLabel}`));
 
   const strategies = [];
 
-  const dedicated = await byPlatform(url, platform, quality, audioOnly).catch((error) => {
-    log.warn(`${platform} (dedicado): ${error.message}`);
+  const dedicated = await byPlatform(url, platform, quality, audioOnly, maxBytes).catch((error) => {
+    log.warn(`${platform} (dedicado) falhou`, { name: error?.name, status: error?.status, code: error?.code });
     return null;
   });
   if (dedicated?.media?.length || dedicated?.buffers?.length) {
     const enriched = dedicated;
     const out = await withBuffers(enriched, onProgress, maxBytes).catch(async (error) => {
-      log.warn(`download de buffers falhou (${error.message}) — tentando reservas`);
+      log.warn('download de buffers falhou; tentando reservas', { name: error?.name, status: error?.status, code: error?.code });
       return null;
     });
     if (out?.buffers?.length) return normalize(out, platform);
@@ -194,7 +221,7 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
     strategies.push([
       'cobalt',
       async () => {
-        const { buffers, audioBuffer, ...rest } = await cobaltDownload(url, quality, { audioOnly });
+        const { buffers, audioBuffer, ...rest } = await cobaltDownload(url, quality, { audioOnly, maxBytes });
         return buffers?.length ? { ...rest, buffers, audioBuffer } : null;
       }
     ]);
@@ -205,7 +232,7 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
       'yt-dlp',
       async () => {
         await onProgress?.(wait('Usando yt-dlp local'));
-        const { buffer } = await ytdlpBuffer(url, { audioOnly });
+        const { buffer } = await ytdlpBuffer(url, { audioOnly, maxBytes });
         const info = await ytdlpInfo(url).catch(() => null);
         return {
           platform,
@@ -331,12 +358,12 @@ export async function autoDownload(sock, msg, urls, { reply }) {
   for (const url of urls.slice(0, 3)) {
     const platform = detectPlatform(url) || 'Web';
     try {
-      log.dl(`auto-download ${platform}: ${url.slice(0, 80)}`);
+      log.dl(`auto-download ${platform}: ${shortUrl(url)}`);
       await reply(wait(`Baixando de ${platform}`));
       const result = await resolveDownload(url, quality, { onProgress: reply });
       await sendDownload(sock, msg.key.remoteJid, result, { quality, url, onProgress: reply, quoted: msg });
     } catch (error) {
-      log.warn(`auto-download falhou: ${error.message}`);
+      log.warn('auto-download falhou', { name: error?.name, status: error?.status, code: error?.code });
       await reply(fail(`Não consegui baixar (${platform})`, String(error.message).slice(0, 160))).catch(
         () => {}
       );

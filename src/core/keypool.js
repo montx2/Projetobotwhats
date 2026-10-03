@@ -1,10 +1,6 @@
-// KeyPool — o motor de "contas ilimitadas" do NEXUS.
-//
-// A ideia: vários provedores gratuitos cobram por chave/conta. Em vez de UMA
-// chave, você configura VÁRIAS (de contas diferentes) e o pool gira entre elas
-// em round-robin. Quando uma chave estoura o limite (HTTP 402/403/429), ela
-// entra em "geladeira" (cooldown) e o pool passa para a próxima. Resultado:
-// praticamente requisições ilimitadas, igual você já fazia. 🚀
+// KeyPool — rotação justa de credenciais/instâncias configuradas pelo operador.
+// Limites e cooldowns são respeitados; pools não tornam cotas ilimitadas nem
+// devem ser usados para contornar políticas do provedor.
 
 export class KeyPool {
   /**
@@ -50,10 +46,9 @@ export class KeyPool {
         return item;
       }
     }
-    // Todos em cooldown: devolve o que libera antes (melhor que nada).
-    const fallback = [...this.items].filter((i) => !skip.has(i))
-      .sort((a, b) => (this.cooldowns.get(a) || 0) - (this.cooldowns.get(b) || 0))[0];
-    return fallback ?? null;
+    // Não reutilize uma chave que ainda está limitada só porque as demais
+    // também estão em cooldown; o chamador pode usar outro provedor/fallback.
+    return null;
   }
 
   /** Marca sucesso (tira da geladeira). */
@@ -64,7 +59,8 @@ export class KeyPool {
 
   /** Marca falha: item entra em cooldown. */
   reportFailure(item, { cooldownMs = this.cooldownMs, reason = '' } = {}) {
-    this.cooldowns.set(item, Date.now() + cooldownMs);
+    const duration = Math.max(1_000, Math.min(60 * 60_000, Number(cooldownMs) || this.cooldownMs));
+    this.cooldowns.set(item, Date.now() + duration);
     this.#touch(item, 'fail');
     return reason;
   }
@@ -88,19 +84,29 @@ export class KeyPool {
       } catch (error) {
         errors.push(error);
         if (isExhausted(error)) {
-          this.reportFailure(item, { reason: error?.message || 'limite' });
+          const requestedCooldown = Number(error?.retryAfterMs);
+          this.reportFailure(item, {
+            cooldownMs: Number.isFinite(requestedCooldown) && requestedCooldown > 0 ? requestedCooldown : this.cooldownMs,
+            reason: error?.message || 'limite'
+          });
         } else {
           this.#touch(item, 'fail');
           // Erro não-limite: não esfria a chave, mas tenta a próxima mesmo assim.
         }
       }
     }
+    const now = Date.now();
+    const available = this.items.filter((item) => !this.cooldowns.has(item) || this.cooldowns.get(item) <= now);
+    const pendingCooldowns = this.items.map((item) => (this.cooldowns.get(item) || 0) - now).filter((ms) => ms > 0);
+    const retryAfterMs = pendingCooldowns.length ? Math.min(...pendingCooldowns) : 0;
+    const detail = errors.map((error) => String(error?.message || error).slice(0, 120)).join(' | ');
     const err = new Error(
-      `Todos os ${this.items.length} itens do pool "${this.name}" falharam${label ? ` (${label})` : ''}: ` +
-        errors.map((e) => String(e?.message || e).slice(0, 120)).join(' | ')
+      `${available.length ? `Todos os ${this.items.length} itens do pool "${this.name}" falharam` : `Pool "${this.name}" em cooldown`}` +
+        `${label ? ` (${label})` : ''}${detail ? `: ${detail}` : ''}`
     );
     err.pool = this.name;
     err.causes = errors;
+    if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) err.retryAfterMs = retryAfterMs;
     throw err;
   }
 

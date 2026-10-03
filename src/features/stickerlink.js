@@ -410,7 +410,7 @@ export async function stickerSourcesForCommand({
       const source = await downloadStickerSource(targets[i], { onProgress });
       sources.push({ ...source, link: targets[i] });
     } catch (error) {
-      log.warn(`figurinha do link ${shortUrl(targets[i])} falhou: ${error.message}`);
+      log.warn(`figurinha do link ${shortUrl(targets[i])} falhou`, { name: error?.name, status: error?.status, code: error?.code });
       failures.push(`${shortUrl(targets[i])}: ${String(error.message || error).slice(0, 200)}`);
     }
   }

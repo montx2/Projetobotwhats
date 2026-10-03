@@ -122,7 +122,7 @@ async function viaPhoto(resolvedUrl, originalUrl) {
  * @param {string} url link do Facebook
  * @param {'melhor'|'alta'|'media'|'baixa'} quality
  */
-export async function downloadFacebook(url, quality = 'melhor') {
+export async function downloadFacebook(url, quality = 'melhor', { maxBytes } = {}) {
   if (isFacebookStory(url)) {
     throw new Error('Story do Facebook: o FB só serve stories para contas logadas — não dá para baixar por aqui.');
   }
@@ -180,7 +180,7 @@ export async function downloadFacebook(url, quality = 'melhor') {
   // 3) Cobalt
   log.dl('facebook: tentando via cobalt…');
   try {
-    const { buffers, audioBuffer, ...rest } = await cobaltDownload(resolved, quality);
+    const { buffers, audioBuffer, ...rest } = await cobaltDownload(resolved, quality, { maxBytes });
     if (buffers?.length) return baseResult({ ...rest, buffers, audioBuffer });
     errors.push('cobalt: sem buffer');
   } catch (error) {

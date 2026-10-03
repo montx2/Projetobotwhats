@@ -348,7 +348,12 @@ function scheduleReconnect(handlers, delayMs, code) {
 
 export function stopClient() {
   stopping = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   try {
     socket?.end(undefined);
   } catch {}
+  socket = null;
 }

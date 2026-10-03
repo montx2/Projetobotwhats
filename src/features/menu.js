@@ -68,11 +68,11 @@ export function ownerMenu() {
       ['.desativar tudo', 'bloqueia todos de uma vez'],
       ['.ativos', 'lista os chats liberados']
     ]),
-    section('View Once', [['.vo', 'status'], ['.vo on | off', 'captura automática']], {
-      note: 'silencioso: tudo cai só no seu privado'
+    section('View Once', [['.vo', 'status'], ['.vo on | off', 'automação opt-in por chat']], {
+      note: 'mídias capturadas são enviadas somente ao privado do dono'
     }),
     section('Anti-Delete', [['.antidelete', 'status e filtros']], {
-      note: 'silencioso: apagadas chegam só no seu privado'
+      note: 'retenção opt-in; mensagens recuperáveis vão somente ao privado do dono'
     }),
     section('Figurinhas', STICKER_ITEMS),
     section('Downloads', [...DOWNLOAD_ITEMS, ['.menudl', 'guia completo']]),
@@ -151,8 +151,8 @@ export function stickerMenu() {
 
 export function antiDeleteMenu() {
   return card([
-    header('Anti-Delete', 'proteção silenciosa'),
-    `Tudo que apagarem chega só no seu privado.\n_Nenhum rastro no grupo ou chat._`,
+    header('Anti-Delete', 'retenção local opt-in'),
+    `Em chats habilitados, mensagens recuperáveis podem ser retidas por até 24 horas e enviadas somente ao privado do dono.`,
     section('Comandos', [
       ['.antidelete', 'status'],
       ['.antidelete on | off', 'liga ou desliga'],

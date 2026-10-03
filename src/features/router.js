@@ -1,5 +1,4 @@
-// 🧭 ROUTER — despacha comandos, captura view once real em silêncio,
-// aplica anti-delete silencioso (somente para o privado do dono) e controla acesso.
+// 🧭 ROUTER — despacha comandos, aplica controles explícitos por chat e acesso.
 //
 // REGRAS DE OURO:
 // 1) View Once e Anti-Delete enviam EXCLUSIVAMENTE para o privado do dono
@@ -12,15 +11,16 @@
 
 import { isStale, alreadySeen } from '../core/freshness.js';
 import { cfg, envSummary } from '../core/config.js';
+import { shortUrl } from '../core/http.js';
 import { log } from '../core/logger.js';
-import { messageCache, isBotSent, markBotSent } from '../wa/cache.js';
+import { messageCache, isBotSent, markBotSent, containsViewOnce } from '../wa/cache.js';
 import { extractAnyText, isIgnored, normalizeIgnoreTarget, handleDelete, statusText } from './antidelete.js';
 import { SYM, header, section, card, footer, ok, fail, warn, wait, usage, kv, toggle } from '../core/ui.js';
-import { isViewOnce, onViewOnceMessage, onViewOnceReply, unwrapViewOnce } from './viewonce.js';
+import { isViewOnce, onViewOnceMessage, unwrapViewOnce } from './viewonce.js';
 import { makeSticker, packInfo, isAnimatedWebp, parseFit } from './sticker.js';
 import { stickerSourcesForCommand } from './stickerlink.js';
 import { removeBackground, bgStatus, bgPools } from './bgremoval.js';
-import { aiChat, aiImage, aiVoice, aiTranslate, aiSummary, resetChatMemory, aiStatus } from './ai.js';
+import { aiChat, aiImage, aiVoice, aiTranslate, aiSummary, resetChatMemory, resetChatMemoryForChat, aiStatus } from './ai.js';
 import { resolveDownload, sendDownload, parseQuality, autoDownload, isKnownSocialUrl } from './download.js';
 import {
   ownerMenu,
@@ -31,12 +31,63 @@ import {
   antiDeleteMenu,
   infoText
 } from './menu.js';
-import { extractUrls, truncate, prettyJid, uptimeText, isGroup } from '../util/text.js';
+import { extractUrls, truncate, uptimeText, isGroup, normalizeJid } from '../util/text.js';
 import { hasFfmpeg } from '../util/ffmpeg.js';
 import { cobaltPool } from './downloaders/cobalt.js';
-import { hasYtDlp } from './downloaders/ytdlp.js';
+import { hasYtDlp, isYtdlpEnabled, findYtdlp } from './downloaders/ytdlp.js';
+import { SlidingWindowLimiter } from '../core/limiter.js';
 
 const STARTED_AT = Date.now();
+const expensiveLimiter = new SlidingWindowLimiter({ limit: 6, windowMs: 60_000, minIntervalMs: 2_000 });
+const MAX_CONCURRENT_EXPENSIVE = 3;
+let activeExpensive = 0;
+const EXPENSIVE_COMMANDS = new Set([
+  's', 'fig', 'figu', 'sticker', 'stiker', 'figurinha', 'sfundo', 'stickerfundo', 'sfundinho',
+  'fundo', 'removefundo', 'rmbg', 'removebg', 'ia', 'ai', 'gpt', 'chat', 'criar', 'img',
+  'gerar', 'imagine', 'desenhar', 'voz', 'tts', 'falar', 'traduz', 'traduzir', 'resumo', 'resumir',
+  'dl', 'download', 'baixar', 'tt', 'tiktok', 'tiktokdl', 'ttmp3', 'tiktokmp3', 'ttaudio',
+  'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels', 'yt', 'youtube', 'ytb',
+  'video', 'ytmp3', 'youtubemp3', 'ytaudio', 'mp3', 'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb'
+]);
+const MEDIA_KEYS = new Set(['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage', 'documentMessage']);
+const MESSAGE_WRAPPERS = new Set([
+  'ephemeralMessage', 'deviceSentMessage', 'documentWithCaptionMessage', 'editedMessage',
+  'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension'
+]);
+
+function hasNestedMedia(message, depth = 0) {
+  if (!message || typeof message !== 'object' || depth > 8) return false;
+  if (Object.keys(message).some((key) => MEDIA_KEYS.has(key))) return true;
+  return [...MESSAGE_WRAPPERS].some((wrapper) => hasNestedMedia(message[wrapper]?.message, depth + 1));
+}
+
+function hasQuotedMessage(message, depth = 0) {
+  if (!message || typeof message !== 'object' || depth > 8) return false;
+  for (const [key, value] of Object.entries(message)) {
+    if (value?.contextInfo?.quotedMessage) return true;
+    if (MESSAGE_WRAPPERS.has(key) && hasQuotedMessage(value?.message, depth + 1)) return true;
+  }
+  return false;
+}
+
+function isExpensiveRequest(command, msg) {
+  if (!EXPENSIVE_COMMANDS.has(command.name)) return false;
+  const name = command.name;
+  const args = command.args || [];
+  const quoted = hasQuotedMessage(msg.message);
+  const hasAttachment = hasNestedMedia(msg.message);
+  if (['s', 'fig', 'figu', 'sticker', 'stiker', 'figurinha', 'sfundo', 'stickerfundo', 'sfundinho', 'fundo', 'removefundo', 'rmbg', 'removebg'].includes(name)) {
+    return Boolean(args.length || hasAttachment || quoted);
+  }
+  if (['dl', 'download', 'baixar', 'tt', 'tiktok', 'tiktokdl', 'ttmp3', 'tiktokmp3', 'ttaudio', 'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels', 'yt', 'youtube', 'ytb', 'video', 'ytmp3', 'youtubemp3', 'ytaudio', 'mp3', 'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb'].includes(name)) {
+    return Boolean(pickUrl(args));
+  }
+  if (['ia', 'ai', 'gpt', 'chat'].includes(name)) {
+    if (args[0]?.toLowerCase() === 'reset') return false;
+    return Boolean(args.length || quoted);
+  }
+  return Boolean(args.length || quoted);
+}
 
 export { isViewOnce, unwrapViewOnce };
 
@@ -117,10 +168,7 @@ function isBotGeneratedText(text) {
 }
 
 function bareId(jid) {
-  return String(jid || '')
-    .toLowerCase()
-    .replace(/:\d+@/, '@')
-    .trim();
+  return normalizeJid(jid);
 }
 
 function bareDigits(jid) {
@@ -270,7 +318,7 @@ async function stickerSourcesOrReply({ sock, msg, args, allowViewOnce, reply }) 
   try {
     return await stickerSourcesForCommand({ sock, msg, args, allowViewOnce, onProgress: reply });
   } catch (error) {
-    log.warn(`figurinha por link falhou: ${error.message}`);
+    log.warn('figurinha por link falhou', { name: error?.name, status: error?.status, code: error?.code });
     await reply(
       fail(
         'Não consegui criar a figurinha',
@@ -306,46 +354,44 @@ export async function handleMessage(sock, msg, deps) {
   const text = extractAnyText(msg.message).trim();
   if (msg.key?.fromMe && isBotGeneratedText(text)) return;
 
-  // 0) Anti-delete: armazena tudo em memória (100% em silêncio)
-  messageCache.put(msg);
-
-  // 0.1) Backlog/histórico/reentrega: guarda no cache mas NÃO age.
-  const revoke = isRevokeMessage(msg);
-  if (isStale(msg, deps.type) || (!revoke && alreadySeen(msg))) {
-    noteStale();
-    return;
-  }
-
-  // 1) Mensagem apagada (REVOKE) → envia 100% EM SILÊNCIO SOMENTE para o privado do dono (0 rastros no grupo/chat)
-  if (revoke) {
-    await handleDelete(sock, msg, { ownerJid }).catch((e) => log.warn(`antidelete: ${e.message}`));
-    return;
-  }
-
-  // 2) View once REAL recebida → baixa 100% EM SILÊNCIO e envia SOMENTE para o privado do dono (0 rastros)
-  if (!msg.key.fromMe && isViewOnce(msg.message)) {
-    await onViewOnceMessage(sock, msg, { ownerJid }).catch((e) => log.warn(`view once: ${e.message}`));
-  }
-
   const senderIsOwner = Boolean(msg.key?.fromMe || isOwner?.(jid, msg.key.participant));
   const inOwnerPrivate =
     typeof deps.isOwnerPrivateChat === 'function'
       ? deps.isOwnerPrivateChat(jid, msg)
       : !isGroup(jid) && Boolean(isOwner?.(jid));
   const authorized = isAuthorizedTarget(jid, msg.key.participant);
+  const allowedChat = inOwnerPrivate || authorized;
+  const revoke = isRevokeMessage(msg);
+  const viewOnce = isViewOnce(msg.message);
+  const containsViewOncePayload = containsViewOnce(msg.message);
 
-  // 3) O dono respondeu uma View Once REAL em QUALQUER chat/grupo →
-  //    baixa em silêncio e manda SOMENTE pro privado do dono (0 rastros na conversa da pessoa/grupo!)
-  if (senderIsOwner) {
-    const captured = await onViewOnceReply(sock, msg, {
-      ownerJid,
-      senderIsOwner: true
-    }).catch((e) => {
-      log.warn(`view once resposta: ${e.message}`);
-      return false;
-    });
-    // Se a resposta foi em outro chat e não é um comando, termina aqui em silêncio absoluto
-    if (captured && !inOwnerPrivate) return;
+  // Nenhum histórico é armazenado por padrão. Só chats autorizados com
+  // Anti-Delete explicitamente habilitado entram no cache persistente; View Once
+  // (inclusive citada) nunca é retida e revogações não substituem a original.
+  const antiDelete = cfg.get().antiDelete;
+  const antiDeleteEnabled = Array.isArray(antiDelete.chats) &&
+    antiDelete.chats.some((chat) => bareId(chat) === bareId(jid)) &&
+    !isIgnored(jid, antiDelete.ignorar);
+  if (!revoke && allowedChat && antiDeleteEnabled && !containsViewOncePayload) {
+    messageCache.put(msg, { persist: true, ttlMs: 24 * 60 * 60_000 });
+  }
+
+  // Histórico/backlog não executa ações; cache somente existe nos chats com
+  // Anti-Delete opt-in, e nunca se armazena conteúdo de chats alheios.
+  if (isStale(msg, deps.type) || (!revoke && alreadySeen(msg))) {
+    noteStale();
+    return;
+  }
+
+  if (revoke) {
+    if (allowedChat) await handleDelete(sock, msg, { ownerJid }).catch((e) => log.warn(`antidelete: ${e.message}`));
+    return;
+  }
+
+  // Automação View Once requer habilitação explícita para este JID.
+  const autoViewOnce = cfg.get().viewOnce.autoChats || [];
+  if (!msg.key.fromMe && allowedChat && autoViewOnce.some((chat) => bareId(chat) === bareId(jid)) && viewOnce) {
+    await onViewOnceMessage(sock, msg, { ownerJid }).catch((e) => log.warn(`view once: ${e.message}`));
   }
 
   const prefixes = cfg.get().prefixos;
@@ -367,7 +413,7 @@ export async function handleMessage(sock, msg, deps) {
       if (OWNER_ONLY_COMMANDS.has(command.name)) return; // View Once / Anti-Delete: 0 traços
     }
 
-    log.cmd(`${command.name} ${command.args.join(' ')} ← ${msg.pushName || prettyJid(jid)}`);
+    log.cmd(`${command.name}${command.args.length ? ` (${command.args.length} argumento(s))` : ''} · ${isGroup(jid) ? 'grupo' : 'privado'}`);
     const progress = createProgress(sock, jid, msg);
     const reply = async (content) => {
       if (typeof content === 'string') return progress.update(content);
@@ -383,6 +429,17 @@ export async function handleMessage(sock, msg, deps) {
       if (sent?.key?.id) markBotSent(sent.key.id);
       return sent;
     };
+    const expensive = isExpensiveRequest(command, msg);
+    if (expensive) {
+      const actor = msg.key?.participant || jid;
+      const rate = expensiveLimiter.consume(`${jid}:${actor}`);
+      if (!rate.allowed) return; // silencioso para não transformar o limitador em fonte de spam
+      if (activeExpensive >= MAX_CONCURRENT_EXPENSIVE) {
+        await reply(warn('Bot ocupado', 'aguarde um pouco antes de iniciar outra tarefa pesada'));
+        return;
+      }
+      activeExpensive++;
+    }
     try {
       await runCommand(sock, msg, command, {
         ownerJid,
@@ -393,10 +450,12 @@ export async function handleMessage(sock, msg, deps) {
         sendOwner
       });
     } catch (error) {
-      log.error(`comando .${command.name} falhou`, error);
+      log.error(`comando .${command.name} falhou`, { name: error?.name, status: error?.status, code: error?.code });
       // 600 em vez de 220: as mensagens de diagnóstico (ex.: remoção de fundo sem
       // chave, com o caminho do .env) precisam chegar inteiras ao usuário.
       await reply(fail('Não foi possível concluir', String(error.message || error).slice(0, 600))).catch(() => {});
+    } finally {
+      if (expensive) activeExpensive = Math.max(0, activeExpensive - 1);
     }
     return;
   }
@@ -406,9 +465,21 @@ export async function handleMessage(sock, msg, deps) {
   if (inOwnerPrivate || authorized) {
     const urls = extractUrls(text);
     if (urls.length && cfg.get().autoDownload && urls.some(isKnownSocialUrl)) {
+      const actor = msg.key?.participant || jid;
+      const rate = expensiveLimiter.consume(`${jid}:${actor}`);
+      if (!rate.allowed) return;
       const progress = createProgress(sock, jid, msg);
       const reply = async (t) => progress.update(t);
-      await autoDownload(sock, msg, urls.filter(isKnownSocialUrl), { reply });
+      if (activeExpensive >= MAX_CONCURRENT_EXPENSIVE) {
+        await reply(warn('Bot ocupado', 'aguarde um pouco antes de iniciar outra tarefa pesada'));
+        return;
+      }
+      activeExpensive++;
+      try {
+        await autoDownload(sock, msg, urls.filter(isKnownSocialUrl).slice(0, 3), { reply });
+      } finally {
+        activeExpensive = Math.max(0, activeExpensive - 1);
+      }
     }
   }
 }
@@ -443,6 +514,15 @@ function requireOwner(ctx, msg) {
   }
 }
 
+function revokeChatFeatures(jid) {
+  const target = bareId(jid);
+  messageCache.clearChat(jid);
+  resetChatMemoryForChat(jid);
+  cfg.get().autorizados = cfg.get().autorizados.filter((item) => bareId(item) !== target);
+  cfg.get().antiDelete.chats = cfg.get().antiDelete.chats.filter((item) => bareId(item) !== target);
+  cfg.get().viewOnce.autoChats = cfg.get().viewOnce.autoChats.filter((item) => bareId(item) !== target);
+}
+
 async function runCommand(sock, msg, cmd, ctx) {
   const { name, args } = cmd;
   const { reply, isOwner, inOwnerPrivate } = ctx;
@@ -475,15 +555,23 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'bloquear': {
       requireOwner(ctx, msg);
       if (['tudo', 'todos', 'all'].includes(argText.trim().toLowerCase())) {
+        const ownerChat = bareId(ctx.ownerJid);
+        const revoke = new Set([
+          ...cfg.get().autorizados,
+          ...cfg.get().antiDelete.chats,
+          ...cfg.get().viewOnce.autoChats
+        ].map(bareId).filter((chat) => chat && chat !== ownerChat));
+        for (const chat of revoke) revokeChatFeatures(chat);
         cfg.get().autorizados = [];
+        cfg.get().antiDelete.chats = cfg.get().antiDelete.chats.filter((chat) => bareId(chat) === ownerChat);
+        cfg.get().viewOnce.autoChats = cfg.get().viewOnce.autoChats.filter((chat) => bareId(chat) === ownerChat);
         cfg.save();
-        return reply(ok('Todos os chats foram bloqueados', 'o bot responde somente no seu privado'));
+        return reply(ok('Todos os outros chats foram bloqueados', 'acessos e caches locais removidos'));
       }
       const target = normalizeAuthTarget(argText, msg);
       const tDigits = bareDigits(target);
-      cfg.get().autorizados = (cfg.get().autorizados || []).filter(
-        (item) => bareId(item) !== target && (!tDigits || bareDigits(item) !== tDigits)
-      );
+      revokeChatFeatures(target);
+      if (tDigits) cfg.get().autorizados = cfg.get().autorizados.filter((item) => bareDigits(item) !== tDigits);
       cfg.save();
       if (!inOwnerPrivate && target === bareId(jid)) {
         return reply(ok('Bot desativado neste chat'));
@@ -551,7 +639,7 @@ async function runCommand(sock, msg, cmd, ctx) {
             'vxtwitter: ativo (X)',
             'pinterest widget: ativo',
             `cobalt: ${cobaltPool().available}/${cobaltPool().size} instâncias`,
-            `yt-dlp: ${hasYtDlp() ? 'instalado (modo turbo)' : 'não instalado'}`,
+            `yt-dlp: ${!isYtdlpEnabled() ? 'desativado por padrão' : hasYtDlp() ? 'habilitado' : 'habilitado, mas não instalado'}`,
             `auto-dl: ${cfg.get().autoDownload ? 'ligado' : 'desligado'}`
           ],
           ownerName: owner ? 'você 👑' : undefined
@@ -572,32 +660,42 @@ async function runCommand(sock, msg, cmd, ctx) {
       if (!inOwnerPrivate) return;
       return antiDeleteCommand(sock, msg, args, ctx);
 
-    // ── VIEW ONCE (100% privado: só no privado do dono, nunca em grupo/chat) ──
+    // ── VIEW ONCE: opt-in explícito por chat ─────────────────
     case 'vo':
     case 'visu':
     case 'viewonce': {
       if (!inOwnerPrivate) return;
-      if (!args.length) {
-        const v = cfg.get().viewOnce;
-        return reply(
-          card([
-            header('View Once', 'captura silenciosa'),
-            [
-              kv('Captura automática', toggle(v.auto, 'ligada', 'desligada')),
-              kv('Destino', 'somente o seu privado')
-            ].join('\n'),
-            usage('.vo on | off', null, 'Ou responda a qualquer view once para receber aqui.')
-          ])
-        );
-      }
       requireOwner(ctx, msg);
-      const [sub, val] = args.map((a) => a.toLowerCase());
-      const v = cfg.get().viewOnce;
-      if (sub === 'auto') v.auto = ['on', 'true', '1', 'sim'].includes(val);
-      else if (sub === 'on' || sub === 'off') v.auto = sub === 'on';
-      else throw new Error('uso: .vo on | off');
+      const settings = cfg.get().viewOnce;
+      settings.autoChats ||= [];
+      const [sub, ...targetParts] = args;
+      const targetArg = targetParts.join(' ');
+      if (!sub) {
+        const enabled = settings.autoChats.some((chat) => bareId(chat) === bareId(jid));
+        return reply(card([
+          header('View Once', 'automação opt-in por chat'),
+          kv('Captura automática neste chat', toggle(enabled, 'ligada', 'desligada')),
+          kv('Chats habilitados', String(settings.autoChats.length)),
+          '_Uma resposta comum não baixa mídia. Para uso manual, responda com `.s` no privado do dono._',
+          usage('.vo on|off [JID|aqui]', '.vo on aqui', 'Para grupo, autorize primeiro com `.ativar` e informe o JID.')
+        ]));
+      }
+      if (sub.toLowerCase() === 'off' && ['todos', 'tudo', 'all'].includes(targetArg.toLowerCase())) {
+        settings.autoChats = [];
+        cfg.save();
+        return reply(warn('Captura automática desligada em todos os chats'));
+      }
+      if (!['on', 'off'].includes(sub.toLowerCase())) throw new Error('uso: .vo on|off [JID|aqui]');
+      const target = normalizeAuthTarget(targetArg || 'aqui', msg);
+      if (sub.toLowerCase() === 'on') {
+        const authorizedTarget = target === bareId(jid) || cfg.get().autorizados.some((item) => bareId(item) === target);
+        if (!authorizedTarget) throw new Error('autorize esse chat primeiro com `.ativar <JID>`');
+        if (!settings.autoChats.some((chat) => bareId(chat) === target)) settings.autoChats.push(target);
+      } else {
+        settings.autoChats = settings.autoChats.filter((item) => bareId(item) !== target);
+      }
       cfg.save();
-      return reply(ok('View Once atualizado'));
+      return reply(ok(sub.toLowerCase() === 'on' ? 'Captura automática habilitada' : 'Captura automática desabilitada', target));
     }
 
     // ── FIGURINHAS ──────────────────────────────────────
@@ -675,14 +773,17 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'ai':
     case 'gpt':
     case 'chat': {
+      const senderId = msg.key?.participant || msg.key?.participantAlt || msg.key?.senderPn ||
+        (isGroup(jid) ? `unresolved:${msg.key?.id || Date.now()}` : jid);
+      const memoryKey = `${normalizeJid(jid)}:${normalizeJid(senderId)}`;
       if (args[0]?.toLowerCase() === 'reset') {
-        resetChatMemory(jid);
-        return reply(ok('Conversa reiniciada', 'memória da IA limpa'));
+        resetChatMemory(memoryKey);
+        return reply(ok('Sua conversa com a IA foi reiniciada', 'memória isolada deste remetente limpa'));
       }
       const question = argText || extractAnyText(msg.message?.extendedTextMessage?.contextInfo?.quotedMessage || {});
       if (!question) return reply(usage('.ia <pergunta>', '.ia qual a capital do Japão?'));
       await reply(wait('Pensando'));
-      const answer = await aiChat(jid, question);
+      const answer = await aiChat(memoryKey, question);
       return reply(truncate(answer, 3800));
     }
 
@@ -835,8 +936,8 @@ async function runCommand(sock, msg, cmd, ctx) {
             ].join('\n'),
             [
               `${SYM.section} *PRIVADO DO DONO*`,
-              kv('View Once automático', toggle(c.viewOnce.auto, 'ligado', 'desligado')),
-              kv('Anti-Delete', toggle(c.antiDelete.ativo, 'ativo', 'desativado')),
+              kv('Chats com View Once automático', String(c.viewOnce.autoChats.length)),
+              kv('Chats com Anti-Delete', String(c.antiDelete.chats.length)),
               kv('Filtros do Anti-Delete', c.antiDelete.ignorar.length ? c.antiDelete.ignorar.join(', ') : 'nenhum')
             ].join('\n'),
             usage('.config <chave> <valor>', '.config autoDownload false')
@@ -845,15 +946,25 @@ async function runCommand(sock, msg, cmd, ctx) {
       }
       const [key, ...restArr] = args;
       const valueRaw = restArr.join(' ');
-      const map = {
-        autodownload: ['autoDownload', (v) => v === 'true'],
-        qualidadepadrao: ['qualidadePadrao', (v) => v],
-        maxmb: ['maxMB', (v) => Number(v) || 90]
-      };
-      const entry = map[key.toLowerCase()];
-      if (!entry) throw new Error('chaves válidas: autoDownload, qualidadePadrao, maxMB');
-      cfg.set(entry[0], entry[1](valueRaw.toLowerCase()));
-      return reply(ok('Ajuste salvo', `${entry[0]} = ${cfg.get()[entry[0]]}`));
+      const keyName = key.toLowerCase();
+      if (keyName === 'autodownload') {
+        if (!['true', 'false', 'on', 'off', 'sim', 'nao', 'não'].includes(valueRaw.toLowerCase())) {
+          throw new Error('use .config autoDownload true|false');
+        }
+        cfg.set('autoDownload', ['true', 'on', 'sim'].includes(valueRaw.toLowerCase()));
+      } else if (keyName === 'qualidadepadrao') {
+        if (!['melhor', 'alta', 'media', 'média', 'baixa'].includes(valueRaw.toLowerCase())) {
+          throw new Error('qualidade válida: melhor, alta, média ou baixa');
+        }
+        cfg.set('qualidadePadrao', valueRaw.toLowerCase().replace('média', 'media'));
+      } else if (keyName === 'maxmb') {
+        const maxMB = Number(valueRaw);
+        if (!Number.isFinite(maxMB) || maxMB < 1 || maxMB > 200) throw new Error('maxMB deve ficar entre 1 e 200');
+        cfg.set('maxMB', Math.round(maxMB));
+      } else {
+        throw new Error('chaves válidas: autoDownload, qualidadePadrao, maxMB');
+      }
+      return reply(ok('Ajuste salvo', `${key} = ${cfg.get()[keyName === 'qualidadepadrao' ? 'qualidadePadrao' : keyName === 'autodownload' ? 'autoDownload' : 'maxMB']}`));
     }
 
     case 'pools': {
@@ -909,7 +1020,7 @@ async function downloadCommand({ sock, msg, args, ctx, url, audioOnly = false, f
     const result = await resolveDownload(url, quality, { audioOnly, onProgress: reply });
     return await sendDownload(sock, jid, result, { quality, url, onProgress: reply, quoted: msg });
   } catch (error) {
-    log.warn(`download falhou (${url.slice(0, 60)}): ${error.message}`);
+    log.warn(`download falhou (${shortUrl(url)})`, { name: error?.name, status: error?.status, code: error?.code });
     const detail = String(error.message || error).slice(0, 260);
     return reply(
       fail('Não consegui baixar este link', detail) +
@@ -925,56 +1036,78 @@ async function antiDeleteCommand(sock, msg, args, ctx) {
   const jid = msg.key.remoteJid;
   const owner = isOwner(jid, msg.key.participant);
   const settings = cfg.get().antiDelete;
+  settings.chats ||= [];
   const [sub, ...restArr] = args.map((a, i) => (i === 0 ? a.toLowerCase() : a));
+  const rest = restArr.join(' ');
 
   if (!sub) return reply(statusText(jid));
+  if (!owner) throw new Error('somente o dono pode alterar o Anti-Delete');
 
   if (['on', 'off'].includes(sub)) {
-    if (!owner) throw new Error('somente o dono pode ligar ou desligar');
-    settings.ativo = sub === 'on';
+    if (sub === 'off' && ['todos', 'tudo', 'all'].includes(rest.toLowerCase())) {
+      const oldChats = [...settings.chats];
+      settings.chats = [];
+      for (const chat of oldChats) messageCache.clearChat(chat);
+      cfg.save();
+      return reply(warn('Anti-Delete desativado em todos os chats'));
+    }
+    const target = normalizeAuthTarget(rest || 'aqui', msg);
+    if (sub === 'on') {
+      const authorizedTarget = target === bareId(jid) || cfg.get().autorizados.some((item) => bareId(item) === target);
+      if (!authorizedTarget) throw new Error('autorize esse chat primeiro com `.ativar <JID>`');
+      if (!settings.chats.some((chat) => bareId(chat) === target)) settings.chats.push(target);
+      cfg.save();
+      return reply(ok('Anti-Delete habilitado neste chat', 'conteúdo será retido por até 24 horas e enviado só ao seu privado'));
+    }
+    settings.chats = settings.chats.filter((item) => bareId(item) !== target);
+    messageCache.clearChat(target);
     cfg.save();
-    return reply(settings.ativo ? ok('Anti-Delete ativado', 'silencioso, chega só no seu privado') : warn('Anti-Delete desativado'));
+    return reply(warn('Anti-Delete desativado neste chat', 'o cache local desse chat foi limpo'));
   }
 
   if (sub === 'lista') {
-    return reply(
-      section('Filtros do Anti-Delete', settings.ignorar.length ? settings.ignorar : ['nenhum, monitorando tudo'])
-    );
+    return reply(card([
+      header('Anti-Delete', 'configuração local'),
+      section('Chats habilitados', settings.chats.length ? settings.chats : ['nenhum']),
+      section('Filtros de exclusão', settings.ignorar.length ? settings.ignorar : ['nenhum'])
+    ]));
   }
 
   if (['ignorar', 'add', 'addignorar'].includes(sub)) {
-    if (!owner) throw new Error('somente o dono pode alterar filtros');
-    const target = normalizeIgnoreTarget(restArr.join(' '), msg);
+    const target = normalizeIgnoreTarget(rest, msg);
     if (settings.ignorar.includes(target)) return reply(warn('Esse filtro já existe', target));
     settings.ignorar.push(target);
+    if (['grupos', 'groups', 'grupo'].includes(target)) messageCache.clearWhere(isGroup);
+    else if (['privado', 'private', 'pv', 'dm'].includes(target)) messageCache.clearWhere((chat) => !isGroup(chat));
+    else messageCache.clearChat(target === jid ? jid : target);
     cfg.save();
-    return reply(ok('Filtro adicionado', `ignorando ${target}  ·  para voltar: .antidelete remover ${target}`));
+    return reply(ok('Filtro adicionado', `o chat será excluído do cache e da recuperação: ${target}`));
   }
 
   if (['remover', 'rm', 'tirar', 'parar'].includes(sub)) {
-    if (!owner) throw new Error('somente o dono pode alterar filtros');
-    const target = normalizeIgnoreTarget(restArr.join(' '), msg);
-    settings.ignorar = settings.ignorar.filter((r) => r !== target);
+    const target = normalizeIgnoreTarget(rest, msg);
+    settings.ignorar = settings.ignorar.filter((rule) => rule !== target);
     cfg.save();
-    return reply(ok('Filtro removido', `${target} volta a ser monitorado`));
+    return reply(ok('Filtro removido', `${target} poderá ser habilitado novamente`));
   }
 
   return reply(antiDeleteMenu());
 }
 
 function doctorText() {
-  const nodeOk = Number(process.versions.node.split('.')[0]) >= 20;
+  const nodeOk = Number(process.versions.node.split('.')[0]) >= 22;
   const ff = hasFfmpeg();
-  const yt = hasYtDlp();
+  const ytdlpEnabled = isYtdlpEnabled();
+  const ytdlpBinary = ytdlpEnabled ? findYtdlp() : null;
   const cb = cobaltPool();
   const env = envSummary();
   return card([
     header('Diagnóstico', 'saúde do sistema'),
     [
       `${SYM.section} *AMBIENTE*`,
-      kv('Node', `${process.version} ${nodeOk ? SYM.ok : `${SYM.warn} use 20+`}`),
+      kv('Node', `${process.version} ${nodeOk ? SYM.ok : `${SYM.warn} use 22+`}`),
       kv('FFmpeg', ff ? `${SYM.ok} instalado` : `${SYM.err} ausente (figurinhas precisam dele)`),
-      kv('yt-dlp', yt ? `${SYM.ok} instalado (modo turbo)` : 'opcional'),
+      kv('yt-dlp', !ytdlpEnabled ? 'desativado por padrão' : ytdlpBinary ? `${SYM.ok} habilitado` : 'habilitado, mas binário ausente'),
       kv('Plataforma', process.platform),
       kv('Memória', `${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB`)
     ].join('\n'),

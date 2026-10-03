@@ -1,16 +1,12 @@
-// 👁️ VIEW ONCE — captura 100% silenciosa de mensagens de visualização única.
-//
-// 1) AUTO: toda view once REAL recebida é baixada em silêncio e enviada SOMENTE para o privado do dono.
-// 2) RESPOSTA: se o dono responder uma view once REAL em qualquer chat, o bot baixa em silêncio
-//    e envia SOMENTE para o privado do dono (0 rastros na conversa ou no grupo).
+// 👁️ VIEW ONCE — automático somente nos chats que o dono habilitou explicitamente.
+// Captura por resposta livre foi removida; uma mensagem comum nunca dispara download.
 
 import { SYM, kv } from '../core/ui.js';
-import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
 import { cfg } from '../core/config.js';
-import { log, baileysLogger } from '../core/logger.js';
-import { formatDate, isGroup } from '../util/text.js';
+import { log } from '../core/logger.js';
+import { formatDate, isGroup, normalizeJid } from '../util/text.js';
 import { formatBytes } from '../core/http.js';
-import { messageCache } from '../wa/cache.js';
+import { downloadWhatsAppMedia, MAX_WHATSAPP_MEDIA_BYTES } from '../wa/media.js';
 
 // Wrappers explícitos de visualização única.
 const VO_WRAPPERS = [
@@ -121,34 +117,27 @@ export async function downloadViewOnceMedia(sock, msg) {
   const vo = unwrapViewOnce(msg.message) || quotedViewOnce(msg.message);
   if (!vo) throw new Error('não é uma mensagem de visualização única');
   const node = normalizeNode(vo.node);
-
+  const mediaType = vo.type.replace(/Message$/, '');
   const errors = [];
-  const strategies = [
-    () =>
-      downloadMediaMessage(
-        { key: msg.key, message: { [vo.type]: node } },
-        'buffer',
-        {},
-        { logger: baileysLogger, reuploadRequest: sock.updateMediaMessage }
-      ),
-    () => downloadMediaMessage(msg, 'buffer', {}, { logger: baileysLogger, reuploadRequest: sock.updateMediaMessage }),
-    async () => {
-      const stream = await downloadContentFromMessage(node, vo.type.replace(/Message$/, ''));
-      const chunks = [];
-      for await (const c of stream) chunks.push(c);
-      return Buffer.concat(chunks);
-    },
-    async () => {
-      if (typeof sock.updateMediaMessage !== 'function') throw new Error('reupload indisponível');
-      const refreshed = await sock.updateMediaMessage(msg);
-      return downloadMediaMessage(refreshed, 'buffer', {}, { logger: baileysLogger, reuploadRequest: sock.updateMediaMessage });
-    }
-  ];
 
-  for (const strategy of strategies) {
+  try {
+    const buffer = await downloadWhatsAppMedia(node, mediaType, { maxBytes: MAX_WHATSAPP_MEDIA_BYTES });
+    return { buffer, type: vo.type, node };
+  } catch (error) {
+    errors.push(String(error?.message || error).slice(0, 90));
+  }
+
+  // Reupload is a bounded retry: the refreshed node is still streamed through
+  // the same 64 MB cap rather than materialized by downloadMediaMessage.
+  if (typeof sock.updateMediaMessage === 'function') {
     try {
-      const buffer = await strategy();
-      if (buffer?.length) return { buffer, type: vo.type, node };
+      const refreshed = await sock.updateMediaMessage(msg);
+      const refreshedVo = unwrapViewOnce(refreshed?.message) || vo;
+      const refreshedNode = normalizeNode(refreshedVo.node);
+      const buffer = await downloadWhatsAppMedia(refreshedNode, refreshedVo.type.replace(/Message$/, ''), {
+        maxBytes: MAX_WHATSAPP_MEDIA_BYTES
+      });
+      return { buffer, type: refreshedVo.type, node: refreshedNode };
     } catch (error) {
       errors.push(String(error?.message || error).slice(0, 90));
     }
@@ -175,7 +164,7 @@ function captionFor(source, { auto }) {
 
 
 /**
- * Envia a mídia capturada EXCLUSIVAMENTE para o privado do dono (`ctx.ownerJid`).
+ * Envia a mídia após opt-in EXCLUSIVAMENTE para o privado do dono (`ctx.ownerJid`).
  * Trava de segurança: nunca envia para grupos nem para conversas de terceiros.
  */
 async function deliver(sock, ctx, source, result) {
@@ -197,19 +186,20 @@ async function deliver(sock, ctx, source, result) {
       });
       await sock.sendMessage(dest, { text: caption });
     }
-    log.ok(`view once capturada em silêncio (${formatBytes(buffer.length)}) → ${dest}`);
+    log.ok(`view once opt-in enviada ao privado do dono (${formatBytes(buffer.length)})`);
   } catch (error) {
-    log.error('falha ao entregar view once pro dono', error);
+    log.error('falha ao entregar view once pro dono', { name: error?.name, status: error?.status, code: error?.code });
   }
 }
 
 /**
  * Handler principal chamado pelo roteador para mensagens recebidas.
- * 100% silencioso: envia somente para `ownerJid`, zero rastro no chat de origem.
+ * Automação opt-in: envia somente para `ownerJid` e não responde no chat de origem.
  */
 export async function onViewOnceMessage(sock, msg, { ownerJid }) {
   const settings = cfg.get().viewOnce;
-  if (!settings.auto) return false;
+  const chatJid = msg?.key?.remoteJid;
+  if (!Array.isArray(settings.autoChats) || !settings.autoChats.some((chat) => normalizeJid(chat) === normalizeJid(chatJid))) return false;
   if (!ownerJid || isGroup(ownerJid)) return false;
   if (msg.key.fromMe) return false;
   if (!isViewOnce(msg.message)) return false;
@@ -224,61 +214,9 @@ export async function onViewOnceMessage(sock, msg, { ownerJid }) {
     await deliver(sock, { msg, ownerJid, isAuto: true }, msg, result);
     return true;
   } catch (error) {
-    log.warn(`view once não baixada: ${error.message}`);
+    log.warn('view once não baixada', { name: error?.name, status: error?.status, code: error?.code });
     return false;
   }
 }
 
 const recentCaptures = new Set();
-
-/**
- * Captura via resposta: quando o DONO responde uma view once REAL em qualquer conversa/grupo.
- * Baixa em silêncio e envia SOMENTE para o privado do dono (0 rastros no chat original).
- */
-export async function onViewOnceReply(sock, msg, { ownerJid, senderIsOwner }) {
-  if (!senderIsOwner || !ownerJid || isGroup(ownerJid)) return false;
-
-  const ctx = getReplyContextInfo(msg.message);
-  if (!ctx) return false;
-
-  // Caso A: a citação carrega o conteúdo view once completo.
-  if (quotedViewOnce(msg.message)) {
-    try {
-      const fake = {
-        key: {
-          remoteJid: msg.key.remoteJid,
-          id: ctx.stanzaId || msg.key.id,
-          fromMe: false,
-          ...(ctx.participant ? { participant: ctx.participant } : {})
-        },
-        message: ctx.quotedMessage
-      };
-      const result = await downloadViewOnceMedia(sock, fake);
-      await deliver(
-        sock,
-        { msg, ownerJid, isAuto: false },
-        { pushName: msg.pushName, key: fake.key, ts: Date.now() },
-        result
-      );
-      return true;
-    } catch (error) {
-      log.warn(`view once por resposta falhou na citação: ${error.message}`);
-    }
-  }
-
-  // Caso B: citação chegou como placeholder ou sem mediaKey — procura no cache se a original era view once REAL.
-  const quotedId = ctx.stanzaId;
-  if (!quotedId) return false;
-  const cached = messageCache.get(msg.key.remoteJid, quotedId) || messageCache.getById(quotedId);
-  if (!cached || !isViewOnce(cached.message)) return false;
-
-  try {
-    const fake = { key: { remoteJid: msg.key.remoteJid, id: quotedId, fromMe: false }, message: cached.message };
-    const result = await downloadViewOnceMedia(sock, fake);
-    await deliver(sock, { msg, ownerJid, isAuto: false }, cached, result);
-    return true;
-  } catch (error) {
-    log.warn(`view once por resposta falhou no cache: ${error.message}`);
-    return false;
-  }
-}
