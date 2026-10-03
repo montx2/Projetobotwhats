@@ -787,11 +787,11 @@ function termoText(state, detail = '') {
   const reading = termoReadableRows(state.attempts);
   return card([
     header('Termo', `${state.attempts.length}/6 tentativas · palavra de 5 letras`),
-    detail || 'Adivinhe a palavra de cinco letras. Acentos não mudam o palpite.',
+    detail || (state.attempts.length ? 'Envie o próximo palpite de 5 letras.' : 'Adivinhe a palavra de cinco letras. Acentos não mudam o palpite.'),
     grid(renderTermoBoard(state.attempts)),
     reading.length ? section('Leitura dos palpites', reading) : '',
     missing.length ? `Fora da palavra · *${missing.join(' ')}*` : '',
-    footer('🟩 letra certa no lugar · 🟨 letra em outra posição · ⬛ letra fora · `.termo dica` pede pista')
+    footer(`🟩 letra certa no lugar · 🟨 letra em outra posição · ⬛ letra fora${state.hintUsed ? '' : ' · `.termo dica` pede pista'}`)
   ]);
 }
 
@@ -801,6 +801,7 @@ async function handleTermo({ msg, args, reply, actor }) {
   const first = String(args[0] || '').toLowerCase();
   if (first === 'dica') {
     if (!state || state.type !== 'termo') return replyMissingGame(state, 'termo', reply, 'Nenhuma partida de Termo ativa', 'inicie com `.termo`');
+    state.hintUsed = true;
     return reply(termoText(state, `Dica: começa com ${state.word[0].toUpperCase()} e tem cinco letras.`));
   }
   if (['desistir', 'sair', 'cancelar', 'encerrar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });
@@ -844,7 +845,7 @@ async function applyTermoGuess(state, rawGuess, reply) {
       section('Leitura final', termoReadableRows(state.attempts))
     ]));
   }
-  return reply(termoText(state, `Palpite ${state.attempts.length}/6 registrado.`));
+  return reply(termoText(state));
 }
 
 const WORD_CATEGORIES = Object.freeze({
@@ -924,13 +925,13 @@ function hangmanLives(wrong) {
 function hangmanText(state, detail = '') {
   const masked = Array.from(state.word, (letter) => state.guessed.includes(letter) ? letter.toUpperCase() : '_').join(' ');
   return card([
-    header('Forca', `${state.wrong}/6 erros`),
-    detail || `Categoria: ${state.category}.`,
+    header('Forca', `${state.wrong}/6 erros${state.hintUsed ? ` · ${state.category}` : ''}`),
+    detail || (state.hintUsed ? `Categoria · *${state.category}*` : 'Adivinhe a palavra letra por letra.'),
     mono(renderHangmanBoard(state.wrong)),
     hangmanLives(state.wrong),
     `Palavra · \`${masked}\``,
     state.guessed.length ? `Letras · ${state.guessed.map((letter) => letter.toUpperCase()).join(' ')}` : '',
-    '_Envie uma letra ou tente a palavra inteira. Use `.forca dica` para a categoria._'
+    `_Envie uma letra ou tente a palavra inteira.${state.hintUsed ? '' : ' Use `.forca dica` para a categoria.'}_`
   ]);
 }
 
@@ -940,6 +941,7 @@ async function handleHangman({ msg, args, reply, actor }) {
   const first = String(args[0] || '').toLowerCase();
   if (first === 'dica') {
     if (!state || state.type !== 'forca') return replyMissingGame(state, 'forca', reply, 'Nenhuma partida de Forca ativa', 'inicie com `.forca`');
+    state.hintUsed = true;
     return reply(hangmanText(state, `Dica: a palavra pertence à categoria ${state.category.toLocaleLowerCase('pt-BR')}.`));
   }
   if (['desistir', 'sair', 'cancelar', 'encerrar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });
@@ -1091,7 +1093,16 @@ async function handleMinesweeper({ msg, args, reply, actor }) {
   const sub = String(args[0] || '').toLowerCase();
   if (['dica', 'ajuda', 'help'].includes(sub)) {
     if (!state || state.type !== 'minado') return replyMissingGame(state, 'minado', reply, 'Nenhuma partida de Campo minado ativa', 'inicie com `.minado`');
-    return reply(card([header('Campo minado', 'controles'), mineGrid(state), 'Revele A1–E5 com `.minado A1` ou envie a coordenada. Marque com `flag A1`.']));
+    const opened = state.revealed.filter(Boolean).length;
+    const safeLeft = Math.max(0, 25 - state.mineCount - opened);
+    const flags = state.flags.filter(Boolean).length;
+    return reply(card([
+      header('Campo minado', 'dica'),
+      `▸ Faltam *${safeLeft}* casa(s) segura(s) de ${25 - state.mineCount}`,
+      `▸ *${Math.max(0, state.mineCount - flags)}* mina(s) ainda sem bandeira`,
+      mineGrid(state),
+      '_Revele com `.minado A1` ou envie a coordenada · marque com `flag A1`._'
+    ]));
   }
   if (['sair', 'cancelar', 'desistir', 'encerrar'].includes(sub)) return cancelCurrentGame({ jid, actor, reply, owner: false });
   if (state?.type !== 'minado') {
@@ -1163,7 +1174,7 @@ function anagramText(state, detail = '') {
     header('Anagrama', state.category),
     detail || 'Descubra a palavra com as letras embaralhadas.',
     `▸ *${state.scrambled.toUpperCase()}*`,
-    '_Responda com a palavra ou use `.anagrama dica`._'
+    `_Responda com a palavra.${state.hintUsed ? '' : ' Use `.anagrama dica` para uma pista.'}_`
   ]);
 }
 
@@ -1173,6 +1184,7 @@ async function handleAnagram({ msg, args, reply, actor }) {
   const first = String(args[0] || '').toLowerCase();
   if (first === 'dica') {
     if (!state || state.type !== 'anagrama') return replyMissingGame(state, 'anagrama', reply, 'Nenhum Anagrama ativo', 'inicie com `.anagrama`');
+    state.hintUsed = true;
     return reply(anagramText(state, `Dica: categoria ${state.category.toLocaleLowerCase('pt-BR')}; começa com ${state.word[0].toUpperCase()}.`));
   }
   if (first === 'encerrar') return cancelCurrentGame({ jid, actor, reply, owner: false });
@@ -1224,11 +1236,12 @@ const QUIZ_QUESTIONS = Object.freeze([
 ]);
 
 function quizText(state, detail = '') {
+  const restantes = Math.max(0, 3 - state.attempts);
   return card([
     header('Quiz', `pergunta ${state.number}`),
     state.question,
     detail || 'Responda diretamente ou use `.quiz <resposta>`.',
-    '_Use `.quiz dica` para uma pista. Você tem até 3 tentativas._'
+    `_${restantes > 0 ? `Restam ${restantes} tentativa(s)` : 'Sem tentativas restantes'}${state.hintUsed ? '' : ' · use `.quiz dica` para uma pista'}_`
   ]);
 }
 
@@ -1238,6 +1251,7 @@ async function handleQuiz({ msg, args, reply, actor }) {
   const first = String(args[0] || '').toLowerCase();
   if (first === 'dica') {
     if (!state || state.type !== 'quiz') return replyMissingGame(state, 'quiz', reply, 'Nenhum Quiz ativo', 'inicie com `.quiz`');
+    state.hintUsed = true;
     return reply(quizText(state, `Dica: ${state.hint}`));
   }
   if (first === 'encerrar') return cancelCurrentGame({ jid, actor, reply, owner: false });
@@ -1273,7 +1287,7 @@ async function applyQuizGuess(state, rawGuess, reply) {
     finishSession(state, 'loss');
     return reply(card([header('Quiz', 'fim da rodada'), `A resposta era ${state.answers[0].toUpperCase()}.`]));
   }
-  return reply(quizText(state, `Ainda não · ${3 - state.attempts} tentativa(s) restante(s).`));
+  return reply(quizText(state, 'Ainda não é essa. Tente outra resposta.'));
 }
 
 /** Histórico de palpites em linhas curtas: 🔼 maior · 🔽 menor · 🎯 acerto. */
@@ -1302,6 +1316,7 @@ async function handleNumberGame({ msg, args, reply, actor }) {
   const first = String(args[0] || '').toLowerCase();
   if (first === 'dica') {
     if (!state || state.type !== 'numero') return replyMissingGame(state, 'numero', reply, 'Nenhuma partida ativa', 'inicie com `.adivinhe`');
+    state.hintUsed = true;
     return reply(numberText(state, `O número está entre ${state.low} e ${state.high}.`));
   }
   if (['desistir', 'sair', 'cancelar', 'encerrar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });

@@ -52,6 +52,21 @@ test('intents de APIs da IA exigem contexto explícito e valores válidos', () =
   assert.match(menu, /\.ia clima <cidade>/);
 });
 
+test('menu público esconde as ferramentas de grupo quando não há grupo', () => {
+  const noGrupo = publicMenu({ isGroup: false });
+  assert.doesNotMatch(noGrupo, /\.boasvindas/, 'boas-vindas é ferramenta de grupo');
+  assert.doesNotMatch(noGrupo, /\.antilink/, 'anti-link é ferramenta de grupo');
+  assert.doesNotMatch(noGrupo, /\.enquete/, 'enquete é ferramenta de grupo');
+  assert.match(noGrupo, /ferramentas de grupo/i, 'o menu explica onde elas valem');
+  assert.match(noGrupo, /conversa privada/i);
+
+  const emGrupo = publicMenu({ isGroup: true });
+  assert.match(emGrupo, /\.boasvindas on/);
+  assert.match(emGrupo, /\.antilink on/);
+  assert.match(emGrupo, /\.enquete pergunta/);
+  assert.doesNotMatch(emGrupo, /conversa privada/i);
+});
+
 test('consulta de clima valida resposta, formata em português, atribui a fonte e usa cache', async (t) => {
   const originalFetch = globalThis.fetch;
   const requests = [];

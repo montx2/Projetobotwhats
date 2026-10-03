@@ -4,6 +4,7 @@
 import { cfg } from '../core/config.js';
 import { SlidingWindowLimiter } from '../core/limiter.js';
 import { log } from '../core/logger.js';
+import { header, footer } from '../core/ui.js';
 import { isGroup, normalizeJid, numberOnly } from '../util/text.js';
 import { markBotSent } from '../wa/cache.js';
 
@@ -308,22 +309,40 @@ export async function handleGroupParticipantsUpdate(sock, update) {
   if (!participants.length || !groupNoticeLimiter.consume(jid).allowed) return;
 
   const isWelcome = action === 'add';
-  let text;
-  let mentions = [];
-  if (participants.length <= WELCOME_MAX_MENTIONS) {
-    const tokens = participants.map((participant) => numberOnly(participant)).filter(Boolean);
-    if (tokens.length) {
-      mentions = participants.slice(0, tokens.length);
-      const mentionText = tokens.map((id) => `@${id}`).join(', ');
-      text = isWelcome
-        ? `${participants.length === 1 ? '✦ Seja bem-vindo(a),' : '✦ Sejam bem-vindos,'} ${mentionText}!`
-        : `✦ Até mais, ${mentionText}!`;
-    }
+  let subject = '';
+  let total = 0;
+  try {
+    const metadata = await getGroupMetadata(sock, jid);
+    subject = String(metadata?.subject || '').trim().slice(0, 60);
+    total = Array.isArray(metadata?.participants) ? metadata.participants.length : 0;
+  } catch {
+    // Sem metadados a saudação segue, apenas sem o nome do grupo e a contagem.
   }
-  text ||= isWelcome ? '✦ Bem-vindo(s) ao grupo!' : '✦ Até mais!';
+
+  const mentions = participants;
+  const tags = mentions.map((id) => `@${numberOnly(id)}`).filter((tag) => tag !== '@');
+  if (!tags.length) return;
+  const plural = tags.length > 1;
+  const names = tags.join(', ');
+  const grupo = subject || 'este grupo';
+
+  const lines = [header(isWelcome ? 'Bem-vindo(a)!' : 'Até mais!', `${isWelcome ? 'entrou no' : 'saiu do'} ${grupo}`)];
+  if (isWelcome) {
+    lines.push(`✧ *${names}*, ${plural ? 'sejam' : 'seja'} muito bem-vindo${plural ? 's' : '(a)'}!`);
+    if (!plural && total > 0) lines.push(`▸ Você é o ${total}º membro do grupo.`);
+    lines.push('▸ Leia as regras fixadas e respeite a galera.');
+    lines.push('▸ Dúvidas? Chame um administrador.');
+  } else {
+    lines.push(`✧ *${names}* ${plural ? 'deixaram' : 'deixou'} o grupo.`);
+    if (total > 0) lines.push(`▸ Restam ${total} ${total === 1 ? 'membro' : 'membros'}.`);
+  }
+  if (subject) {
+    lines.push(footer(`${subject}${total ? ` · ${total} ${total === 1 ? 'membro' : 'membros'}` : ''}`));
+  }
+  const text = lines.join('\n\n');
 
   try {
-    const sent = await sock.sendMessage(jid, { text, ...(mentions.length ? { mentions } : {}) });
+    const sent = await sock.sendMessage(jid, { text, mentions });
     if (sent?.key?.id) markBotSent(sent.key.id);
   } catch (error) {
     log.warn('saudação do grupo não enviada', { name: error?.name });

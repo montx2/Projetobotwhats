@@ -794,7 +794,7 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'help':
     case 'ajuda':
     case 'comandos':
-      return reply(inOwnerPrivate ? ownerMenu() : publicMenu());
+      return reply(inOwnerPrivate ? ownerMenu() : publicMenu({ isGroup: isGroup(jid) }));
 
     case 'boasvindas':
     case 'bemvindo':

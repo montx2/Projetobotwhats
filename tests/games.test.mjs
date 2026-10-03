@@ -297,7 +297,8 @@ test('Anagrama e Quiz aceitam palpites, dicas e respostas acentuadas', async () 
   const answer = knownAnswers.find(([fragment]) => fold(question).includes(fold(fragment)))?.[1];
   assert.ok(answer, `pergunta reconhecida para testar a resposta: ${question}`);
   await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'quiz', args: ['resposta', 'incorreta'], reply: quiz.reply });
-  assert.match(String(quiz.sent.at(-1)), /tentativa\(s\) restante\(s\)/i);
+  assert.match(String(quiz.sent.at(-1)), /Ainda não é essa/i);
+  assert.match(String(quiz.sent.at(-1)), /Restam 2 tentativa\(s\)/i);
   await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'quiz', args: ['dica'], reply: quiz.reply });
   assert.match(String(quiz.sent.at(-1)), /Dica:/);
   await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'quiz', args: [answer], reply: quiz.reply });
@@ -828,6 +829,63 @@ test('Termo vitorioso e derrota mostram a leitura final letra a letra', async ()
     assert.match(loss, /fim de jogo/);
     assert.match(loss, /A palavra era ABRIU/);
     assert.match(loss, /LEITURA FINAL/);
+    clearChatGames(jid);
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+test('as dicas dos minigames não repetem a própria instrução depois de usadas', async () => {
+  const realRandom = Math.random;
+  Math.random = () => 0; // primeira palavra de cada lista, para o teste ser determinístico
+  try {
+    const jid = 'dicas-limpas@s.whatsapp.net';
+    const player = '551100000095@s.whatsapp.net';
+    const replies = createReplyCollector();
+    const mk = () => makeMessage(jid, player);
+
+    // Forca: a categoria só aparece depois da dica e o rodapé para de oferecê-la
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'forca', args: [], reply: replies.reply });
+    assert.match(String(replies.sent.at(-1)), /Use `\.forca dica` para a categoria/);
+    assert.doesNotMatch(String(replies.sent.at(-1)), /Categoria/, 'a categoria é a dica: não vem de graça');
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'forca', args: ['dica'], reply: replies.reply });
+    assert.match(String(replies.sent.at(-1)), /Dica: a palavra pertence à categoria/);
+    assert.doesNotMatch(String(replies.sent.at(-1)), /Use `\.forca dica`/);
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'forca', args: ['x'], reply: replies.reply });
+    const forcaDepois = String(replies.sent.at(-1));
+    assert.match(forcaDepois, /erros · Animais/, 'a categoria revelada continua visível');
+    assert.doesNotMatch(forcaDepois, /Use `\.forca dica`/);
+    clearChatGames(jid);
+
+    // Quiz
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'quiz', args: [], reply: replies.reply });
+    assert.match(String(replies.sent.at(-1)), /use `\.quiz dica` para uma pista/i);
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'quiz', args: ['dica'], reply: replies.reply });
+  assert.doesNotMatch(String(replies.sent.at(-1)), /Use `\.quiz dica`/);
+  assert.match(String(replies.sent.at(-1)), /Restam 3 tentativa\(s\)/);
+    clearChatGames(jid);
+
+    // Anagrama
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'anagrama', args: [], reply: replies.reply });
+    assert.match(String(replies.sent.at(-1)), /Use `\.anagrama dica`/);
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'anagrama', args: ['dica'], reply: replies.reply });
+    assert.doesNotMatch(String(replies.sent.at(-1)), /Use `\.anagrama dica`/);
+    clearChatGames(jid);
+
+    // Termo
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'termo', args: [], reply: replies.reply });
+    assert.match(String(replies.sent.at(-1)), /`\.termo dica` pede pista/);
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'termo', args: ['dica'], reply: replies.reply });
+    assert.doesNotMatch(String(replies.sent.at(-1)), /`\.termo dica` pede pista/);
+    assert.match(String(replies.sent.at(-1)), /Dica: começa com/);
+    clearChatGames(jid);
+
+    // Campo minado: a dica informa o que falta, em vez de repetir o tabuleiro
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'minado', args: [], reply: replies.reply });
+    await handleGameCommand({ sock: {}, msg: mk(), name: 'minado', args: ['dica'], reply: replies.reply });
+    const minadoDica = String(replies.sent.at(-1));
+    assert.match(minadoDica, /Faltam \*20\* casa\(s\) segura\(s\) de 20/);
+    assert.match(minadoDica, /\*5\* mina\(s\) ainda sem bandeira/);
     clearChatGames(jid);
   } finally {
     Math.random = realRandom;

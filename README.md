@@ -89,7 +89,9 @@ O dono precisa liberar o grupo com `.ativar` antes. Boas-vindas, mensagem de sa�
 .enquete pergunta | opção 1 | opção 2 → cria uma enquete de escolha única
 ```
 
-A proteção de links considera URLs HTTP(S), links `www.` e domínios simples, ignora mensagens de administradores e só remove mensagens quando o próprio bot é administrador. Se perder essa permissão ou não conseguir confirmar os metadados, não tenta apagar; também não encaminha o link para comandos/downloads. A lista aceita até 50 domínios por grupo; não aceita URL completa, IP, porta ou curinga. Há limite de até 20 tentativas de remoção de links por grupo/minuto; acima disso a proteção bloqueia o processamento do link sem continuar apagando. Boas-vindas/saídas usam uma mensagem fixa e menções limitadas, sem guardar histórico de participantes (até 5 eventos anunciados por grupo/minuto). Enquetes aceitam de 2 a 12 opções, com limite de 2 por usuário a cada 5 minutos e 20 por grupo/hora.
+A proteção de links considera URLs HTTP(S), links `www.` e domínios simples, ignora mensagens de administradores e só remove mensagens quando o próprio bot é administrador. Se perder essa permissão ou não conseguir confirmar os metadados, não tenta apagar; também não encaminha o link para comandos/downloads. A lista aceita até 50 domínios por grupo; não aceita URL completa, IP, porta ou curinga. Há limite de até 20 tentativas de remoção de links por grupo/minuto; acima disso a proteção bloqueia o processamento do link sem continuar apagando. Boas-vindas e saídas usam um cartão no mesmo estilo dos demais comandos, com o nome do grupo, a menção de quem entrou/saiu e a contagem de membros; as menções são limitadas e nenhum histórico de participantes é guardado (até 5 eventos anunciados por grupo/minuto). Enquetes aceitam de 2 a 12 opções, com limite de 2 por usuário a cada 5 minutos e 20 por grupo/hora.
+
+O `.menu` se adapta ao contexto: dentro de um grupo ele traz as ferramentas de gestão (boas-vindas, anti-link e enquete); em uma conversa privada liberada essas opções ficam de fora, com uma nota de onde elas valem.
 
 Esses controles ajudam a reduzir spam e links indesejados, mas **não são moderação completa e não garantem que ninguém publique ou use conteúdo ilegal**. Administradores continuam responsáveis por revisar as regras e as mensagens do grupo.
 
@@ -144,7 +146,7 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 
 ### Jogos & arcade
 
-Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.jogos` para ver o catálogo; há uma partida de tabuleiro ativa por chat. Se alguém tentar abrir outro jogo com uma partida em curso, o bot explica qual partida está rolando, qual o progresso, como continuar e que `.encerrar` (ou `.jogos cancelar`) encerra a rodada atual. Os palpites aceitos podem ser enviados com o comando ou diretamente, sem prefixo.
+Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.jogos` para ver o catálogo; há uma partida de tabuleiro ativa por chat. Se alguém tentar abrir outro jogo com uma partida em curso, o bot explica qual partida está rolando, qual o progresso, como continuar e que `.encerrar` (ou `.jogos cancelar`) encerra a rodada atual. Os palpites aceitos podem ser enviados com o comando ou diretamente, sem prefixo. As dicas (`.termo dica`, `.forca dica`, `.quiz dica`, `.anagrama dica`, `.adivinhe dica`, `.minado dica`) são informadas uma única vez: depois de usadas, o jogo passa a exibir a informação revelada — a categoria na forca, a primeira letra no termo, casas e minas restantes no campo minado — e o rodapé para de repetir o comando.
 
 ```text
 .velha [facil|medio|dificil]      → Jogo da velha contra o bot
