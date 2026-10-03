@@ -5,7 +5,7 @@
 
 import fs from 'node:fs';
 import { readJson, writeJsonNow, writeJsonDebounced } from './store.js';
-import { envList, envBool, loadDotEnv, ENV_FILE } from './env.js';
+import { envList, envListAny, envListNumbered, envBool, loadDotEnv, ENV_FILE } from './env.js';
 
 // Garante o .env carregado ANTES de qualquer leitura de process.env abaixo.
 // (src/core/env.js já carrega no import — isto é reforço extra e idempotente.)
@@ -199,12 +199,19 @@ const ENV_SCHEMA = {
   removeBgUrls: () => envList('REMOVE_BG_URLS'),
   localRembg: () => envBool('LOCAL_REMBG', false),
   geminiKeys: () => envList('GEMINI_KEYS'),
+  geminiModels: () => envList('GEMINI_MODELS'),
   openaiKeys: () => envList('OPENAI_KEYS'),
+  openaiModels: () => envList('OPENAI_MODELS'),
   openaiBase: () => process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-  groqKeys: () => envList('GROQ_KEYS'),
+  // Várias chaves do mesmo provedor podem vir de uma lista (GROQ_KEYS=a,b,c) ou
+  // de variáveis avulsas (GROQ_API_KEY, GROQ_KEY_1, GROQ_KEY_2…) — todas vão
+  // para o mesmo pool e giram em rodízio.
+  groqKeys: () => envListNumbered('GROQ_KEYS', { aliases: ['GROQ_API_KEYS', 'GROQ_API_KEY', 'GROQ_KEY'] }),
+  groqModels: () => envList('GROQ_MODELS'),
   aiBase: () => process.env.AI_BASE_URL || '',
-  aiKeys: () => envList('AI_KEYS'),
+  aiKeys: () => envListAny('AI_KEYS', 'AI_API_KEYS', 'AI_API_KEY'),
   aiModel: () => process.env.AI_MODEL || '',
+  aiModels: () => envList('AI_MODELS'),
   pollinationsKeys: () => envList('POLLINATIONS_KEYS'),
   cobaltInstances: () => envList('COBALT_INSTANCES'),
   cobaltApiKey: () => process.env.COBALT_API_KEY || '',
@@ -239,8 +246,13 @@ export function envSummary() {
     removeBgUrls: ENV.removeBgUrls.length,
     localRembg: ENV.localRembg,
     geminiKeys: ENV.geminiKeys.length,
+    geminiModels: ENV.geminiModels.length,
     openaiKeys: ENV.openaiKeys.length,
     groqKeys: ENV.groqKeys.length,
+    groqModels: ENV.groqModels.length,
+    aiKeys: ENV.aiKeys.length,
+    aiModel: ENV.aiModel,
+    aiModels: ENV.aiModels.length,
     pollinationsKeys: ENV.pollinationsKeys.length,
     cobaltInstances: ENV.cobaltInstances.length
   };

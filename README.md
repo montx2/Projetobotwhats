@@ -201,15 +201,61 @@ cp .env.example .env
 
 ```env
 GEMINI_KEYS=...
-GROQ_KEYS=...
+GROQ_KEYS=gsk_chave1,gsk_chave2,gsk_chave3
+GROQ_MODELS=openai/gpt-oss-120b,openai/gpt-oss-20b
 OPENAI_KEYS=...
 AI_BASE_URL=https://openrouter.ai/api/v1
 AI_KEYS=...
 AI_MODEL=...
+AI_MODELS=...
 POLLINATIONS_KEYS=...
 ```
 
 `AI_BASE_URL`/`OPENAI_BASE_URL` são endpoints escolhidos pelo operador; as credenciais configuradas serão enviadas a eles. Use somente endpoints confiáveis. Para serviços locais, configure explicitamente o endereço privado apropriado.
+
+#### Várias chaves do mesmo provedor
+
+Todo provedor aceita **quantas chaves você quiser**, na mesma linha ou espalhadas:
+
+```env
+# 1) todas juntas (vírgula ou espaço)
+GROQ_KEYS=gsk_chave1,gsk_chave2,gsk_chave3
+
+# 2) uma por variável (aceita GROQ_API_KEY e GROQ_KEY)
+GROQ_API_KEY=gsk_chave1
+GROQ_KEY=gsk_chave2
+
+# 3) numeradas (GROQ_KEY_1 … GROQ_KEY_12)
+GROQ_KEY_1=gsk_chave1
+GROQ_KEY_2=gsk_chave2
+```
+
+Todas entram no mesmo pool e giram em rodízio: quando uma estoura o limite, a
+próxima assume. Os limites e cooldowns informados pelo provedor continuam sendo
+respeitados — pools não tornam uma cota ilimitada nem devem contornar as regras
+do serviço.
+
+#### Modelos em cascata (o antídoto para "HTTP 404 model does not exist")
+
+Provedores descontinuam modelos com frequência. Dois exemplos reais que
+quebraram este bot: a Groq desligou `llama-3.3-70b-versatile` em 16/08/2026 e o
+Google desligou `gemini-2.0-flash` em 01/06/2026 — a partir daí, todo pedido
+devolvia `404 model_not_found` e **trocar a chave não resolvia nada**.
+
+Por isso cada provedor usa uma **lista** de modelos, em ordem de preferência:
+
+1. o modelo que falhou por 404 é marcado e o próximo é tentado **com a mesma chave**;
+2. se todos os modelos conhecidos caírem, o bot consulta `GET /models` no provedor
+   e passa a usar um modelo que exista hoje;
+3. se o provedor inteiro estiver sem modelos de pé, ele é suspenso por 1 minuto
+   (em RAM) e a mensagem cai para o próximo provedor, sem martelar a API.
+
+Personalize a ordem com `GROQ_MODELS`, `GEMINI_MODELS`, `OPENAI_MODELS` e
+`AI_MODELS` (separados por vírgula); sem elas, o bot usa as listas padrão —
+`openai/gpt-oss-120b → openai/gpt-oss-20b → qwen/qwen3.8-27b → …` na Groq e
+`gemini-3.8-flash → gemini-3.6-flash → …` no Gemini. `.pools` mostra a ordem
+em uso, `.pools reset` limpa os cooldowns e as marcas de modelo na hora e
+`.pools recarregar` relê o `.env` sem reiniciar o bot.
 
 ### Remoção de fundo e downloads
 
@@ -232,7 +278,9 @@ Endpoints customizados são considerados confiáveis pelo operador e podem usar 
 .config qualidadePadrao media   → qualidade padrão
 .config maxMB 120               → limite por arquivo (1–200 MiB)
 .doctor                         → diagnóstico no WhatsApp (dono)
-.pools                          → status dos provedores (dono)
+.pools                          → chaves e modelos dos provedores (dono)
+.pools reset                    → limpa cooldowns e modelos marcados (dono)
+.pools recarregar               → relê o .env sem reiniciar (dono)
 ```
 
 ## Desenvolvimento e validação

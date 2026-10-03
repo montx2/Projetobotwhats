@@ -65,6 +65,21 @@ export class KeyPool {
     return reason;
   }
 
+  /** Libera todos os itens na hora (usado por `.pools reset`). */
+  clearCooldowns() {
+    const cleared = this.cooldowns.size;
+    this.cooldowns.clear();
+    return cleared;
+  }
+
+  /** Menor tempo restante de cooldown do pool, em ms (0 se algum já está livre). */
+  nextRetryMs() {
+    const now = Date.now();
+    const pending = this.items.map((item) => (this.cooldowns.get(item) || 0) - now).filter((ms) => ms > 0);
+    if (!pending.length || pending.length < this.items.length) return 0;
+    return Math.min(...pending);
+  }
+
   /**
    * Executa `fn(item)` girando pelo pool até alguém ter sucesso.
    * `isExhausted(error)` decide se o erro é de limite (cooldown) ou fatal.
@@ -83,6 +98,17 @@ export class KeyPool {
         return result;
       } catch (error) {
         errors.push(error);
+        // `fatalForPool`: falha que vai se repetir em TODAS as chaves (ex.: modelo
+        // descontinuado pelo provedor). Não faz sentido gastar as outras chaves.
+        if (error?.fatalForPool) {
+          const err = new Error(
+            `${label ? `${label}: ` : ''}${String(error?.message || error).slice(0, 300)}`
+          );
+          err.pool = this.name;
+          err.causes = errors;
+          err.modelError = true;
+          throw err;
+        }
         if (isExhausted(error)) {
           const requestedCooldown = Number(error?.retryAfterMs);
           this.reportFailure(item, {
@@ -97,11 +123,11 @@ export class KeyPool {
     }
     const now = Date.now();
     const available = this.items.filter((item) => !this.cooldowns.has(item) || this.cooldowns.get(item) <= now);
-    const pendingCooldowns = this.items.map((item) => (this.cooldowns.get(item) || 0) - now).filter((ms) => ms > 0);
-    const retryAfterMs = pendingCooldowns.length ? Math.min(...pendingCooldowns) : 0;
+    const retryAfterMs = this.nextRetryMs();
     const detail = errors.map((error) => String(error?.message || error).slice(0, 120)).join(' | ');
+    const wait = retryAfterMs ? ` (volta em ${formatCooldown(retryAfterMs)})` : '';
     const err = new Error(
-      `${available.length ? `Todos os ${this.items.length} itens do pool "${this.name}" falharam` : `Pool "${this.name}" em cooldown`}` +
+      `${available.length ? `Todos os ${this.items.length} itens do pool "${this.name}" falharam` : `Pool "${this.name}" em cooldown${wait}`}` +
         `${label ? ` (${label})` : ''}${detail ? `: ${detail}` : ''}`
     );
     err.pool = this.name;
@@ -119,6 +145,55 @@ export class KeyPool {
       return `${i + 1}. ${mask(item)} — ${status} · ${s.ok} ok / ${s.fail} falhas`;
     });
   }
+}
+
+/**
+ * Erros de MODELO, e não de chave: o provedor descontinuou/removeu o modelo
+ * (ex.: a Groq aposentou `llama-3.3-70b-versatile` em 16/08/2026 e o Google
+ * aposentou `gemini-2.0-flash` em 01/06/2026 — ambos passaram a devolver 404).
+ * Girar a chave NÃO resolve: é preciso tentar outro modelo com a MESMA chave.
+ */
+export function isModelError(error) {
+  const status = Number(error?.status || error?.statusCode || error?.response?.status || 0);
+  if (status === 404) return true;
+  const msg = String(error?.message || error).toLowerCase();
+  if (!msg.includes('model')) return false;
+  return [
+    'model_not_found',
+    'model not found',
+    'does not exist',
+    'do not have access',
+    'unknown model',
+    'invalid model',
+    'decommissioned',
+    'deprecated',
+    'no longer',
+    'not supported',
+    'unsupported'
+  ].some((t) => msg.includes(t));
+}
+
+/**
+ * Modelo morto para TODO MUNDO (não é falta de acesso da conta): não adianta
+ * gastar as outras chaves do pool — o erro vai se repetir em todas elas.
+ */
+export function isModelMissingForEveryone(error) {
+  if (!isModelError(error)) return false;
+  const msg = String(error?.message || error).toLowerCase();
+  if (['do not have access', 'permission', 'not enabled', 'allowlist', 'your account'].some((t) => msg.includes(t))) return false;
+  return ['does not exist', 'model_not_found', 'model not found', 'unknown model', 'invalid model', 'decommissioned', 'no longer'].some((t) =>
+    msg.includes(t)
+  );
+}
+
+/** Tempo restante legível ("45s", "3min", "1h05"). */
+export function formatCooldown(ms) {
+  const total = Math.max(0, Math.round(Number(ms) / 1000));
+  if (total < 60) return `${total}s`;
+  const min = Math.floor(total / 60);
+  if (min < 60) return `${min}min`;
+  const h = Math.floor(min / 60);
+  return `${h}h${String(min % 60).padStart(2, '0')}`;
 }
 
 /** Erros que indicam limite esgotado / chave inválida. */

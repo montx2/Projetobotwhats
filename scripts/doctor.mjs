@@ -56,15 +56,31 @@ if (!envLoad.loaded) {
   } else {
     warn('remoção de fundo: nenhuma chave — .fundo e .sfundo vão falhar. Coloque REMOVE_BG_KEYS=chave1,chave2');
   }
+  const { envSummary } = await import('../src/core/config.js');
+  const summary = envSummary();
   const ia = {
-    'IA Gemini': envList('GEMINI_KEYS').length,
-    'IA OpenAI': envList('OPENAI_KEYS').length,
-    'IA Groq': envList('GROQ_KEYS').length,
-    'IA Pollinations': envList('POLLINATIONS_KEYS').length
+    'IA Gemini': summary.geminiKeys,
+    'IA OpenAI': summary.openaiKeys,
+    'IA Groq': summary.groqKeys,
+    'IA custom (AI_KEYS)': summary.aiKeys,
+    'IA Pollinations': summary.pollinationsKeys
   };
   for (const [label, count] of Object.entries(ia)) {
     if (count) ok(`${label}: ${count} chave(s)`);
     else warn(`${label}: vazio — funciona sem (o bot usa Pollinations grátis)`);
+  }
+  if (summary.groqKeys === 1) {
+    warn('IA Groq: só 1 chave. Se ela estourar o limite, a IA cai no Pollinations — aceita várias: GROQ_KEYS=gsk_1,gsk_2,gsk_3');
+  }
+  const pinnedModels = [
+    ['GROQ_MODELS', summary.groqModels],
+    ['GEMINI_MODELS', summary.geminiModels],
+    ['AI_MODELS', summary.aiModels]
+  ].filter(([, count]) => count > 0);
+  if (pinnedModels.length) {
+    ok(`modelos fixados no .env: ${pinnedModels.map(([name, count]) => `${name} (${count})`).join(' · ')} — o bot usa essa ordem antes do padrão`);
+  } else {
+    console.log('ℹ️ Modelos: usando as listas padrão do bot (com reserva automática quando um modelo é descontinuado).');
   }
   const cobalt = envList('COBALT_INSTANCES').length;
   if (cobalt) ok(`downloads universais (Cobalt): ${cobalt} instância(s)`);
