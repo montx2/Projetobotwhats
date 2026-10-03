@@ -15,6 +15,17 @@ import { ENV, cfg } from '../core/config.js';
 import { postJson, fetchBuffer, sleep } from '../core/http.js';
 import { log } from '../core/logger.js';
 import { normalizeJid } from '../util/text.js';
+import {
+  convertCurrency,
+  extractCurrencyIntent,
+  extractHolidayIntent,
+  extractWeatherLocation,
+  formatCurrencyContext,
+  formatHolidayContext,
+  formatWeatherContext,
+  getPublicHolidays,
+  getWeatherByCity
+} from './public-apis.js';
 
 // ── Pools de chaves ────────────────────────────────────────
 const pools = {
@@ -140,13 +151,50 @@ async function pollinationsText(messages) {
   return pollinationsTextOnce(messages, '');
 }
 
+async function publicApiContext(question) {
+  const weatherLocation = extractWeatherLocation(question);
+  if (weatherLocation) {
+    try {
+      return formatWeatherContext(await getWeatherByCity(weatherLocation));
+    } catch (error) {
+      log.warn('consulta de clima para IA falhou', { name: error?.name, status: error?.status, code: error?.code });
+      throw new Error('não consegui consultar o clima agora; tente novamente ou use `.clima <cidade>`');
+    }
+  }
+
+  const currency = extractCurrencyIntent(question);
+  if (currency) {
+    try {
+      return formatCurrencyContext(await convertCurrency(currency.amount, currency.from, currency.to));
+    } catch (error) {
+      log.warn('consulta de câmbio para IA falhou', { name: error?.name, status: error?.status, code: error?.code });
+      throw new Error('não consegui consultar essa conversão agora; confira os códigos de moeda e tente novamente');
+    }
+  }
+
+  const holidays = extractHolidayIntent(question);
+  if (holidays) {
+    try {
+      const data = await getPublicHolidays(holidays.year, holidays.country);
+      return formatHolidayContext(data, holidays.year, holidays.country);
+    } catch (error) {
+      log.warn('consulta de feriados para IA falhou', { name: error?.name, status: error?.status, code: error?.code });
+      throw new Error('não consegui consultar esse calendário de feriados agora; tente novamente mais tarde');
+    }
+  }
+
+  return '';
+}
+
 /** Chat com fallback em cascata por todos os pools. */
 export async function aiChat(memoryKey, userText) {
   const question = String(userText || '').trim();
   if (!question) throw new Error('escreva uma pergunta para a IA');
   if (question.length > MAX_AI_INPUT_CHARS) throw new Error(`texto longo demais (máximo ${MAX_AI_INPUT_CHARS} caracteres)`);
   pruneMemory();
-  const system = cfg.get().ia.sistema;
+  const apiContext = await publicApiContext(question);
+  const baseSystem = cfg.get().ia.sistema;
+  const system = apiContext ? `${baseSystem}\n\n${apiContext}` : baseSystem;
   const history = historyFor(memory.get(memoryKey));
   const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: question }];
 

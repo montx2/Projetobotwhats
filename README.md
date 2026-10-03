@@ -1,6 +1,6 @@
 # MontxBOT
 
-Bot de WhatsApp Multi-Device baseado em **Baileys 6.7.24**. Inclui figurinhas, downloads de links, utilitários de IA e ferramentas de grupo opt-in: enquetes, boas-vindas/saída e proteção anti-link. Recursos que copiam ou retêm conteúdo pessoal começam desativados. Feito para Termux, Linux e Windows.
+Bot de WhatsApp Multi-Device baseado em **Baileys 6.7.24**. Inclui figurinhas, downloads de links, IA, utilitários com APIs públicas sem chave e ferramentas de grupo opt-in: enquetes, boas-vindas/saída e proteção anti-link. Recursos que copiam ou retêm conteúdo pessoal começam desativados. Feito para Termux, Linux e Windows.
 
 > **Aviso importante:** Baileys é uma integração não oficial. O WhatsApp pode alterar o protocolo, limitar ou encerrar sessões. Use uma conta sob seu controle, respeite as regras do WhatsApp, a legislação local, direitos autorais e a privacidade/consentimento das pessoas. Este projeto não promete disponibilidade nem proteção contra bloqueios.
 
@@ -97,6 +97,21 @@ Os comandos de IA usam provedores externos configurados (ou Pollinations quando 
 
 A memória de conversa é isolada por chat e remetente, fica apenas em RAM por até 30 minutos e é limitada em tamanho; `.ia reset` limpa a memória daquele remetente. Prompts não são gravados nos logs. A retenção e o tratamento pelo provedor externo seguem as políticas desse provedor.
 
+### APIs públicas de utilidades
+
+```text
+.clima Itaúna, MG                 → clima atual e resumo da previsão de hoje
+.cotacao 100 USD BRL              → converte usando taxa de referência diária
+.feriados 2027 BR                 → feriados nacionais do país/ano informado
+.ia clima Itaúna                  → IA responde com dados atuais do clima
+.ia cotacao 100 USD BRL           → IA contextualiza uma conversão
+.ia feriados 2027 BR              → IA consulta o calendário nacional
+```
+
+Esses comandos usam endpoints fixos, sem chave: [Open-Meteo](https://open-meteo.com/en/docs) para geocodificação e clima, [Frankfurter](https://frankfurter.dev/) para câmbio e [Nager.Date](https://nagerholidays.com/api) para feriados. A cidade consultada é enviada ao Open-Meteo; os códigos de moeda vão ao Frankfurter; país/ano vão ao Nager.Date. Nas perguntas à IA, esses dados também são incluídos no contexto enviado ao provedor de IA já configurado. Não informe localizações ou outros dados que não queira compartilhar.
+
+O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-Meteo é destinada a uso não comercial segundo os termos do serviço; verifique as condições atuais antes de operar comercialmente. Câmbio é taxa diária de referência, não cotação em tempo real nem recomendação financeira. A lista de feriados considera apenas datas nacionais; feriados estaduais e municipais podem não aparecer. As respostas têm cache em memória e timeout; há limites por processo de até 4.000 consultas de clima/dia (para manter margem no limite divulgado pelo Open-Meteo), 60 consultas de câmbio/minuto e 30 consultas de feriados/minuto. Uma falha do serviço é informada em vez de inventar dados. APIs públicas podem mudar, limitar ou ficar indisponíveis — consulte os termos de cada provedor.
+
 ## Comandos
 
 ```text
@@ -119,6 +134,9 @@ A memória de conversa é isolada por chat e remetente, fica apenas em RAM por a
 .voz <texto>                    → texto para áudio
 .traduz <idioma> <texto>        → tradução
 .resumo <texto>                 → resumo
+.clima <cidade>                 → clima atual e previsão do dia
+.cotacao <valor> <origem> <destino> → conversão cambial de referência
+.feriados [ano] [país]           → feriados nacionais (padrão: Brasil/ano atual)
 .enquete pergunta | opção 1 | opção 2 → enquete de escolha única no grupo
 ```
 

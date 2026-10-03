@@ -28,6 +28,9 @@ const DOWNLOAD_ITEMS = [
 
 const AI_ITEMS = [
   ['.ia <pergunta>', 'conversa com a IA  ·  `.ia reset` limpa'],
+  ['.ia clima <cidade>', 'responde usando dados atuais do clima'],
+  ['.ia cotacao <valor> <origem> <destino>', 'conversão com taxa de referência'],
+  ['.ia feriados [ano] [país]', 'consulta feriados nacionais'],
   ['.criar <ideia>', 'gera uma imagem'],
   ['.voz <texto>', 'transforma texto em áudio'],
   ['.traduz <idioma> <texto>', 'tradução instantânea'],
@@ -48,6 +51,9 @@ export function publicMenu() {
     }),
     section('Inteligência Artificial', AI_ITEMS),
     section('Utilidades', [
+      ['.clima <cidade>', 'clima atual e resumo de hoje'],
+      ['.cotacao <valor> <origem> <destino>', 'conversão de moedas'],
+      ['.feriados [ano] [país]', 'próximos feriados nacionais · padrão BR'],
       ['.menu', 'este painel'],
       ['.ping', 'testa a velocidade'],
       ['.info', 'status do bot'],
@@ -90,6 +96,11 @@ export function ownerMenu() {
     section('Figurinhas', STICKER_ITEMS),
     section('Downloads', [...DOWNLOAD_ITEMS, ['.menudl', 'guia completo']]),
     section('Inteligência Artificial', AI_ITEMS),
+    section('Utilidades', [
+      ['.clima <cidade>', 'clima atual e resumo de hoje'],
+      ['.cotacao <valor> <origem> <destino>', 'conversão de moedas'],
+      ['.feriados [ano] [país]', 'próximos feriados nacionais · padrão BR']
+    ]),
     section('Sistema', [
       ['.ping', 'velocidade'],
       ['.info', 'status geral'],

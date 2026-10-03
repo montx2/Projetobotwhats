@@ -46,6 +46,14 @@ import { hasFfmpeg } from '../util/ffmpeg.js';
 import { cobaltPool } from './downloaders/cobalt.js';
 import { hasYtDlp, isYtdlpEnabled, findYtdlp } from './downloaders/ytdlp.js';
 import { SlidingWindowLimiter } from '../core/limiter.js';
+import {
+  convertCurrency,
+  formatCurrencyMessage,
+  formatPublicHolidaysMessage,
+  formatWeatherMessage,
+  getPublicHolidays,
+  getWeatherByCity
+} from './public-apis.js';
 
 const STARTED_AT = Date.now();
 const expensiveLimiter = new SlidingWindowLimiter({ limit: 6, windowMs: 60_000, minIntervalMs: 2_000 });
@@ -57,7 +65,9 @@ const MAX_CONCURRENT_EXPENSIVE = 3;
 let activeExpensive = 0;
 const EXPENSIVE_COMMANDS = new Set([
   's', 'fig', 'figu', 'sticker', 'stiker', 'figurinha', 'sfundo', 'stickerfundo', 'sfundinho',
-  'fundo', 'removefundo', 'rmbg', 'removebg', 'ia', 'ai', 'gpt', 'chat', 'criar', 'img',
+  'fundo', 'removefundo', 'rmbg', 'removebg', 'ia', 'ai', 'gpt', 'chat',
+  'clima', 'tempo', 'previsao', 'previsão', 'cotacao', 'cotação', 'cambio', 'câmbio', 'feriados',
+  'criar', 'img',
   'gerar', 'imagine', 'desenhar', 'voz', 'tts', 'falar', 'traduz', 'traduzir', 'resumo', 'resumir',
   'dl', 'download', 'baixar', 'tt', 'tiktok', 'tiktokdl', 'ttmp3', 'tiktokmp3', 'ttaudio',
   'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels', 'yt', 'youtube', 'ytb',
@@ -961,6 +971,41 @@ async function runCommand(sock, msg, cmd, ctx) {
       await reply(wait('Pensando'));
       const answer = await aiChat(memoryKey, question);
       return reply(truncate(answer, 3800));
+    }
+
+    case 'clima':
+    case 'tempo':
+    case 'previsao':
+    case 'previsão': {
+      if (!argText) return reply(usage('.clima <cidade>', '.clima Itaúna, MG', 'Também aceita cidade, estado e país para reduzir ambiguidades.'));
+      await reply(wait('Consultando o clima'));
+      const weather = await getWeatherByCity(argText);
+      return reply(formatWeatherMessage(weather));
+    }
+
+    case 'cotacao':
+    case 'cotação':
+    case 'cambio':
+    case 'câmbio': {
+      if (args.length !== 3) {
+        return reply(usage('.cotacao <valor> <origem> <destino>', '.cotacao 100 USD BRL', 'Aceita decimal com vírgula: `.cotacao 50,75 EUR BRL`.'));
+      }
+      await reply(wait('Consultando a taxa de referência'));
+      const conversion = await convertCurrency(args[0], args[1], args[2]);
+      return reply(formatCurrencyMessage(conversion));
+    }
+
+    case 'feriados': {
+      const yearTokens = args.filter((arg) => /^\d{4}$/.test(arg));
+      const countryTokens = args.filter((arg) => /^[a-z]{2}$/i.test(arg));
+      if (args.length > 2 || yearTokens.length > 1 || countryTokens.length > 1 || yearTokens.length + countryTokens.length !== args.length) {
+        return reply(usage('.feriados [ano] [país]', '.feriados 2027 BR', 'O país usa código ISO de 2 letras; sem argumentos, consulta o Brasil no ano atual.'));
+      }
+      const year = Number(yearTokens[0] || new Date().getUTCFullYear());
+      const country = (countryTokens[0] || 'BR').toUpperCase();
+      await reply(wait('Consultando o calendário de feriados'));
+      const holidays = await getPublicHolidays(year, country);
+      return reply(formatPublicHolidaysMessage(holidays, year, country));
     }
 
     case 'criar':
