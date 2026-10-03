@@ -207,6 +207,28 @@ function bareDigits(jid) {
   return String(jid).split('@')[0].split(':')[0].replace(/\D/g, '');
 }
 
+/**
+ * Todas as identidades possíveis de quem enviou a mensagem.
+ * O WhatsApp migrou grupos para JIDs @lid, então o `participant` pode vir como
+ * `1234567@lid` enquanto o número real aparece em `participantPn`/`participantAlt`.
+ */
+export function senderCandidates(msg) {
+  const key = msg?.key || {};
+  const list = [
+    key.participant,
+    key.participantPn,
+    key.participantAlt,
+    key.senderLid,
+    key.senderPn,
+    msg?.participant,
+    msg?.participantPn,
+    msg?.participantAlt,
+    isGroup(key.remoteJid) ? null : key.remoteJid,
+    isGroup(key.remoteJidAlt) ? null : key.remoteJidAlt
+  ];
+  return [...new Set(list.filter(Boolean).map(String))];
+}
+
 /** Verifica se o chat ou remetente foi ativado/autorizado explicitamente pelo dono. */
 export function isAuthorizedTarget(jid, participant, list = cfg.get().autorizados) {
   if (!Array.isArray(list) || !list.length) return false;
@@ -385,12 +407,15 @@ export async function handleMessage(sock, msg, deps) {
   const text = extractAnyText(msg.message).trim();
   if (msg.key?.fromMe && isBotGeneratedText(text)) return;
 
-  const senderIsOwner = Boolean(msg.key?.fromMe || isOwner?.(jid, msg.key.participant));
+  // Em grupos o WhatsApp pode entregar o remetente como @lid (novo identificador)
+  // em vez do número. Testamos TODAS as variantes que o Baileys expõe para que
+  // `.ativar` (e demais comandos do dono) funcionem também em grupo.
+  const senderIsOwner = Boolean(msg.key?.fromMe || senderCandidates(msg).some((c) => isOwner?.(jid, c, msg)));
   const inOwnerPrivate =
     typeof deps.isOwnerPrivateChat === 'function'
       ? deps.isOwnerPrivateChat(jid, msg)
       : !isGroup(jid) && Boolean(isOwner?.(jid));
-  const authorized = isAuthorizedTarget(jid, msg.key.participant);
+  const authorized = senderCandidates(msg).some((c) => isAuthorizedTarget(jid, c)) || isAuthorizedTarget(jid, msg.key.participant);
   const allowedChat = inOwnerPrivate || authorized;
   const revoke = isRevokeMessage(msg);
   const viewOnce = isViewOnce(msg.message);
@@ -446,7 +471,16 @@ export async function handleMessage(sock, msg, deps) {
   // • Caso contrário: silêncio absoluto (0 mensagens).
   if (command) {
     if (isAuthCmd || OWNER_ONLY_COMMANDS.has(command.name)) {
-      if (!senderIsOwner) return; // terceiros tentando comandos exclusivos do dono são ignorados em silêncio
+      if (!senderIsOwner) {
+        // Terceiros são ignorados em silêncio, mas registramos no console para
+        // diagnosticar casos em que o próprio dono não é reconhecido (ex.: @lid).
+        log.warn(
+          `.${command.name} ignorado: remetente não reconhecido como dono ` +
+            `(${senderCandidates(msg).join(', ') || 'sem identificador'}) · ` +
+            'defina OWNER_NUMBERS no .env com o seu número'
+        );
+        return;
+      }
       if (!inOwnerPrivate && PRIVATE_OWNER_COMMANDS.has(command.name)) return; // View Once / Anti-Delete: 0 traços fora do privado
     } else if (!inOwnerPrivate) {
       // Fora do privado do dono: precisa estar ativado
