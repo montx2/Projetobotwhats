@@ -209,7 +209,14 @@ const ENV_SCHEMA = {
   cobaltInstances: () => envList('COBALT_INSTANCES'),
   cobaltApiKey: () => process.env.COBALT_API_KEY || '',
   tiktokApi: () => envList('TIKTOK_API'),
-  waVersionOverride: () => process.env.WA_VERSION_OVERRIDE || ''
+  waVersionOverride: () => process.env.WA_VERSION_OVERRIDE || '',
+  // Minutos entre renovações automáticas das chaves de cada grupo (0 = desliga).
+  senderKeyRefreshMin: () => {
+    const raw = process.env.SENDER_KEY_REFRESH_MIN;
+    if (raw === undefined || String(raw).trim() === '') return 60;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 60;
+  }
 };
 
 export const ENV = new Proxy(

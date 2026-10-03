@@ -26,6 +26,7 @@ import { isTermux, platformBanner } from '../core/platform.js';
 import { markBotSent, isBotSent } from './cache.js';
 import { rememberSent, getSentMessage } from './sent-store.js';
 import { createGroupMetadataCache } from './group-cache.js';
+import { createRetryCounterCache, createSenderKeyKeeper } from './sender-keys.js';
 
 export { markBotSent, isBotSent };
 
@@ -41,6 +42,16 @@ let reconnectTimer = null;
 // Consulta o servidor 1x e reaproveita a lista de participantes por alguns minutos.
 const groupCache = createGroupMetadataCache({
   fetch: (jid) => socket?.groupMetadata?.(jid)
+});
+
+// Contador de reenvios que sobrevive a reconexões (o padrão do Baileys nasce de novo a cada socket).
+const retryCounterCache = createRetryCounterCache();
+
+// Evita o "Aguardando mensagem" em grupos: renova a memória de chaves do grupo
+// (veja sender-keys.js). SENDER_KEY_REFRESH_MIN=0 desliga a renovação periódica.
+const senderKeys = createSenderKeyKeeper({
+  refreshMs: ENV.senderKeyRefreshMin * 60_000,
+  onError: (error) => log.warn(`não consegui renovar chaves do grupo: ${String(error?.message || error).slice(0, 120)}`)
 });
 
 export function getSocket() {
@@ -200,6 +211,7 @@ export async function startClient(handlers = {}) {
     getMessage: async (key) => getSentMessage(key?.id),
     // Evita uma consulta ao servidor a cada mensagem enviada em grupo.
     cachedGroupMetadata: (jid) => groupCache.get(jid),
+    msgRetryCounterCache: retryCounterCache,
     logger: baileysLogger
   });
   groupCache.clear(); // socket novo = recomeça sem metadados velhos
@@ -213,6 +225,12 @@ export async function startClient(handlers = {}) {
       options?.messageId ||
       (typeof generateMessageIDV2 === 'function' ? generateMessageIDV2(clientSocket.user?.id) : undefined);
     if (msgId) markBotSent(msgId);
+    if (typeof jid === 'string' && jid.endsWith('@g.us')) {
+      try {
+        const meta = await groupCache.get(jid);
+        await senderKeys.refreshIfStale(clientSocket, jid, meta?.participants?.length);
+      } catch {} // renovar chaves nunca pode impedir o envio
+    }
     const res = await origSendMessage(jid, content, msgId ? { ...options, messageId: msgId } : options);
     if (res?.key?.id) {
       markBotSent(res.key.id);
@@ -301,12 +319,20 @@ export async function startClient(handlers = {}) {
     for (const update of updates || []) if (update?.id) groupCache.invalidate(update.id);
   });
   clientSocket.ev.on('groups.upsert', (groups) => {
-    for (const group of groups || []) if (group?.id) groupCache.set(group.id, group);
+    for (const group of groups || []) {
+      if (!group?.id) continue;
+      groupCache.set(group.id, group);
+      // Bot entrou (ou foi criado) num grupo novo: começa sem chaves anotadas.
+      senderKeys.reset(clientSocket, group.id);
+    }
   });
 
   // Entradas/saídas de membros são consumidas somente pelos recursos opt-in de grupo.
   clientSocket.ev.on('group-participants.update', async (update) => {
-    if (update?.id) groupCache.invalidate(update.id);
+    if (update?.id) {
+      groupCache.invalidate(update.id);
+      await senderKeys.reset(clientSocket, update.id); // quem entrou/saiu precisa de chaves novas
+    }
     if (socket !== clientSocket) return;
     try {
       await handlers.onGroupParticipantsUpdate?.(clientSocket, update);
