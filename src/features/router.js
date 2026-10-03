@@ -54,6 +54,7 @@ import {
   getPublicHolidays,
   getWeatherByCity
 } from './public-apis.js';
+import { clearChatGames, handleGameCommand, isGameCommand, tryHandleDirectGameMove } from './games.js';
 
 const STARTED_AT = Date.now();
 const expensiveLimiter = new SlidingWindowLimiter({ limit: 6, windowMs: 60_000, minIntervalMs: 2_000 });
@@ -183,7 +184,9 @@ const BOT_OUTPUT_PREFIXES = [
   '🔓 ',
   '🖼️ ',
   '🤔 ',
-  '╭━━'
+  '╭━━',
+  '╭─ ◆',
+  '✦ '
 ];
 
 function isBotGeneratedText(text) {
@@ -492,8 +495,20 @@ export async function handleMessage(sock, msg, deps) {
     return;
   }
 
-  // 5) Auto-download de links soltos: no privado do dono e nos chats/grupos ativados.
-  //    (Nunca em grupos aleatórios não autorizados — o bot fica mudo neles.)
+  // 5) Movimentos sem prefixo: somente em chats liberados ou no privado do dono.
+  if (inOwnerPrivate || authorized) {
+    const progress = createProgress(sock, jid, msg);
+    const directReply = async (content) => progress.update(content);
+    const handledGameMove = await tryHandleDirectGameMove(sock, msg, text, {
+      reply: directReply,
+      authorized,
+      owner: inOwnerPrivate && senderIsOwner
+    });
+    if (handledGameMove) return;
+  }
+
+  // 6) Auto-download de links soltos no privado do dono e nos chats/grupos ativados.
+  //    Grupos não autorizados permanecem silenciosos.
   if (inOwnerPrivate || authorized) {
     const urls = extractUrls(text);
     if (urls.length && cfg.get().autoDownload && urls.some(isKnownSocialUrl)) {
@@ -670,6 +685,7 @@ async function antiLinkCommand(sock, msg, args, ctx, owner) {
 function revokeChatFeatures(jid) {
   const target = bareId(jid);
   messageCache.clearChat(jid);
+  clearChatGames(jid);
   resetChatMemoryForChat(jid);
   cfg.get().autorizados = cfg.get().autorizados.filter((item) => bareId(item) !== target);
   cfg.get().antiDelete.chats = cfg.get().antiDelete.chats.filter((item) => bareId(item) !== target);
@@ -683,6 +699,8 @@ async function runCommand(sock, msg, cmd, ctx) {
   const jid = msg.key.remoteJid;
   const owner = isOwner(jid, msg.key.participant);
   const argText = args.join(' ');
+
+  if (isGameCommand(name)) return handleGameCommand({ sock, msg, name, args, reply, owner });
 
   switch (name) {
     // ── ATIVAR / DESATIVAR (.ativar / .desativar) ───────
@@ -828,7 +846,7 @@ async function runCommand(sock, msg, cmd, ctx) {
             `yt-dlp: ${!isYtdlpEnabled() ? 'desativado por padrão' : hasYtDlp() ? 'habilitado' : 'habilitado, mas não instalado'}`,
             `auto-dl: ${cfg.get().autoDownload ? 'ligado' : 'desligado'}`
           ],
-          ownerName: owner ? 'você 👑' : undefined
+          ownerName: owner ? 'você' : undefined
         })
       );
 
@@ -1017,7 +1035,7 @@ async function runCommand(sock, msg, cmd, ctx) {
       await reply(wait('Gerando sua imagem · pode levar até 1 min'));
       const buffer = await aiImage(argText);
       await reply(wait('Enviando imagem'));
-      const sent = await sock.sendMessage(jid, { image: buffer, caption: `🎨 "${truncate(argText, 200)}"` }, { quoted: msg });
+      const sent = await sock.sendMessage(jid, { image: buffer, caption: `${SYM.section} Imagem criada · "${truncate(argText, 200)}"` }, { quoted: msg });
       if (sent?.key?.id) markBotSent(sent.key.id);
       return reply(ok('Imagem pronta'));
     }

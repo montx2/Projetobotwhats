@@ -37,6 +37,17 @@ const AI_ITEMS = [
   ['.resumo <texto>', 'resume textos longos']
 ];
 
+const GAME_ITEMS = [
+  ['.jogos', 'abre o catálogo completo'],
+  ['.velha [facil|medio|dificil]', 'contra o bot · PvP com @oponente ou .velha aberto'],
+  ['.termo / .forca', 'palavras em português · use dica para uma pista'],
+  ['.minado', 'campo minado 5×5 · coordenadas A1–E5 · flag A1'],
+  ['.anagrama / .quiz', 'palavras embaralhadas e perguntas rápidas'],
+  ['.adivinhe / .ppt', 'número secreto ou Jokenpô'],
+  ['.dado [NdM] / .moeda / .roleta', 'rolagens rápidas'],
+  ['.placar', 'ranking deste chat · .placar reset (admin/dono)']
+];
+
 /**
  * Menu público para chats/grupos liberados com .ativar.
  * Nunca menciona View Once/Anti-Delete; comandos de administração de grupo são validados no roteador.
@@ -50,6 +61,7 @@ export function publicMenu() {
       note: 'TikTok, Instagram, YouTube, Pinterest, X, Facebook, Threads, Reddit e mais'
     }),
     section('Inteligência Artificial', AI_ITEMS),
+    section('Jogos & arcade', GAME_ITEMS),
     section('Utilidades', [
       ['.clima <cidade>', 'clima atual e resumo de hoje'],
       ['.cotacao <valor> <origem> <destino>', 'conversão de moedas'],
@@ -96,6 +108,7 @@ export function ownerMenu() {
     section('Figurinhas', STICKER_ITEMS),
     section('Downloads', [...DOWNLOAD_ITEMS, ['.menudl', 'guia completo']]),
     section('Inteligência Artificial', AI_ITEMS),
+    section('Jogos & arcade', GAME_ITEMS),
     section('Utilidades', [
       ['.clima <cidade>', 'clima atual e resumo de hoje'],
       ['.cotacao <valor> <origem> <destino>', 'conversão de moedas'],

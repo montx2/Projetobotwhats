@@ -3,6 +3,7 @@
 // Paleta de símbolos (todos suportados em Android/iOS/Web, sem "quadradinho"):
 //   ◆ marca/título    ✦ seção        ▸ item/comando     › detalhe
 //   ✓ sucesso         ✕ erro         ⚠ atenção          ◇ em andamento
+//   ★ destaque       ♛ ranking       → seta             ▲ / ▼ posição
 //
 // Estrutura padrão de um cartão:
 //   ╭─ ◆ *Marca*
@@ -22,7 +23,12 @@ export const SYM = Object.freeze({
   wait: '◇',
   dot: '·',
   on: '●',
-  off: '○'
+  off: '○',
+  star: '★',
+  trophy: '♛',
+  arrow: '→',
+  up: '▲',
+  down: '▼'
 });
 
 export const LINE = '──────────────';
@@ -100,4 +106,20 @@ export function kv(label, value) {
 /** Indicador ligado/desligado. */
 export function toggle(on, onText = 'ativo', offText = 'desativado') {
   return on ? `${SYM.on} ${onText}` : `${SYM.off} ${offText}`;
+}
+
+/**
+ * Bloco monoespaçado do WhatsApp (```...```).
+ * Garante quebra de linha após a abertura e antes do fechamento para que o
+ * WhatsApp nunca remova espaços ou interprete a 1ª palavra como linguagem.
+ */
+export function mono(lines) {
+  const source = Array.isArray(lines) ? lines.join('\n') : String(lines ?? '');
+  const body = source.replace(/\r\n?/g, '\n').replace(/^\n+|\n+$/g, '');
+  return `\`\`\`\n${body}\n\`\`\``;
+}
+
+/** Rótulo em colchetes angulares/geométricos para destaques curtos. */
+export function badge(text) {
+  return `⟦ ${text} ⟧`;
 }
