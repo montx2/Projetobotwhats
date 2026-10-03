@@ -45,40 +45,52 @@ const GAME_ITEMS = [
   ['.anagrama / .quiz', 'palavras embaralhadas e perguntas rápidas'],
   ['.adivinhe / .ppt', 'número secreto ou Jokenpô'],
   ['.dado [NdM] / .moeda / .roleta', 'rolagens rápidas'],
-  ['.placar', 'ranking deste chat · .placar reset (admin/dono)']
+  ['.placar', 'ranking deste chat · .placar reset (admin/dono)'],
+  ['.encerrar', 'finaliza a partida ativa neste chat']
 ];
 
 /**
  * Menu público para chats/grupos liberados com .ativar.
  * Nunca menciona View Once/Anti-Delete; comandos de administração de grupo são validados no roteador.
+ * Fora de um grupo, as ferramentas de grupo (boas-vindas, anti-link, enquete) ficam de fora —
+ * elas só fazem sentido dentro de um grupo.
  */
-export function publicMenu() {
+export function publicMenu({ isGroup = true } = {}) {
   const nome = cfg.get().nomeBot;
-  return card([
-    header(nome, 'central de comandos'),
+  const utilidades = [
+    ['.clima <cidade>', 'clima atual e resumo de hoje'],
+    ['.cotacao <valor> <origem> <destino>', 'conversão de moedas'],
+    ['.feriados [ano] [país]', 'próximos feriados nacionais · padrão BR'],
+    ['.menu', 'este painel'],
+    ['.ping', 'testa a velocidade'],
+    ['.info', 'status do bot']
+  ];
+  if (isGroup) utilidades.push(['.enquete pergunta | opção 1 | opção 2', 'cria uma enquete no grupo']);
+
+  const blocos = [
+    header(nome, isGroup ? 'central de comandos' : 'central de comandos · conversa privada'),
     section('Figurinhas', STICKER_ITEMS),
     section('Downloads', DOWNLOAD_ITEMS, {
       note: 'TikTok, Instagram, YouTube, Pinterest, X, Facebook, Threads, Reddit e mais'
     }),
     section('Inteligência Artificial', AI_ITEMS),
     section('Jogos & arcade', GAME_ITEMS),
-    section('Utilidades', [
-      ['.clima <cidade>', 'clima atual e resumo de hoje'],
-      ['.cotacao <valor> <origem> <destino>', 'conversão de moedas'],
-      ['.feriados [ano] [país]', 'próximos feriados nacionais · padrão BR'],
-      ['.menu', 'este painel'],
-      ['.ping', 'testa a velocidade'],
-      ['.info', 'status do bot'],
-      ['.enquete pergunta | opção 1 | opção 2', 'cria uma enquete no grupo']
-    ]),
-    section('Gestão do grupo', [
+    section('Utilidades', utilidades)
+  ];
+
+  if (isGroup) {
+    blocos.push(section('Gestão do grupo', [
       ['.boasvindas on | off', 'mensagem automática ao entrar'],
       ['.boasvindas saida on | off', 'mensagem quando alguém sai'],
       ['.antilink on | off', 'proteção de links'],
       ['.antilink permitir <domínio>', 'libera um domínio e subdomínios']
-    ], { note: 'Alterações por admin do grupo ou dono do bot; anti-link exige o bot como administrador.' }),
-    footer('Envie uma mídia com .s  ·  Mande .s <link> e eu já monto a figurinha')
-  ]);
+    ], { note: 'Alterações por admin do grupo ou dono do bot; anti-link exige o bot como administrador.' }));
+  } else {
+    blocos.push('_Boas-vindas, anti-link e enquete são ferramentas de grupo: use-as dentro de um grupo liberado com `.ativar`._');
+  }
+
+  blocos.push(footer('Envie uma mídia com .s  ·  Mande .s <link> e eu já monto a figurinha'));
+  return card(blocos);
 }
 
 /** Menu completo do dono — exibido SOMENTE no privado do próprio dono. */
@@ -124,8 +136,8 @@ export function ownerMenu() {
   ]);
 }
 
-export function mainMenu({ isOwnerPrivate = true } = {}) {
-  return isOwnerPrivate ? ownerMenu() : publicMenu();
+export function mainMenu({ isOwnerPrivate = true, isGroup = true } = {}) {
+  return isOwnerPrivate ? ownerMenu() : publicMenu({ isGroup });
 }
 
 export function downloadMenu() {

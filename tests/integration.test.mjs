@@ -301,6 +301,47 @@ test('configuração de grupo: boas-vindas e anti-link exigem admin; ativar anti
   assert.match(sock.sent.at(-1).content.text || '', /administradores do grupo/i);
 });
 
+test('boas-vindas e despedida viram cartão com nome do grupo, menção e contagem; desligado, silêncio', async () => {
+  const admin = '5531977001122@s.whatsapp.net';
+  const grupos = ['grupo-welcome-a@g.us', 'grupo-welcome-b@g.us'];
+  const sock = makeSock();
+  sock.groupMetadata = async (jid) => ({
+    id: jid,
+    subject: 'Família & Amigos',
+    participants: [
+      { id: sock.user.id, admin: 'admin' },
+      { id: admin, admin: 'admin' },
+      { id: '5531990001111@s.whatsapp.net' }
+    ]
+  });
+  const deps = makeDeps(sock);
+
+  cfg.get().autorizados = grupos;
+  for (const group of grupos) {
+    await handleMessage(sock, textMsg(group, '.boasvindas on', { from: admin, fromMe: false }), deps);
+    await handleMessage(sock, textMsg(group, '.boasvindas saida on', { from: admin, fromMe: false }), deps);
+  }
+
+  await handleGroupParticipantsUpdate(sock, { id: grupos[0], action: 'add', participants: ['5531998887777@s.whatsapp.net'] });
+  const welcome = sock.sent.at(-1);
+  assert.match(welcome.content.text, /Bem-vindo\(a\)!/);
+  assert.match(welcome.content.text, /Família & Amigos/, 'o nome do grupo aparece no cartão');
+  assert.match(welcome.content.text, /@5531998887777/, 'a pessoa é marcada');
+  assert.match(welcome.content.text, /3º membro/, 'a contagem de membros é informada');
+  assert.deepEqual(welcome.content.mentions, ['5531998887777@s.whatsapp.net']);
+
+  await handleGroupParticipantsUpdate(sock, { id: grupos[1], action: 'remove', participants: ['5531998887777@s.whatsapp.net'] });
+  const bye = sock.sent.at(-1);
+  assert.match(bye.content.text, /Até mais!/);
+  assert.match(bye.content.text, /deixou o grupo/);
+  assert.match(bye.content.text, /Restam 3 membros/);
+
+  // grupo sem a opção ligada (ou não liberado): silêncio total
+  const quiet = sock.sent.length;
+  await handleGroupParticipantsUpdate(sock, { id: 'grupo-welcome-c@g.us', action: 'add', participants: ['5531998887779@s.whatsapp.net'] });
+  assert.equal(sock.sent.length, quiet, 'sem opt-in o bot não saúda ninguém');
+});
+
 test('antilink não pode ser ativado antes de o bot receber permissão de administrador', async () => {
   const group = 'grupo-bot-sem-admin@g.us';
   const admin = '5531977550001@s.whatsapp.net';

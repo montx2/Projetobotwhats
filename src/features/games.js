@@ -2,7 +2,7 @@
 // As partidas vivem por chat; o placar é persistido em data/games-score.json.
 
 import { readJson, writeJsonNow } from '../core/store.js';
-import { SYM, header, section, card, footer, mono as wrapMonospace, ok, fail, warn, usage } from '../core/ui.js';
+import { SYM, header, section, card, footer, kv, mono as wrapMonospace, ok, fail, warn, usage } from '../core/ui.js';
 import { isGroup, normalizeJid } from '../util/text.js';
 import { requireGroupAdministrator } from './group-tools.js';
 
@@ -260,14 +260,80 @@ function isPlayer(state, id) {
   return sessionPlayers(state).some((player) => player.id === id);
 }
 
+/** Nota padrão exibida no topo do estado de uma partida já em andamento. */
+const IN_PROGRESS_NOTE = '⚠ Partida em andamento · digite `.encerrar` para encerrar a qualquer momento';
+
+/** Resumo do andamento de uma partida, para o aviso de "já tem jogo aberto". */
+function gameProgressLabel(state) {
+  switch (state.type) {
+    case 'termo': return `${state.attempts.length}/6 tentativas`;
+    case 'forca': return `${state.wrong}/6 erros · ${state.guessed.length} letra(s) tentada(s)`;
+    case 'minado': return `${state.revealed.filter(Boolean).length}/25 casa(s) aberta(s)`;
+    case 'anagrama': return `palavra embaralhada · categoria ${state.category}`;
+    case 'quiz': return `pergunta ${state.number} em andamento`;
+    case 'numero': return `${state.history.length}/8 palpites`;
+    case 'ttt': return state.status === 'playing' ? `vez de ${tttMark(state.turn)} ${state.players[state.turn]?.name || 'jogador'}` : 'aguardando jogadores';
+    case 'ppt': return state.status === 'pending' ? 'convite aguardando resposta' : `rodada ${state.round} · placar ${state.score.X} x ${state.score.O}`;
+    default: return 'em andamento';
+  }
+}
+
+/** Como o jogador continua a partida atual, em uma frase curta. */
+function gameContinueHint(state) {
+  switch (state.type) {
+    case 'termo': return 'envie um palpite de 5 letras';
+    case 'forca': return 'envie uma letra ou a palavra inteira';
+    case 'minado': return 'revele uma casa com `.minado A1`';
+    case 'anagrama': return 'responda com a palavra desembaralhada';
+    case 'quiz': return 'responda à pergunta';
+    case 'numero': return 'envie um número de 1 a 100';
+    case 'ttt': return state.status === 'playing' ? 'jogue com `.velha <1-9>`' : 'aceite com `.velha aceitar` ou entre com `.velha entrar`';
+    case 'ppt': return state.status === 'pending' ? 'aceite com `.ppt aceitar`' : 'responda no privado com 1, 2 ou 3';
+    default: return 'continue a partida atual';
+  }
+}
+
+/**
+ * Aviso exibido quando alguém tenta abrir uma partida com outra em curso:
+ * mostra o que está rolando, como continuar e como encerrar com `.encerrar`.
+ */
+function activeGameNotice(state, requestedType) {
+  const label = GAME_LABELS[state.type] || 'jogo';
+  const requestedLabel = requestedType ? GAME_LABELS[requestedType] || '' : '';
+  const sameGame = Boolean(requestedLabel) && requestedLabel === label;
+  return card([
+    header('Partida em andamento', `já existe uma partida de ${label} ativa neste chat`),
+    kv('Progresso', gameProgressLabel(state)),
+    kv('Para continuar', gameContinueHint(state)),
+    kv('Para encerrar', '`.encerrar`'),
+    footer(sameGame
+      ? 'a partida atual continua valendo — use `.encerrar` para começar uma nova'
+      : `finalize a partida de ${label} antes de abrir outra`)
+  ]);
+}
+
+/** Sem partida do tipo pedido: se outra estiver ativa, avisa; senão, aviso simples. */
+function replyMissingGame(state, type, reply, title, detail) {
+  if (state) {
+    Promise.resolve(reply(activeGameNotice(state, type))).catch(() => {});
+    return;
+  }
+  Promise.resolve(reply(warn(title, detail))).catch(() => {});
+}
+
+/** Palpite/jogada avulsa com outra partida ativa: explica a partida em curso. */
+function replyForeignGame(state, type, reply, usageCard) {
+  if (state) {
+    Promise.resolve(reply(activeGameNotice(state, type))).catch(() => {});
+    return;
+  }
+  Promise.resolve(reply(usageCard)).catch(() => {});
+}
+
 function canStart(jid, type, reply) {
   const current = activeFor(jid);
   if (!current) return true;
-  const stateName = GAME_LABELS[current.type] || 'jogo';
-  const detail = current.type === type
-    ? `A partida de ${stateName} já está aberta neste chat. Use os comandos dela ou .jogos cancelar.`
-    : `Finalize a partida de ${stateName} com .jogos cancelar antes de abrir outra.`;
-  Promise.resolve(reply(warn('Já existe uma partida ativa', detail))).catch(() => {});
+  Promise.resolve(reply(activeGameNotice(current, type))).catch(() => {});
   return false;
 }
 
@@ -303,6 +369,7 @@ const ALIASES = new Map([
   ['quiz', 'quiz'], ['trivia', 'quiz'], ['pergunta', 'quiz'],
   ['adivinhe', 'numero'], ['numero', 'numero'], ['guess', 'numero'],
   ['ppt', 'ppt'], ['jokenpo', 'ppt'],
+  ['encerrar', 'encerrar'], ['finalizar', 'encerrar'], ['terminar', 'encerrar'],
   ['dado', 'dado'], ['moeda', 'moeda'], ['caraoucoroa', 'moeda'], ['roleta', 'roleta'],
   ['placar', 'placar'], ['ranking', 'placar'], ['rank', 'placar'], ['score', 'placar']
 ]);
@@ -345,7 +412,7 @@ function gameMenu() {
     section('Tabuleiros', [
       ['.velha [facil|medio|dificil]', 'Jogo da velha contra o bot'],
       ['.velha @oponente | aberto', 'desafio PvP ou partida aberta no grupo'],
-      ['.termo', 'Wordle em português · .termo dica'],
+      ['.termo', 'palavra de 5 letras com leitura letra a letra · .termo dica'],
       ['.forca', 'forca com categorias · .forca dica'],
       ['.minado', 'campo minado 5×5 · A1–E5 · flag A1']
     ]),
@@ -364,7 +431,7 @@ function gameMenu() {
     section('Ranking', [
       ['.placar', 'placar deste chat'],
       ['.placar reset', 'zera o ranking (admin/dono)'],
-      ['.jogos cancelar', 'encerra a partida ativa neste chat']
+      ['.encerrar', 'encerra a partida ativa neste chat']
     ]),
     footer('Uma partida de tabuleiro por chat · movimentos também funcionam sem prefixo')
   ]);
@@ -599,7 +666,7 @@ async function handleTicTacToe({ sock, msg, args, reply, actor }) {
   }
 
   if (first === 'cancelar' || first === 'sair') return cancelCurrentGame({ jid, actor, reply, owner: false });
-  if (first === 'status' && state?.type === 'ttt') return reply(tttText(state));
+  if (first === 'status' && state?.type === 'ttt') return reply(tttText(state, IN_PROGRESS_NOTE));
 
   const opponent = opponentFromMessage(msg, actor);
   if (opponent) {
@@ -619,7 +686,7 @@ async function handleTicTacToe({ sock, msg, args, reply, actor }) {
   }
 
   if (!first || ['facil', 'fácil', 'medio', 'médio', 'dificil', 'difícil', 'easy', 'hard'].includes(first)) {
-    if (state?.type === 'ttt') return reply(tttText(state));
+    if (state?.type === 'ttt') return reply(tttText(state, IN_PROGRESS_NOTE));
     if (!canStart(jid, 'ttt', reply)) return;
     const difficulty = normalizeDifficulty(first || 'medio');
     const game = {
@@ -700,14 +767,31 @@ const TERMO_WORDS = Object.freeze([
   'valer', 'vapor', 'verde', 'verao', 'vigor', 'volta', 'zebra'
 ]);
 
+/**
+ * Leitura palpito a palpito: cada letra ao lado da sua cor, para ninguém precisar
+ * decifrar a grade de emoji. Ex.: "1 *SAIAS* › S 🟩 · A 🟩 · I ⬛ · S 🟨 · A 🟨".
+ */
+function termoReadableRows(attempts = []) {
+  return attempts.map((attempt, index) => {
+    const letters = normalizeLetters(attempt.guess).slice(0, 5).toUpperCase().split('');
+    if (!letters.length) return null;
+    const marks = letters
+      .map((letter, position) => `${letter} ${EM[attempt.marks?.[position]] || EM.absent}`)
+      .join(' · ');
+    return `${keycap(index + 1)} *${letters.join('')}* › ${marks}`;
+  }).filter(Boolean);
+}
+
 function termoText(state, detail = '') {
   const missing = termoMissingLetters(state.attempts);
+  const reading = termoReadableRows(state.attempts);
   return card([
-    header('Termo', `${state.attempts.length}/6 tentativas`),
-    detail || 'Adivinhe a palavra de cinco letras. Acentos não mudam o palpite.',
+    header('Termo', `${state.attempts.length}/6 tentativas · palavra de 5 letras`),
+    detail || (state.attempts.length ? 'Envie o próximo palpite de 5 letras.' : 'Adivinhe a palavra de cinco letras. Acentos não mudam o palpite.'),
     grid(renderTermoBoard(state.attempts)),
-    missing.length ? `Fora · ${missing.join(' ')}` : '',
-    `_${EM.exact} posição certa · ${EM.present} outra posição · ${EM.absent} não tem_`
+    reading.length ? section('Leitura dos palpites', reading) : '',
+    missing.length ? `Fora da palavra · *${missing.join(' ')}*` : '',
+    footer(`🟩 letra certa no lugar · 🟨 letra em outra posição · ⬛ letra fora${state.hintUsed ? '' : ' · `.termo dica` pede pista'}`)
   ]);
 }
 
@@ -716,19 +800,20 @@ async function handleTermo({ msg, args, reply, actor }) {
   const state = activeFor(jid);
   const first = String(args[0] || '').toLowerCase();
   if (first === 'dica') {
-    if (!state || state.type !== 'termo') return reply(warn('Nenhuma partida de Termo ativa', 'inicie com `.termo`'));
+    if (!state || state.type !== 'termo') return replyMissingGame(state, 'termo', reply, 'Nenhuma partida de Termo ativa', 'inicie com `.termo`');
+    state.hintUsed = true;
     return reply(termoText(state, `Dica: começa com ${state.word[0].toUpperCase()} e tem cinco letras.`));
   }
-  if (['desistir', 'sair', 'cancelar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });
+  if (['desistir', 'sair', 'cancelar', 'encerrar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });
   if (state?.type !== 'termo') {
-    if (args.length) return reply(usage('.termo', '.termo', 'Comece uma partida antes de enviar um palpite.'));
+    if (args.length) return replyForeignGame(state, 'termo', reply, usage('.termo', '.termo', 'Comece uma partida antes de enviar um palpite.'));
     if (!canStart(jid, 'termo', reply)) return;
     const game = { type: 'termo', player: actor, creatorId: actor.id, word: chooseOne(TERMO_WORDS), attempts: [], finished: false };
     setSession(jid, game);
     return reply(termoText(game));
   }
   if (state.player.id !== actor.id) return reply(warn('Partida individual', 'quem iniciou este Termo deve enviar os palpites'));
-  if (!args.length) return reply(termoText(state));
+  if (!args.length) return reply(termoText(state, IN_PROGRESS_NOTE));
   const guess = normalizeLetters(args.join(' '));
   return applyTermoGuess(state, guess, reply);
 }
@@ -741,14 +826,26 @@ async function applyTermoGuess(state, rawGuess, reply) {
   state.attempts.push({ guess, marks });
   const solved = guess === state.word;
   if (solved) {
+    const tries = state.attempts.length;
     finishSession(state, state.player.id);
-    return reply(card([header('Termo', 'vitória'), 'Você encontrou a palavra.', grid(renderTermoBoard(state.attempts)), '_+3 pontos no placar deste chat._']));
+    return reply(card([
+      header('Termo', `vitória em ${tries} ${tries === 1 ? 'tentativa' : 'tentativas'}`),
+      'Você encontrou a palavra.',
+      grid(renderTermoBoard(state.attempts)),
+      section('Leitura final', termoReadableRows(state.attempts)),
+      '_+3 pontos no placar deste chat._'
+    ]));
   }
   if (state.attempts.length >= 6) {
     finishSession(state, 'loss');
-    return reply(card([header('Termo', 'fim de jogo'), `A palavra era ${state.word.toUpperCase()}.`, grid(renderTermoBoard(state.attempts))]));
+    return reply(card([
+      header('Termo', 'fim de jogo'),
+      `A palavra era ${state.word.toUpperCase()}.`,
+      grid(renderTermoBoard(state.attempts)),
+      section('Leitura final', termoReadableRows(state.attempts))
+    ]));
   }
-  return reply(termoText(state, `Palpite ${state.attempts.length}/6 registrado.`));
+  return reply(termoText(state));
 }
 
 const WORD_CATEGORIES = Object.freeze({
@@ -828,13 +925,13 @@ function hangmanLives(wrong) {
 function hangmanText(state, detail = '') {
   const masked = Array.from(state.word, (letter) => state.guessed.includes(letter) ? letter.toUpperCase() : '_').join(' ');
   return card([
-    header('Forca', `${state.wrong}/6 erros`),
-    detail || `Categoria: ${state.category}.`,
+    header('Forca', `${state.wrong}/6 erros${state.hintUsed ? ` · ${state.category}` : ''}`),
+    detail || (state.hintUsed ? `Categoria · *${state.category}*` : 'Adivinhe a palavra letra por letra.'),
     mono(renderHangmanBoard(state.wrong)),
     hangmanLives(state.wrong),
     `Palavra · \`${masked}\``,
     state.guessed.length ? `Letras · ${state.guessed.map((letter) => letter.toUpperCase()).join(' ')}` : '',
-    '_Envie uma letra ou tente a palavra inteira. Use `.forca dica` para a categoria._'
+    `_Envie uma letra ou tente a palavra inteira.${state.hintUsed ? '' : ' Use `.forca dica` para a categoria.'}_`
   ]);
 }
 
@@ -843,12 +940,13 @@ async function handleHangman({ msg, args, reply, actor }) {
   const state = activeFor(jid);
   const first = String(args[0] || '').toLowerCase();
   if (first === 'dica') {
-    if (!state || state.type !== 'forca') return reply(warn('Nenhuma partida de Forca ativa', 'inicie com `.forca`'));
+    if (!state || state.type !== 'forca') return replyMissingGame(state, 'forca', reply, 'Nenhuma partida de Forca ativa', 'inicie com `.forca`');
+    state.hintUsed = true;
     return reply(hangmanText(state, `Dica: a palavra pertence à categoria ${state.category.toLocaleLowerCase('pt-BR')}.`));
   }
-  if (['desistir', 'sair', 'cancelar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });
+  if (['desistir', 'sair', 'cancelar', 'encerrar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });
   if (state?.type !== 'forca') {
-    if (args.length) return reply(usage('.forca', '.forca', 'Comece uma partida antes de enviar um palpite.'));
+    if (args.length) return replyForeignGame(state, 'forca', reply, usage('.forca', '.forca', 'Comece uma partida antes de enviar um palpite.'));
     if (!canStart(jid, 'forca', reply)) return;
     const entry = chooseOne(HANGMAN_WORDS);
     const game = { type: 'forca', player: actor, creatorId: actor.id, word: entry.word, category: entry.category, guessed: [], wrong: 0, finished: false };
@@ -856,7 +954,7 @@ async function handleHangman({ msg, args, reply, actor }) {
     return reply(hangmanText(game));
   }
   if (state.player.id !== actor.id) return reply(warn('Partida individual', 'quem iniciou esta Forca deve enviar os palpites'));
-  if (!args.length) return reply(hangmanText(state));
+  if (!args.length) return reply(hangmanText(state, IN_PROGRESS_NOTE));
   return applyHangmanGuess(state, args.join(' '), reply);
 }
 
@@ -994,19 +1092,28 @@ async function handleMinesweeper({ msg, args, reply, actor }) {
   const state = activeFor(jid);
   const sub = String(args[0] || '').toLowerCase();
   if (['dica', 'ajuda', 'help'].includes(sub)) {
-    if (!state || state.type !== 'minado') return reply(warn('Nenhuma partida de Campo minado ativa', 'inicie com `.minado`'));
-    return reply(card([header('Campo minado', 'controles'), mineGrid(state), 'Revele A1–E5 com `.minado A1` ou envie a coordenada. Marque com `flag A1`.']));
+    if (!state || state.type !== 'minado') return replyMissingGame(state, 'minado', reply, 'Nenhuma partida de Campo minado ativa', 'inicie com `.minado`');
+    const opened = state.revealed.filter(Boolean).length;
+    const safeLeft = Math.max(0, 25 - state.mineCount - opened);
+    const flags = state.flags.filter(Boolean).length;
+    return reply(card([
+      header('Campo minado', 'dica'),
+      `▸ Faltam *${safeLeft}* casa(s) segura(s) de ${25 - state.mineCount}`,
+      `▸ *${Math.max(0, state.mineCount - flags)}* mina(s) ainda sem bandeira`,
+      mineGrid(state),
+      '_Revele com `.minado A1` ou envie a coordenada · marque com `flag A1`._'
+    ]));
   }
-  if (['sair', 'cancelar', 'desistir'].includes(sub)) return cancelCurrentGame({ jid, actor, reply, owner: false });
+  if (['sair', 'cancelar', 'desistir', 'encerrar'].includes(sub)) return cancelCurrentGame({ jid, actor, reply, owner: false });
   if (state?.type !== 'minado') {
-    if (args.length) return reply(usage('.minado', '.minado', 'Comece uma partida antes de escolher uma casa.'));
+    if (args.length) return replyForeignGame(state, 'minado', reply, usage('.minado', '.minado', 'Comece uma partida antes de escolher uma casa.'));
     if (!canStart(jid, 'minado', reply)) return;
     const game = createMinesweeperGame(actor);
     setSession(jid, game);
     return reply(card([header('Campo minado', '5×5 · primeira casa segura'), mineGrid(game), '_Coordenadas A1–E5 · `.minado flag A1` marca uma casa._']));
   }
   if (state.player.id !== actor.id) return reply(warn('Partida individual', 'quem iniciou este Campo minado deve jogar'));
-  if (!args.length) return reply(card([header('Campo minado', '5×5 · primeira casa segura'), mineGrid(state), '_Coordenadas A1–E5 · marque com `flag A1`._']));
+  if (!args.length) return reply(card([header('Campo minado', '5×5 · primeira casa segura'), IN_PROGRESS_NOTE, mineGrid(state), '_Coordenadas A1–E5 · marque com `flag A1`._']));
   let action = 'reveal';
   let coordinate = args[0] || '';
   if (['flag', 'bandeira', 'marcar'].includes(sub)) {
@@ -1067,7 +1174,7 @@ function anagramText(state, detail = '') {
     header('Anagrama', state.category),
     detail || 'Descubra a palavra com as letras embaralhadas.',
     `▸ *${state.scrambled.toUpperCase()}*`,
-    '_Responda com a palavra ou use `.anagrama dica`._'
+    `_Responda com a palavra.${state.hintUsed ? '' : ' Use `.anagrama dica` para uma pista.'}_`
   ]);
 }
 
@@ -1076,12 +1183,14 @@ async function handleAnagram({ msg, args, reply, actor }) {
   const state = activeFor(jid);
   const first = String(args[0] || '').toLowerCase();
   if (first === 'dica') {
-    if (!state || state.type !== 'anagrama') return reply(warn('Nenhum Anagrama ativo', 'inicie com `.anagrama`'));
+    if (!state || state.type !== 'anagrama') return replyMissingGame(state, 'anagrama', reply, 'Nenhum Anagrama ativo', 'inicie com `.anagrama`');
+    state.hintUsed = true;
     return reply(anagramText(state, `Dica: categoria ${state.category.toLocaleLowerCase('pt-BR')}; começa com ${state.word[0].toUpperCase()}.`));
   }
+  if (first === 'encerrar') return cancelCurrentGame({ jid, actor, reply, owner: false });
   if (['desistir', 'sair', 'cancelar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });
   if (state?.type !== 'anagrama') {
-    if (args.length) return reply(usage('.anagrama', '.anagrama', 'Comece uma rodada antes de enviar o palpite.'));
+    if (args.length) return replyForeignGame(state, 'anagrama', reply, usage('.anagrama', '.anagrama', 'Comece uma rodada antes de enviar o palpite.'));
     if (!canStart(jid, 'anagrama', reply)) return;
     const entry = chooseOne(ANAGRAM_WORDS);
     const game = { type: 'anagrama', player: actor, creatorId: actor.id, word: entry.word, category: entry.category, scrambled: scrambleWord(entry.word), finished: false };
@@ -1089,7 +1198,7 @@ async function handleAnagram({ msg, args, reply, actor }) {
     return reply(anagramText(game));
   }
   if (state.player.id !== actor.id) return reply(warn('Partida individual', 'quem iniciou este Anagrama deve responder'));
-  if (!args.length) return reply(anagramText(state));
+  if (!args.length) return reply(anagramText(state, IN_PROGRESS_NOTE));
   return applyAnagramGuess(state, args.join(' '), reply);
 }
 
@@ -1127,11 +1236,12 @@ const QUIZ_QUESTIONS = Object.freeze([
 ]);
 
 function quizText(state, detail = '') {
+  const restantes = Math.max(0, 3 - state.attempts);
   return card([
     header('Quiz', `pergunta ${state.number}`),
     state.question,
     detail || 'Responda diretamente ou use `.quiz <resposta>`.',
-    '_Use `.quiz dica` para uma pista. Você tem até 3 tentativas._'
+    `_${restantes > 0 ? `Restam ${restantes} tentativa(s)` : 'Sem tentativas restantes'}${state.hintUsed ? '' : ' · use `.quiz dica` para uma pista'}_`
   ]);
 }
 
@@ -1140,9 +1250,11 @@ async function handleQuiz({ msg, args, reply, actor }) {
   const state = activeFor(jid);
   const first = String(args[0] || '').toLowerCase();
   if (first === 'dica') {
-    if (!state || state.type !== 'quiz') return reply(warn('Nenhum Quiz ativo', 'inicie com `.quiz`'));
+    if (!state || state.type !== 'quiz') return replyMissingGame(state, 'quiz', reply, 'Nenhum Quiz ativo', 'inicie com `.quiz`');
+    state.hintUsed = true;
     return reply(quizText(state, `Dica: ${state.hint}`));
   }
+  if (first === 'encerrar') return cancelCurrentGame({ jid, actor, reply, owner: false });
   if (['passar', 'pular', 'desistir'].includes(first)) {
     if (!state || state.type !== 'quiz') return reply(warn('Nenhum Quiz ativo'));
     if (state.player.id !== actor.id) return reply(warn('Partida individual', 'quem iniciou o Quiz deve responder'));
@@ -1151,7 +1263,7 @@ async function handleQuiz({ msg, args, reply, actor }) {
     return reply(card([header('Quiz', 'rodada encerrada'), `Resposta: ${answer}.`]));
   }
   if (state?.type !== 'quiz') {
-    if (args.length) return reply(usage('.quiz', '.quiz', 'Comece uma pergunta antes de enviar a resposta.'));
+    if (args.length) return replyForeignGame(state, 'quiz', reply, usage('.quiz', '.quiz', 'Comece uma pergunta antes de enviar a resposta.'));
     if (!canStart(jid, 'quiz', reply)) return;
     const item = chooseOne(QUIZ_QUESTIONS);
     const game = { type: 'quiz', player: actor, creatorId: actor.id, question: item.question, answers: item.answers.map(normalizePhrase), hint: item.hint, number: 1, attempts: 0, finished: false };
@@ -1159,7 +1271,7 @@ async function handleQuiz({ msg, args, reply, actor }) {
     return reply(quizText(game));
   }
   if (state.player.id !== actor.id) return reply(warn('Partida individual', 'quem iniciou este Quiz deve responder'));
-  if (!args.length) return reply(quizText(state));
+  if (!args.length) return reply(quizText(state, IN_PROGRESS_NOTE));
   return applyQuizGuess(state, args.join(' '), reply);
 }
 
@@ -1175,7 +1287,7 @@ async function applyQuizGuess(state, rawGuess, reply) {
     finishSession(state, 'loss');
     return reply(card([header('Quiz', 'fim da rodada'), `A resposta era ${state.answers[0].toUpperCase()}.`]));
   }
-  return reply(quizText(state, `Ainda não · ${3 - state.attempts} tentativa(s) restante(s).`));
+  return reply(quizText(state, 'Ainda não é essa. Tente outra resposta.'));
 }
 
 /** Histórico de palpites em linhas curtas: 🔼 maior · 🔽 menor · 🎯 acerto. */
@@ -1203,19 +1315,20 @@ async function handleNumberGame({ msg, args, reply, actor }) {
   const state = activeFor(jid);
   const first = String(args[0] || '').toLowerCase();
   if (first === 'dica') {
-    if (!state || state.type !== 'numero') return reply(warn('Nenhuma partida ativa', 'inicie com `.adivinhe`'));
+    if (!state || state.type !== 'numero') return replyMissingGame(state, 'numero', reply, 'Nenhuma partida ativa', 'inicie com `.adivinhe`');
+    state.hintUsed = true;
     return reply(numberText(state, `O número está entre ${state.low} e ${state.high}.`));
   }
-  if (['desistir', 'sair', 'cancelar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });
+  if (['desistir', 'sair', 'cancelar', 'encerrar'].includes(first)) return cancelCurrentGame({ jid, actor, reply, owner: false });
   if (state?.type !== 'numero') {
-    if (args.length) return reply(usage('.adivinhe', '.adivinhe', 'Comece uma rodada antes de enviar um palpite.'));
+    if (args.length) return replyForeignGame(state, 'numero', reply, usage('.adivinhe', '.adivinhe', 'Comece uma rodada antes de enviar um palpite.'));
     if (!canStart(jid, 'numero', reply)) return;
     const game = { type: 'numero', player: actor, creatorId: actor.id, secret: 1 + randomIndex(100), low: 1, high: 100, history: [], finished: false };
     setSession(jid, game);
     return reply(numberText(game));
   }
   if (state.player.id !== actor.id) return reply(warn('Partida individual', 'quem iniciou esta rodada deve enviar os palpites'));
-  if (!args.length) return reply(numberText(state));
+  if (!args.length) return reply(numberText(state, IN_PROGRESS_NOTE));
   return applyNumberGuess(state, args.join(' '), reply);
 }
 
@@ -1586,7 +1699,7 @@ async function handlePpt({ sock, msg, args, reply, actor: rawActor }) {
   if (state?.type === 'ppt' && state.status === 'playing' && pptSeat(state, actor)) {
     return reply(warn('Jogada secreta! 🤫', 'não vale jogar aqui no grupo — a sua escolha vai no PRIVADO, com o bot. Olhe suas mensagens.'));
   }
-  if (state) return reply(warn('Há uma partida em andamento', 'resolva ou cancele a partida ativa antes de começar Jokenpô'));
+  if (state) return reply(activeGameNotice(state, 'ppt'));
   return playPptAgainstBot({ jid, actor, choice, reply });
 }
 
@@ -1665,20 +1778,22 @@ async function handleRoulette({ args, reply }) {
 
 async function cancelCurrentGame({ jid, actor, reply, owner }) {
   const state = activeFor(jid);
-  if (!state) return reply(warn('Nenhuma partida ativa neste chat'));
+  if (!state) return reply(warn('Nenhuma partida ativa', 'não há partida em andamento neste chat'));
   const seated = state.type === 'ppt' && Boolean(pptSeat(state, actor));
   if (!owner && !seated && !isPlayer(state, actor.id) && state.creatorId !== actor.id) return reply(warn('Somente quem participa pode encerrar esta partida'));
+  const label = GAME_LABELS[state.type] || 'jogo';
   sessions.delete(chatKey(jid));
-  return reply(ok('Partida encerrada', 'o placar registrado permanece salvo'));
+  return reply(ok('Partida encerrada', `a partida de ${label} foi finalizada · o placar deste chat continua salvo`));
 }
 
 async function handleGameCommand(context) {
   const { sock, msg, name, args, reply, owner = false } = context;
   const actor = actorFor(msg);
   const game = ALIASES.get(String(name || '').toLocaleLowerCase('pt-BR'));
+  if (game === 'encerrar') return cancelCurrentGame({ jid: msg.key.remoteJid, actor, reply, owner });
   if (game === 'jogos') {
     const action = String(args[0] || '').toLowerCase();
-    if (['cancelar', 'parar', 'sair', 'stop'].includes(action)) return cancelCurrentGame({ jid: msg.key.remoteJid, actor, reply, owner });
+    if (['cancelar', 'parar', 'sair', 'stop', 'encerrar', 'finalizar', 'terminar'].includes(action)) return cancelCurrentGame({ jid: msg.key.remoteJid, actor, reply, owner });
     return reply(gameMenu());
   }
   if (game === 'placar') return handleScoreboard({ sock, msg, args, reply, owner });
