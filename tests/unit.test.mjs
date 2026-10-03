@@ -328,7 +328,7 @@ test('migração de config antiga desativa captura e auto-download sem apagar ac
   assert.equal(clean._schemaVersion, 4);
 });
 
-test('prompts padrão antigos migram para resenha total sem sobrescrever prompts personalizados', () => {
+test('prompts padrão antigos migram para o tom natural sem sobrescrever prompts personalizados', () => {
   const previousDefaults = [
     'Você é o MontxBOT, um assistente de WhatsApp claro, direto e cordial. ' +
       'Responda sempre em português do Brasil, de forma curta e útil. Use emojis com muita moderação.',
@@ -347,10 +347,25 @@ test('prompts padrão antigos migram para resenha total sem sobrescrever prompts
     const migrated = normalizeConfig({ _schemaVersion: 4, ia: { sistema: previousDefault } });
     assert.equal(migrated.ia.sistema, DEFAULT_CONFIG.ia.sistema);
   }
-  assert.match(DEFAULT_CONFIG.ia.sistema, /RESENHA TOTAL/);
-  assert.match(DEFAULT_CONFIG.ia.sistema, /duplo sentido/i);
-  assert.match(DEFAULT_CONFIG.ia.sistema, /Lá ele/i);
-  assert.match(DEFAULT_CONFIG.ia.sistema, /foda pra caralho/i);
+  assert.match(DEFAULT_CONFIG.ia.sistema, /padrão é tranquilo e sem gírias/i);
+  assert.match(DEFAULT_CONFIG.ia.sistema, /não imitar ou repetir/i);
+  assert.match(DEFAULT_CONFIG.ia.sistema, /não dê sermão nem use uma recusa automática/i);
+  assert.match(DEFAULT_CONFIG.ia.sistema, /no máximo um/i);
+  assert.doesNotMatch(DEFAULT_CONFIG.ia.sistema, /RESENHA TOTAL|foda pra caralho/i);
+
+  const previousResenhaPrompt = [
+    'Você é o MontxBOT, o parceiro mais resenheiro do grupo do WhatsApp: brasileiro, espontâneo, carismático, caótico e engraçado, sem ser cruel.',
+    'Seu modo padrão é RESENHA TOTAL: responda com energia, criatividade e humor; não fale como atendente corporativo nem como professor robótico.',
+    'Use português brasileiro bem coloquial e gírias naturais, como “uai”, “véi”, “meu fi”, “mano”, “slk” e “tá doido”. Pode usar palavrões como “carai”, “porra” e “foda pra caralho” como intensificadores de brincadeira quando combinar.',
+    'Em papo casual, manda uma resposta curta com punchline, exagero cômico ou provocação leve. Improvisa, acompanha o ritmo da conversa e não termina toda resposta com “como posso ajudar?”.',
+    'Em duplo sentido, entra no meme com “Lá ele”, “Ao cara aí... lá ele” ou outra tirada que combine. Exemplo: “vou comer seu butão” → “Eita, meu fi... ao cara aí, LÁ ELE 😂”. Não explique a piada nem repita sempre a mesma frase.',
+    'Se a pessoa fizer uma pergunta de verdade, responde corretamente primeiro e pode fechar com uma zoeira curta; nunca invente fatos só pela piada.',
+    'Se o assunto for sério, perigoso, saúde, emergência, segurança ou sofrimento, segura a resenha e responde com clareza, respeito e cuidado.',
+    'A zoeira é com a situação, não com vulnerabilidades: nada de ameaça, discriminação ou humilhação pesada. Não transforme insinuações em conteúdo sexual explícito.',
+    'Pode usar emojis para dar energia, mas sem lotar a resposta nem virar personagem repetitivo.'
+  ].join(' ');
+  const migratedResenha = normalizeConfig({ _schemaVersion: 4, ia: { sistema: previousResenhaPrompt } });
+  assert.equal(migratedResenha.ia.sistema, DEFAULT_CONFIG.ia.sistema, 'o prompt exagerado em uso também é migrado');
 
   const customPrompt = 'Você é um assistente personalizado para este grupo.';
   const custom = normalizeConfig({ _schemaVersion: 4, ia: { sistema: customPrompt } });

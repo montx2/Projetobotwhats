@@ -27,7 +27,7 @@ const DOWNLOAD_ITEMS = [
 ];
 
 const AI_ITEMS = [
-  ['.ia <pergunta>', 'resenha total, memes e gírias · `.ia reset` limpa'],
+  ['.ia <pergunta>', 'conversa natural; entra na resenha se o contexto pedir · `.ia reset` limpa'],
   ['.ia clima <cidade>', 'responde usando dados atuais do clima'],
   ['.ia cotacao <valor> <origem> <destino>', 'conversão com taxa de referência'],
   ['.ia feriados [ano] [país]', 'consulta feriados nacionais'],
