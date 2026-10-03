@@ -20,26 +20,38 @@ function stamp() {
   return c('gray', new Date().toLocaleTimeString('pt-BR', { hour12: false }));
 }
 
+function redact(value) {
+  return String(value)
+    .replace(/\b[A-Za-z0-9._-]{1,64}(?::\d+)?@(?:s\.whatsapp\.net|g\.us|lid)\b/gi, '[JID]')
+    .replace(/(Bearer|Api-Key)\s+[^\s,;]+/gi, '$1 [redacted]')
+    .replace(/([?&](?:api[_-]?key|key|access[_-]?token|token|secret|password)=)[^&\s]+/gi, '$1[redacted]')
+    .replace(/(["']?(?:api[_-]?key|access[_-]?token|authorization|password|secret|token)["']?\s*[:=]\s*["']?)[^"'&,\s}]+/gi, '$1[redacted]');
+}
+
 function fmt(extra) {
   if (extra === undefined || extra === null) return '';
-  if (typeof extra === 'string') return ` ${extra}`;
-  if (extra instanceof Error) return ` ${extra.message}`;
+  if (extra instanceof Error) return ` ${redact(extra.message)}`;
+  if (typeof extra === 'string') return ` ${redact(extra)}`;
   try {
-    return ` ${c('gray', JSON.stringify(extra))}`;
+    return ` ${c('gray', redact(JSON.stringify(extra)))}`;
   } catch {
     return '';
   }
 }
 
+function write(color, icon, msg, extra) {
+  console.log(`${stamp()} ${c(color, icon)} ${redact(msg)}${fmt(extra)}`);
+}
+
 export const log = {
-  info: (msg, extra) => console.log(`${stamp()} ${c('cyan', 'ℹ')} ${msg}${fmt(extra)}`),
-  ok: (msg, extra) => console.log(`${stamp()} ${c('green', '✔')} ${msg}${fmt(extra)}`),
-  warn: (msg, extra) => console.log(`${stamp()} ${c('yellow', '⚠')} ${msg}${fmt(extra)}`),
-  error: (msg, extra) => console.log(`${stamp()} ${c('red', '✖')} ${msg}${fmt(extra)}`),
-  cmd: (msg, extra) => console.log(`${stamp()} ${c('magenta', '⌨')} ${msg}${fmt(extra)}`),
-  dl: (msg, extra) => console.log(`${stamp()} ${c('blue', '⬇')} ${msg}${fmt(extra)}`),
-  ai: (msg, extra) => console.log(`${stamp()} ${c('magenta', '🧠')} ${msg}${fmt(extra)}`),
-  raw: (msg) => console.log(msg)
+  info: (msg, extra) => write('cyan', 'ℹ', msg, extra),
+  ok: (msg, extra) => write('green', '✔', msg, extra),
+  warn: (msg, extra) => write('yellow', '⚠', msg, extra),
+  error: (msg, extra) => write('red', '✖', msg, extra),
+  cmd: (msg, extra) => write('magenta', '⌨', msg, extra),
+  dl: (msg, extra) => write('blue', '⬇', msg, extra),
+  ai: (msg, extra) => write('magenta', '🧠', msg, extra),
+  raw: (msg) => console.log(redact(msg))
 };
 
 export function banner(lines) {

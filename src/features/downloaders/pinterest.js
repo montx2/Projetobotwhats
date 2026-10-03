@@ -390,7 +390,7 @@ export async function resolvePinterestTarget(url) {
  * @param {string} url link do Pinterest (aceita pin.it)
  * @param {'melhor'|'alta'|'media'|'baixa'} quality
  */
-export async function downloadPinterest(url, quality = 'melhor') {
+export async function downloadPinterest(url, quality = 'melhor', { maxBytes } = {}) {
   const errors = [];
   const target = await resolvePinterestTarget(url).catch(() => ({ id: null, pageUrl: url, html: null }));
   const pinId = target.id;
@@ -429,7 +429,7 @@ export async function downloadPinterest(url, quality = 'melhor') {
 
   log.dl('pinterest: tentando via cobalt…');
   try {
-    const { buffers, audioBuffer, ...rest } = await cobaltDownload(target.pageUrl, quality);
+    const { buffers, audioBuffer, ...rest } = await cobaltDownload(target.pageUrl, quality, { maxBytes });
     if (buffers?.length) return baseResult({ ...rest, buffers, audioBuffer });
     errors.push('cobalt: sem buffer');
   } catch (error) {

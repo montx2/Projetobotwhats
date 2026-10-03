@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-process.env.NEXUS_DATA_DIR = new URL('./tmp-data', import.meta.url).pathname;
+process.env.NEXUS_DATA_DIR ||= new URL('./tmp-data', import.meta.url).pathname;
 
 import {
   collectStickerLinks,
@@ -34,7 +34,11 @@ import { parseFit } from '../src/features/sticker.js';
 import { publicMenu, ownerMenu, stickerMenu, downloadMenu } from '../src/features/menu.js';
 import { isAnimatedWebp, isWebp, readStickerExif } from '../src/util/webp.js';
 import { detectMediaExt } from '../src/util/ffmpeg.js';
+import { cobaltPool } from '../src/features/downloaders/cobalt.js';
 import { handleMessage } from '../src/features/router.js';
+import { setDnsLookupForTests } from '../src/core/http.js';
+
+setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
 
 const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
 
@@ -42,43 +46,18 @@ const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
 
 function jsonResponse(body, { status = 200 } = {}) {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
-  return {
-    status,
-    ok: status >= 200 && status < 300,
-    url: 'https://mock/',
-    headers: { get: (k) => ({ 'content-type': 'application/json' })[String(k).toLowerCase()] ?? null },
-    text: async () => text,
-    body: null
-  };
+  return new Response(text, { status, headers: { 'content-type': 'application/json' } });
 }
 
 function htmlResponse(html, { status = 200 } = {}) {
-  return {
-    status,
-    ok: status >= 200 && status < 300,
-    url: 'https://mock/',
-    headers: { get: (k) => ({ 'content-type': 'text/html' })[String(k).toLowerCase()] ?? null },
-    text: async () => html,
-    body: null
-  };
+  return new Response(html, { status, headers: { 'content-type': 'text/html' } });
 }
 
 function bufferResponse(buf, { status = 200, contentType = 'image/jpeg' } = {}) {
-  return {
+  return new Response(buf, {
     status,
-    ok: status >= 200 && status < 300,
-    url: 'https://mock/',
-    headers: {
-      get: (k) => ({ 'content-type': contentType, 'content-length': String(buf.length) })[String(k).toLowerCase()] ?? null
-    },
-    text: async () => buf.toString('latin1'),
-    body: new ReadableStream({
-      start(controller) {
-        controller.enqueue(new Uint8Array(buf));
-        controller.close();
-      }
-    })
-  };
+    headers: { 'content-type': contentType, 'content-length': String(buf.length) }
+  });
 }
 
 /** PNG 1x1 real — serve de "foto" baixada nos testes offline. */
@@ -86,6 +65,11 @@ const PNG_1PX = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   'base64'
 );
+
+async function freshResponse(response) {
+  const body = response.body ? await response.clone().arrayBuffer() : null;
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+}
 
 async function withMockFetch(routes, fn) {
   const original = globalThis.fetch;
@@ -95,7 +79,10 @@ async function withMockFetch(routes, fn) {
     requested.push({ url: target, opts });
     for (const [matcher, reply] of routes) {
       const hit = typeof matcher === 'string' ? target.includes(matcher) : matcher.test(target);
-      if (hit) return typeof reply === 'function' ? reply(target, opts) : reply;
+      if (hit) {
+        const response = typeof reply === 'function' ? reply(target, opts) : reply;
+        return response instanceof Response ? freshResponse(response) : response;
+      }
     }
     throw new Error(`fetch sem rota no mock: ${target}`);
   };
@@ -251,7 +238,8 @@ test('Pinterest: link compartilhado (/sent/) NÃO vira figurinha de outro pin', 
 
   await withMockFetch(
     [
-      ['pin.it/1Obiyee9V', () => ({ ...htmlResponse(paginaSent), url: sentUrl })],
+      ['pin.it/1Obiyee9V', () => new Response('', { status: 302, headers: { location: sentUrl } })],
+      ['www.pinterest.com/pin/429530883237169819', () => htmlResponse(paginaSent)],
       ['widgets.pinterest.com', () => jsonResponse(widget)],
       [real, () => bufferResponse(fotoDoPin)],
       [marca, () => bufferResponse(gradienteDeMarca)],
@@ -372,15 +360,26 @@ test('mais de 3 links: processa 3 e informa quantos ficaram de fora', async () =
 test('link só de áudio: erro claro, sem tentar virar figurinha', async () => {
   const sound = 'https://soundcloud.com/artista/musica';
   const mp3 = 'https://cdn.exemplo.com/musica.mp3';
-  await withMockFetch(
-    [
-      [mp3, bufferResponse(Buffer.from('ID3\x03\x00\x00\x00'), { contentType: 'audio/mpeg' })],
-      [/co\.otomir23|cobalt|capi\.3kh0/, jsonResponse({ status: 'tunnel', url: mp3 })]
-    ],
-    async () => {
-      await assert.rejects(() => downloadStickerSource(sound, { onProgress: () => {} }), /áudio/i);
-    }
-  );
+  const pool = cobaltPool();
+  const previous = { cooldowns: pool.cooldowns, stats: pool.stats, index: pool.index };
+  pool.cooldowns = new Map();
+  pool.stats = new Map();
+  pool.index = 0;
+  try {
+    await withMockFetch(
+      [
+        [mp3, bufferResponse(Buffer.from('ID3\x03\x00\x00\x00'), { contentType: 'audio/mpeg' })],
+        [/co\.otomir23|cobalt|capi\.3kh0/, jsonResponse({ status: 'tunnel', url: mp3 })]
+      ],
+      async () => {
+        await assert.rejects(() => downloadStickerSource(sound, { onProgress: () => {} }), /áudio/i);
+      }
+    );
+  } finally {
+    pool.cooldowns = previous.cooldowns;
+    pool.stats = previous.stats;
+    pool.index = previous.index;
+  }
 });
 
 test('mídia anexada tem prioridade sobre o link no texto do comando', async () => {

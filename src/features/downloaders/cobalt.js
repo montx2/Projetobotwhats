@@ -11,13 +11,14 @@
 // que mediu as instâncias a partir de produção em 2026-08).
 
 import { KeyPool } from '../../core/keypool.js';
-import { ENV } from '../../core/config.js';
-import { postJson, fetchBuffer } from '../../core/http.js';
+import { ENV, cfg } from '../../core/config.js';
+import { postJson, fetchBuffer, shortUrl } from '../../core/http.js';
 import { log } from '../../core/logger.js';
 
 // Ordem: instâncias verificadas primeiro; as demais entram como reserva.
 // Uma instância morta só custa um timeout — mas UMA entrada é pouco, porque
 // significa uma única cota de rate limit, então mantemos várias.
+const CONFIGURED_INSTANCES = ENV.cobaltInstances;
 const DEFAULT_INSTANCES = [
   'https://co.otomir23.me',
   'https://cobaltapi.cjs.nz',
@@ -28,7 +29,7 @@ const DEFAULT_INSTANCES = [
 
 const pool = new KeyPool(
   'cobalt',
-  ENV.cobaltInstances.length ? ENV.cobaltInstances : DEFAULT_INSTANCES,
+  CONFIGURED_INSTANCES.length ? CONFIGURED_INSTANCES : DEFAULT_INSTANCES,
   { cooldownMs: 5 * 60_000 }
 );
 
@@ -81,7 +82,8 @@ function kindFromUrl(url) {
  * Baixa qualquer URL suportada pelo Cobalt.
  * @returns {{platform:string,title:string,kind:string,media:Array,audioOnly:?Object}}
  */
-export async function cobaltDownload(url, quality = 'melhor', { audioOnly = false } = {}) {
+export async function cobaltDownload(url, quality = 'melhor', { audioOnly = false, maxBytes } = {}) {
+  const downloadLimit = Math.max(1, Number(maxBytes) || Number(cfg.get().maxMB || 90) * 1024 * 1024);
   const body = audioOnly
     ? { url, downloadMode: 'audio', audioFormat: 'mp3', filenameStyle: 'basic' }
     : { url, videoQuality: QUALITY_MAP[quality] || 'max', filenameStyle: 'basic' };
@@ -91,9 +93,12 @@ export async function cobaltDownload(url, quality = 'melhor', { audioOnly = fals
       const res = await postJson(`${instance.replace(/\/$/, '')}/`, body, {
         headers: {
           accept: 'application/json',
-          ...(process.env.COBALT_API_KEY ? { Authorization: `Api-Key ${process.env.COBALT_API_KEY}` } : {})
+          ...(CONFIGURED_INSTANCES.length && process.env.COBALT_API_KEY
+            ? { Authorization: `Api-Key ${process.env.COBALT_API_KEY}` }
+            : {})
         },
-        timeoutMs: 60_000
+        timeoutMs: 60_000,
+        allowPrivate: CONFIGURED_INSTANCES.length > 0
       });
 
       if (res?.status === 'error') {
@@ -161,14 +166,24 @@ export async function cobaltDownload(url, quality = 'melhor', { audioOnly = fals
 
   // Baixa os buffers já no formato esperado pelo sendDownload
   const buffers = [];
+  const totalLimit = Math.min(200 * 1024 * 1024, downloadLimit * 2);
+  let totalBytes = 0;
   for (const item of (data.media || []).slice(0, 10)) {
-    log.dl(`cobalt: baixando ${String(item.url).slice(0, 60)}…`);
-    buffers.push(await fetchBuffer(item.url, { timeoutMs: 180_000, maxBytes: 200 * 1024 * 1024 }));
+    const remaining = totalLimit - totalBytes;
+    if (remaining < 1) throw new Error('álbum excede o limite agregado de mídia');
+    log.dl(`cobalt: baixando ${shortUrl(item.url)}…`);
+    const buffer = await fetchBuffer(item.url, { timeoutMs: 180_000, maxBytes: Math.min(downloadLimit, remaining) });
+    totalBytes += buffer.length;
+    buffers.push(buffer);
   }
   let audioBuffer = null;
-  if (data.audioOnly?.url && data.kind !== 'audio') {
+  if (data.audioOnly?.url && data.kind !== 'audio' && totalBytes < totalLimit) {
     try {
-      audioBuffer = await fetchBuffer(data.audioOnly.url, { timeoutMs: 120_000 });
+      audioBuffer = await fetchBuffer(data.audioOnly.url, {
+        timeoutMs: 120_000,
+        maxBytes: Math.min(downloadLimit, totalLimit - totalBytes)
+      });
+      totalBytes += audioBuffer.length;
     } catch { /* o áudio é bônus */ }
   }
   return { ...data, buffers, audioBuffer };

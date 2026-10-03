@@ -1,9 +1,8 @@
 // 🎨 MENUS — separados em 2 versões:
 // 1) ownerMenu(): menu COMPLETO que só aparece no privado do dono.
 // 2) publicMenu(): menu para grupos/conversas liberadas com .ativar.
-//    Mostra TUDO (figurinhas, downloads de qualquer rede, IA, voz…)
-//    MENOS as duas funções 100% privadas: View Once e Anti-Delete,
-//    que não são citadas em nenhum lugar e não respondem para terceiros.
+//    Mostra comandos públicos e ferramentas de grupo (estas, só para admins)
+//    MENOS View Once e Anti-Delete, que são 100% privados e não aparecem para terceiros.
 
 import { cfg } from '../core/config.js';
 import { PLATFORM, PLATFORM_LABEL } from '../core/platform.js';
@@ -29,6 +28,9 @@ const DOWNLOAD_ITEMS = [
 
 const AI_ITEMS = [
   ['.ia <pergunta>', 'conversa com a IA  ·  `.ia reset` limpa'],
+  ['.ia clima <cidade>', 'responde usando dados atuais do clima'],
+  ['.ia cotacao <valor> <origem> <destino>', 'conversão com taxa de referência'],
+  ['.ia feriados [ano] [país]', 'consulta feriados nacionais'],
   ['.criar <ideia>', 'gera uma imagem'],
   ['.voz <texto>', 'transforma texto em áudio'],
   ['.traduz <idioma> <texto>', 'tradução instantânea'],
@@ -37,7 +39,7 @@ const AI_ITEMS = [
 
 /**
  * Menu público para chats/grupos liberados com .ativar.
- * Regra: ZERO menção a View Once e Anti-Delete. Todo o resto aparece.
+ * Nunca menciona View Once/Anti-Delete; comandos de administração de grupo são validados no roteador.
  */
 export function publicMenu() {
   const nome = cfg.get().nomeBot;
@@ -49,10 +51,20 @@ export function publicMenu() {
     }),
     section('Inteligência Artificial', AI_ITEMS),
     section('Utilidades', [
+      ['.clima <cidade>', 'clima atual e resumo de hoje'],
+      ['.cotacao <valor> <origem> <destino>', 'conversão de moedas'],
+      ['.feriados [ano] [país]', 'próximos feriados nacionais · padrão BR'],
       ['.menu', 'este painel'],
       ['.ping', 'testa a velocidade'],
-      ['.info', 'status do bot']
+      ['.info', 'status do bot'],
+      ['.enquete pergunta | opção 1 | opção 2', 'cria uma enquete no grupo']
     ]),
+    section('Gestão do grupo', [
+      ['.boasvindas on | off', 'mensagem automática ao entrar'],
+      ['.boasvindas saida on | off', 'mensagem quando alguém sai'],
+      ['.antilink on | off', 'proteção de links'],
+      ['.antilink permitir <domínio>', 'libera um domínio e subdomínios']
+    ], { note: 'Alterações por admin do grupo ou dono do bot; anti-link exige o bot como administrador.' }),
     footer('Envie uma mídia com .s  ·  Mande .s <link> e eu já monto a figurinha')
   ]);
 }
@@ -68,15 +80,27 @@ export function ownerMenu() {
       ['.desativar tudo', 'bloqueia todos de uma vez'],
       ['.ativos', 'lista os chats liberados']
     ]),
-    section('View Once', [['.vo', 'status'], ['.vo on | off', 'captura automática']], {
-      note: 'silencioso: tudo cai só no seu privado'
+    section('Grupo (use dentro do grupo)', [
+      ['.enquete pergunta | opção 1 | opção 2', 'cria uma enquete'],
+      ['.boasvindas on | off', 'entrada de novos membros'],
+      ['.boasvindas saida on | off', 'mensagem quando alguém sai'],
+      ['.antilink on | off', 'remove links fora da lista permitida'],
+      ['.antilink permitir <domínio>', 'libera um domínio e subdomínios']
+    ], { note: 'Boas-vindas e anti-link vêm desligados; alterações por admin do grupo ou dono do bot.' }),
+    section('View Once', [['.vo', 'status'], ['.vo on | off', 'automação opt-in por chat']], {
+      note: 'mídias capturadas são enviadas somente ao privado do dono'
     }),
     section('Anti-Delete', [['.antidelete', 'status e filtros']], {
-      note: 'silencioso: apagadas chegam só no seu privado'
+      note: 'retenção opt-in; mensagens recuperáveis vão somente ao privado do dono'
     }),
     section('Figurinhas', STICKER_ITEMS),
     section('Downloads', [...DOWNLOAD_ITEMS, ['.menudl', 'guia completo']]),
     section('Inteligência Artificial', AI_ITEMS),
+    section('Utilidades', [
+      ['.clima <cidade>', 'clima atual e resumo de hoje'],
+      ['.cotacao <valor> <origem> <destino>', 'conversão de moedas'],
+      ['.feriados [ano] [país]', 'próximos feriados nacionais · padrão BR']
+    ]),
     section('Sistema', [
       ['.ping', 'velocidade'],
       ['.info', 'status geral'],
@@ -151,8 +175,8 @@ export function stickerMenu() {
 
 export function antiDeleteMenu() {
   return card([
-    header('Anti-Delete', 'proteção silenciosa'),
-    `Tudo que apagarem chega só no seu privado.\n_Nenhum rastro no grupo ou chat._`,
+    header('Anti-Delete', 'retenção local opt-in'),
+    `Em chats habilitados, mensagens recuperáveis podem ser retidas por até 24 horas e enviadas somente ao privado do dono.`,
     section('Comandos', [
       ['.antidelete', 'status'],
       ['.antidelete on | off', 'liga ou desliga'],

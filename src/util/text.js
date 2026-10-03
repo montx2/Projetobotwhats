@@ -22,8 +22,12 @@ export function truncate(text, max = 1500) {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 
+export function normalizeJid(jid) {
+  return String(jid || '').toLowerCase().replace(/:\d+@/, '@').trim();
+}
+
 export function isGroup(jid) {
-  return String(jid || '').endsWith('@g.us');
+  return normalizeJid(jid).endsWith('@g.us');
 }
 
 export function chatLabel(jid) {

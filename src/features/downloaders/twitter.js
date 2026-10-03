@@ -64,7 +64,7 @@ function fromApi(data, parsed, url) {
  * @param {string} url link do tweet (twitter.com ou x.com)
  * @param {'melhor'|'alta'|'media'|'baixa'} quality
  */
-export async function downloadTwitter(url, quality = 'melhor') {
+export async function downloadTwitter(url, quality = 'melhor', { maxBytes } = {}) {
   const errors = [];
   const parsed = parseTweet(url);
 
@@ -89,7 +89,7 @@ export async function downloadTwitter(url, quality = 'melhor') {
 
   log.dl('twitter: tentando via cobalt…');
   try {
-    const { buffers, audioBuffer, ...rest } = await cobaltDownload(url, quality);
+    const { buffers, audioBuffer, ...rest } = await cobaltDownload(url, quality, { maxBytes });
     if (buffers?.length) return baseResult({ ...rest, buffers, audioBuffer });
     errors.push('cobalt: sem buffer');
   } catch (error) {

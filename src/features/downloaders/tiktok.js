@@ -17,7 +17,8 @@ import { cobaltDownload } from './cobalt.js';
 import { probeStream } from './media.js';
 
 const DEFAULT_ENDPOINTS = ['https://www.tikwm.com/api/', 'https://tikwm.com/api/'];
-const pool = new KeyPool('tikwm', ENV.tiktokApi.length ? ENV.tiktokApi : DEFAULT_ENDPOINTS, {
+const CONFIGURED_ENDPOINTS = ENV.tiktokApi;
+const pool = new KeyPool('tikwm', CONFIGURED_ENDPOINTS.length ? CONFIGURED_ENDPOINTS : DEFAULT_ENDPOINTS, {
   cooldownMs: 10 * 60_000
 });
 
@@ -104,7 +105,8 @@ async function viaTikwm(url, quality) {
             origin: 'https://www.tikwm.com',
             referer: 'https://www.tikwm.com/'
           },
-          timeoutMs: 45_000
+          timeoutMs: 45_000,
+          allowPrivate: CONFIGURED_ENDPOINTS.length > 0
         }
       );
       if (!json || json.code !== 0 || !json.data) {
@@ -192,7 +194,7 @@ async function viaDirectScrape(url) {
  * @param {string} url link do TikTok (vm.tiktok, vt.tiktok, /t/…)
  * @param {'melhor'|'alta'|'media'|'baixa'} quality
  */
-export async function downloadTikTok(url, quality = 'melhor') {
+export async function downloadTikTok(url, quality = 'melhor', { maxBytes } = {}) {
   const canonical = await resolveRedirect(url).catch(() => url);
   const errors = [];
 
@@ -232,7 +234,7 @@ export async function downloadTikTok(url, quality = 'melhor') {
   // 2) Cobalt (túnel — serve de qualquer IP)
   try {
     log.dl('tiktok: tentando via cobalt…');
-    const { buffers, audioBuffer, ...rest } = await cobaltDownload(canonical, quality);
+    const { buffers, audioBuffer, ...rest } = await cobaltDownload(canonical, quality, { maxBytes });
     const meta = await oembedMeta(canonical);
     return normalizeResult({
       ...rest,
@@ -261,8 +263,8 @@ export async function downloadTikTok(url, quality = 'melhor') {
 }
 
 /** Só a música do vídeo (para .ttmp3). */
-export async function tiktokAudio(url) {
-  const result = await downloadTikTok(url, 'melhor');
+export async function tiktokAudio(url, { maxBytes } = {}) {
+  const result = await downloadTikTok(url, 'melhor', { maxBytes });
   if (result.audioOnly) return { ...result, kind: 'audio', media: [{ ...result.audioOnly }] };
   // Sem faixa separada: devolve o próprio vídeo (o caller extrai o áudio).
   return { ...result, kind: 'audio' };

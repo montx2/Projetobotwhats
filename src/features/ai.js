@@ -1,6 +1,6 @@
 // 🧠 IA — chat, imagens, voz, tradução e resumo.
 //
-// Provedores de texto (pool com rotação de chaves, igual você gosta):
+// Provedores de texto (rotação com limites/cooldowns respeitados):
 //   AI_KEYS + AI_BASE_URL  → qualquer API compatível com OpenAI (OpenRouter, Groq, DeepSeek...)
 //   GROQ_KEYS              → Groq (grátis e rápido)
 //   OPENAI_KEYS            → OpenAI
@@ -12,8 +12,20 @@
 
 import { KeyPool } from '../core/keypool.js';
 import { ENV, cfg } from '../core/config.js';
-import { postJson, fetchBuffer, fetchText, sleep } from '../core/http.js';
+import { postJson, fetchBuffer, sleep } from '../core/http.js';
 import { log } from '../core/logger.js';
+import { normalizeJid } from '../util/text.js';
+import {
+  convertCurrency,
+  extractCurrencyIntent,
+  extractHolidayIntent,
+  extractWeatherLocation,
+  formatCurrencyContext,
+  formatHolidayContext,
+  formatWeatherContext,
+  getPublicHolidays,
+  getWeatherByCity
+} from './public-apis.js';
 
 // ── Pools de chaves ────────────────────────────────────────
 const pools = {
@@ -34,30 +46,68 @@ function pollinationsAuthHeaders(key) {
 
 const GEMINI_MODEL = 'gemini-2.0-flash';
 
-// Memória curta por chat para .ia
-const memory = new Map(); // jid -> { turns: [], ts }
+// Memória curta em RAM, identificada por chat + remetente (nunca compartilhada
+// por todos os membros de um grupo). Nenhum conteúdo de IA é persistido em disco.
+const memory = new Map();
 const MEMORY_TTL = 30 * 60_000;
-const MEMORY_MAX = 10;
+const MEMORY_MAX = 8;
+const MEMORY_MAX_CHARS = 6_000;
+const MEMORY_MAX_ENTRIES = 500;
+const MAX_AI_INPUT_CHARS = 3_000;
 
-export function resetChatMemory(jid) {
-  memory.delete(jid);
+export function resetChatMemory(memoryKey) {
+  memory.delete(memoryKey);
 }
 
-function remember(jid, role, content) {
-  let m = memory.get(jid);
-  if (!m || Date.now() - m.ts > MEMORY_TTL) m = { turns: [], ts: Date.now() };
-  m.turns.push({ role, content });
-  if (m.turns.length > MEMORY_MAX) m.turns = m.turns.slice(-MEMORY_MAX);
-  m.ts = Date.now();
-  memory.set(jid, m);
+export function resetChatMemoryForChat(chatJid) {
+  const prefix = `${normalizeJid(chatJid)}:`;
+  for (const key of memory.keys()) {
+    if (key.startsWith(prefix)) memory.delete(key);
+  }
 }
+
+function pruneMemory(now = Date.now()) {
+  for (const [key, value] of memory) {
+    if (now - value.ts > MEMORY_TTL) memory.delete(key);
+  }
+  while (memory.size > MEMORY_MAX_ENTRIES) memory.delete(memory.keys().next().value);
+}
+
+function historyFor(m) {
+  if (!m || Date.now() - m.ts > MEMORY_TTL) return [];
+  const selected = [];
+  let chars = 0;
+  for (const turn of [...m.turns].reverse()) {
+    const size = String(turn.content || '').length;
+    if (selected.length >= MEMORY_MAX || chars + size > MEMORY_MAX_CHARS) break;
+    selected.unshift(turn);
+    chars += size;
+  }
+  return selected;
+}
+
+function remember(memoryKey, role, content) {
+  const now = Date.now();
+  pruneMemory(now);
+  let entry = memory.get(memoryKey);
+  if (!entry || now - entry.ts > MEMORY_TTL) entry = { turns: [], ts: now };
+  entry.turns.push({ role, content: String(content || '').slice(0, 2_000) });
+  if (entry.turns.length > MEMORY_MAX) entry.turns = entry.turns.slice(-MEMORY_MAX);
+  entry.ts = now;
+  memory.delete(memoryKey);
+  memory.set(memoryKey, entry);
+  pruneMemory(now);
+}
+
+const memorySweep = setInterval(() => pruneMemory(), 5 * 60_000);
+memorySweep.unref?.();
 
 // ── Chamadas por provedor ──────────────────────────────────
-async function openAICompat(base, key, model, messages) {
+async function openAICompat(base, key, model, messages, { allowPrivate = false } = {}) {
   const data = await postJson(
     `${base.replace(/\/$/, '')}/chat/completions`,
     { model, messages, max_tokens: 1200, temperature: 0.7 },
-    { headers: { authorization: `Bearer ${key}` }, timeoutMs: 90_000 }
+    { headers: { authorization: `Bearer ${key}` }, timeoutMs: 90_000, allowPrivate }
   );
   const text = data?.choices?.[0]?.message?.content;
   if (!text) throw new Error('resposta vazia');
@@ -82,28 +132,15 @@ async function geminiCall(key, messages) {
 }
 
 async function pollinationsTextOnce(messages, key) {
-  // Pollinations é compatível com OpenAI e funciona sem chave (com chave, o
-  // limite de requisições sobe bastante e os 402 somem na maioria dos casos).
-  try {
-    const data = await postJson(
-      'https://text.pollinations.ai/openai',
-      { model: 'openai', messages, max_tokens: 1200, temperature: 0.7 },
-      { headers: { referrer: 'nexusbot', ...pollinationsAuthHeaders(key) }, timeoutMs: 90_000 }
-    );
-    const text = data?.choices?.[0]?.message?.content;
-    if (!text) throw new Error('resposta vazia');
-    return text.trim();
-  } catch (error) {
-    // fallback GET simples
-    const user = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
-    const system = messages.find((m) => m.role === 'system')?.content || '';
-    const url =
-      `https://text.pollinations.ai/${encodeURIComponent(user)}?model=openai&referrer=nexusbot` +
-      (system ? `&system=${encodeURIComponent(system)}` : '');
-    const text = await fetchText(url, { timeoutMs: 90_000, headers: pollinationsAuthHeaders(key) });
-    if (!text || text.length < 2) throw new Error('pollinations vazio');
-    return text.trim();
-  }
+  // POST evita colocar prompts privados em URLs, proxies e access logs.
+  const data = await postJson(
+    'https://text.pollinations.ai/openai',
+    { model: 'openai', messages, max_tokens: 1200, temperature: 0.7 },
+    { headers: { referrer: 'nexusbot', ...pollinationsAuthHeaders(key) }, timeoutMs: 90_000 }
+  );
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw new Error('resposta vazia');
+  return text.trim();
 }
 
 /** Tenta com cada chave do pool (se houver); sem chave nenhuma, tenta anônimo. */
@@ -114,17 +151,57 @@ async function pollinationsText(messages) {
   return pollinationsTextOnce(messages, '');
 }
 
+async function publicApiContext(question) {
+  const weatherLocation = extractWeatherLocation(question);
+  if (weatherLocation) {
+    try {
+      return formatWeatherContext(await getWeatherByCity(weatherLocation));
+    } catch (error) {
+      log.warn('consulta de clima para IA falhou', { name: error?.name, status: error?.status, code: error?.code });
+      throw new Error('não consegui consultar o clima agora; tente novamente ou use `.clima <cidade>`');
+    }
+  }
+
+  const currency = extractCurrencyIntent(question);
+  if (currency) {
+    try {
+      return formatCurrencyContext(await convertCurrency(currency.amount, currency.from, currency.to));
+    } catch (error) {
+      log.warn('consulta de câmbio para IA falhou', { name: error?.name, status: error?.status, code: error?.code });
+      throw new Error('não consegui consultar essa conversão agora; confira os códigos de moeda e tente novamente');
+    }
+  }
+
+  const holidays = extractHolidayIntent(question);
+  if (holidays) {
+    try {
+      const data = await getPublicHolidays(holidays.year, holidays.country);
+      return formatHolidayContext(data, holidays.year, holidays.country);
+    } catch (error) {
+      log.warn('consulta de feriados para IA falhou', { name: error?.name, status: error?.status, code: error?.code });
+      throw new Error('não consegui consultar esse calendário de feriados agora; tente novamente mais tarde');
+    }
+  }
+
+  return '';
+}
+
 /** Chat com fallback em cascata por todos os pools. */
-export async function aiChat(jid, userText) {
-  const system = cfg.get().ia.sistema;
-  const m = memory.get(jid);
-  const history = m && Date.now() - m.ts <= MEMORY_TTL ? m.turns : [];
-  const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: userText }];
+export async function aiChat(memoryKey, userText) {
+  const question = String(userText || '').trim();
+  if (!question) throw new Error('escreva uma pergunta para a IA');
+  if (question.length > MAX_AI_INPUT_CHARS) throw new Error(`texto longo demais (máximo ${MAX_AI_INPUT_CHARS} caracteres)`);
+  pruneMemory();
+  const apiContext = await publicApiContext(question);
+  const baseSystem = cfg.get().ia.sistema;
+  const system = apiContext ? `${baseSystem}\n\n${apiContext}` : baseSystem;
+  const history = historyFor(memory.get(memoryKey));
+  const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: question }];
 
   const attempts = [];
   const model = ENV.aiModel || 'gpt-4o-mini';
 
-  if (pools.ai.size) attempts.push(() => pools.ai.run((key) => openAICompat(ENV.aiBase || ENV.openaiBase, key, ENV.aiModel || model, messages)));
+  if (pools.ai.size) attempts.push(() => pools.ai.run((key) => openAICompat(ENV.aiBase || ENV.openaiBase, key, ENV.aiModel || model, messages, { allowPrivate: true })));
   if (pools.groq.size) attempts.push(() => pools.groq.run((key) => openAICompat('https://api.groq.com/openai/v1', key, 'llama-3.3-70b-versatile', messages)));
   if (pools.openai.size) attempts.push(() => pools.openai.run((key) => openAICompat('https://api.openai.com/v1', key, model, messages)));
   if (pools.gemini.size) attempts.push(() => pools.gemini.run((key) => geminiCall(key, messages)));
@@ -134,12 +211,12 @@ export async function aiChat(jid, userText) {
   for (const attempt of attempts) {
     try {
       const reply = await attempt();
-      remember(jid, 'user', userText);
-      remember(jid, 'assistant', reply);
+      remember(memoryKey, 'user', question);
+      remember(memoryKey, 'assistant', reply);
       return reply;
     } catch (error) {
       errors.push(String(error.message || error).slice(0, 100));
-      log.warn(`IA falhou, tentando próximo provedor: ${String(error.message || error).slice(0, 100)}`);
+      log.warn('IA falhou; tentando o próximo provedor', { status: error?.status, code: error?.code });
       await sleep(300);
     }
   }
@@ -157,9 +234,14 @@ async function aiImageOnce(prompt, { width, height, model, seed }, key) {
 }
 
 export async function aiImage(prompt, { width = 1024, height = 1024, model } = {}) {
+  prompt = String(prompt || '').trim();
+  if (!prompt) throw new Error('descreva a imagem que deseja criar');
+  if (prompt.length > 1_200) throw new Error('descrição longa demais (máximo 1.200 caracteres)');
+  width = Math.min(1536, Math.max(256, Number(width) || 1024));
+  height = Math.min(1536, Math.max(256, Number(height) || 1024));
   const m = model || cfg.get().ia.modeloImagem || 'flux';
   const seed = Math.floor(Math.random() * 1_000_000_000);
-  log.ai(`gerando imagem: "${prompt.slice(0, 60)}"`);
+  log.ai('gerando imagem (prompt não é gravado nos logs)');
   const opts = { width, height, model: m, seed };
   if (pools.pollinations.size) {
     return pools.pollinations.run((key) => aiImageOnce(prompt, opts, key));
@@ -176,6 +258,9 @@ async function aiVoiceOnce(text, voice, key) {
 }
 
 export async function aiVoice(text, voice) {
+  text = String(text || '').trim();
+  if (!text) throw new Error('escreva o texto para transformar em áudio');
+  if (text.length > 900) throw new Error('texto longo demais para áudio (máximo 900 caracteres)');
   const v = voice || cfg.get().ia.vozPadrao || 'nova';
   if (pools.pollinations.size) {
     return pools.pollinations.run((key) => aiVoiceOnce(text, v, key));
@@ -185,22 +270,30 @@ export async function aiVoice(text, voice) {
 
 // ── Tradução / resumo via chat ─────────────────────────────
 export async function aiTranslate(text, target = 'português do Brasil') {
+  const source = String(text || '').trim();
+  if (!source) throw new Error('envie ou cite um texto para traduzir');
+  if (source.length > 2_500) throw new Error('texto longo demais para tradução (máximo 2.500 caracteres)');
+  const language = String(target || '').trim().slice(0, 80) || 'português do Brasil';
   return aiChatRaw(
-    `Você é um tradutor profissional. Traduza EXATAMENTE o texto abaixo para ${target}. ` +
-      `Devolve só a tradução, nada mais.\n\nTexto:\n${text}`
+    `Você é um tradutor profissional. Traduza EXATAMENTE o texto abaixo para ${language}. ` +
+      `Devolva só a tradução, nada mais.\n\nTexto:\n${source}`
   );
 }
 
 export async function aiSummary(text) {
+  const source = String(text || '').trim();
+  if (!source) throw new Error('envie ou cite um texto para resumir');
+  if (source.length > 2_500) throw new Error('texto longo demais para resumo (máximo 2.500 caracteres)');
   return aiChatRaw(
-    'Resuma o texto abaixo em português, em bullets curtos e claros, destacando o essencial. Máximo 10 linhas.\n\n' + text
+    'Resuma o texto abaixo em português, em bullets curtos e claros, destacando o essencial. Máximo 10 linhas.\n\n' + source
   );
 }
 
 async function aiChatRaw(prompt) {
+  if (String(prompt).length > 3_000) throw new Error('texto de IA longo demais');
   const messages = [{ role: 'user', content: prompt }];
   const attempts = [];
-  if (pools.ai.size) attempts.push(() => pools.ai.run((key) => openAICompat(ENV.aiBase || ENV.openaiBase, key, ENV.aiModel || 'gpt-4o-mini', messages)));
+  if (pools.ai.size) attempts.push(() => pools.ai.run((key) => openAICompat(ENV.aiBase || ENV.openaiBase, key, ENV.aiModel || 'gpt-4o-mini', messages, { allowPrivate: true })));
   if (pools.groq.size) attempts.push(() => pools.groq.run((key) => openAICompat('https://api.groq.com/openai/v1', key, 'llama-3.3-70b-versatile', messages)));
   if (pools.openai.size) attempts.push(() => pools.openai.run((key) => openAICompat('https://api.openai.com/v1', key, 'gpt-4o-mini', messages)));
   if (pools.gemini.size) attempts.push(() => pools.gemini.run((key) => geminiCall(key, messages)));

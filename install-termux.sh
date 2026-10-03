@@ -11,7 +11,7 @@ pkg install -y nodejs-lts git ffmpeg procps
 cd "$(dirname "$0")"
 
 echo "📦 Instalando dependências do bot…"
-npm install --no-audit --no-fund
+npm ci --no-audit --no-fund
 
 echo ""
 echo "✅ Instalação concluída!"

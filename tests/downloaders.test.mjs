@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { setDnsLookupForTests } from '../src/core/http.js';
 
 import { parseYouTubeId, downloadYouTube } from '../src/features/downloaders/youtube.js';
 import { downloadTikTok, tiktokVideoId } from '../src/features/downloaders/tiktok.js';
@@ -26,7 +27,7 @@ import { downloadTwitter, parseTweet } from '../src/features/downloaders/twitter
 import { downloadFacebook } from '../src/features/downloaders/facebook.js';
 import { parseTwitchClipSlug } from '../src/features/downloaders/generic.js';
 import { cobaltDownload } from '../src/features/downloaders/cobalt.js';
-import { detectPlatform } from '../src/features/download.js';
+import { detectPlatform, resolveDownload } from '../src/features/download.js';
 import {
   kindByExtension,
   looksLikeImageBytes,
@@ -35,45 +36,32 @@ import {
   stringAfterKey
 } from '../src/features/downloaders/media.js';
 
+setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
+
 /* ───────────────────────── mock de fetch ───────────────────────── */
 
 function jsonResponse(body, { status = 200, headers = {} } = {}) {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
-  return {
+  return new Response(text, {
     status,
-    ok: status >= 200 && status < 300,
-    url: 'https://mock/',
-    headers: { get: (k) => ({ 'content-type': 'application/json', ...headers })[String(k).toLowerCase()] ?? null },
-    text: async () => text,
-    body: null
-  };
+    headers: { 'content-type': 'application/json', ...headers }
+  });
 }
 
 function htmlResponse(html, { status = 200 } = {}) {
-  return {
-    status,
-    ok: status >= 200 && status < 300,
-    url: 'https://mock/',
-    headers: { get: (k) => ({ 'content-type': 'text/html' })[String(k).toLowerCase()] ?? null },
-    text: async () => html,
-    body: null
-  };
+  return new Response(html, { status, headers: { 'content-type': 'text/html' } });
 }
 
 function bufferResponse(buf, { status = 200, contentType = 'video/mp4' } = {}) {
-  return {
+  return new Response(buf, {
     status,
-    ok: status >= 200 && status < 300,
-    url: 'https://mock/',
-    headers: { get: (k) => ({ 'content-type': contentType, 'content-length': String(buf.length) })[String(k).toLowerCase()] ?? null },
-    text: async () => buf.toString('latin1'),
-    body: new ReadableStream({
-      start(controller) {
-        controller.enqueue(new Uint8Array(buf));
-        controller.close();
-      }
-    })
-  };
+    headers: { 'content-type': contentType, 'content-length': String(buf.length) }
+  });
+}
+
+async function freshResponse(response) {
+  const body = response.body ? await response.clone().arrayBuffer() : null;
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 /**
@@ -90,7 +78,8 @@ export function mockFetch(routes, fn) {
       const hit = typeof matcher === 'string' ? u.includes(matcher) : matcher.test(u);
       if (hit) {
         const res = typeof responder === 'function' ? responder(u, opts) : responder;
-        return res ?? jsonResponse({});
+        const response = res ?? jsonResponse({});
+        return response instanceof Response ? freshResponse(response) : response;
       }
     }
     return jsonResponse({}, { status: 404 });
@@ -324,6 +313,35 @@ test('TikTok: slideshow (carrossel de fotos) vira galeria + música', async () =
   );
 });
 
+test('TikTok: lote para figurinha para de baixar ao atingir o teto agregado', async () => {
+  const slideshow = {
+    code: 0,
+    data: {
+      id: '999',
+      images: [
+        'https://p16.tiktokcdn.com/image-1.jpg',
+        'https://p16.tiktokcdn.com/image-2.jpg',
+        'https://p16.tiktokcdn.com/image-3.jpg'
+      ]
+    }
+  };
+  let imageDownloads = 0;
+  await mockFetch(
+    [
+      ['tikwm.com/api', () => jsonResponse(slideshow)],
+      ['tiktok.com/oembed', () => jsonResponse({})],
+      [/p16\.tiktokcdn\.com\/image-/, () => { imageDownloads++; return bufferResponse(Buffer.alloc(2)); }]
+    ],
+    async () => {
+      await assert.rejects(
+        resolveDownload('https://www.tiktok.com/@a/photo/999', 'melhor', { maxBytes: 2 }),
+        /scraping|nenhum extrator/i
+      );
+      assert.equal(imageDownloads, 2, 'o terceiro arquivo não é baixado quando o agregado já atingiu 4 bytes');
+    }
+  );
+});
+
 test('TikTok: tikwm fora do ar → cai no Cobalt (túnel)', async () => {
   await mockFetch(
     [
@@ -401,8 +419,9 @@ test('Pinterest: link curto (pin.it) resolve o id e consulta o widget pelo id NU
     [
       [
         'pin.it/1Obiyee9V',
-        () => ({ ...htmlResponse('<html><body>preview</body></html>'), url: sentUrl })
+        () => new Response('', { status: 302, headers: { location: sentUrl } })
       ],
+      ['www.pinterest.com/pin/429530883237169819', () => htmlResponse('<html><body>preview</body></html>')],
       [
         'widgets.pinterest.com',
         (u) => {
@@ -449,11 +468,12 @@ test('Pinterest: código curto só de dígitos é resolvido, não confundido com
     [
       [
         'pin.it/1234567890',
-        () => ({
-          ...htmlResponse('<html><body>preview</body></html>'),
-          url: 'https://www.pinterest.com/pin/429530883237169819/'
+        () => new Response('', {
+          status: 302,
+          headers: { location: 'https://www.pinterest.com/pin/429530883237169819/' }
         })
       ],
+      ['www.pinterest.com/pin/429530883237169819', () => htmlResponse('<html><body>preview</body></html>')],
       [
         'widgets.pinterest.com',
         (u) => {

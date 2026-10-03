@@ -273,7 +273,7 @@ async function viaCrawlerView(shortcode, originalUrl) {
  * @param {string} url link do Instagram
  * @param {'melhor'|'alta'|'media'|'baixa'} quality
  */
-export async function downloadInstagram(url, quality = 'melhor') {
+export async function downloadInstagram(url, quality = 'melhor', { maxBytes } = {}) {
   const errors = [];
   let resolved = url;
   if (/\/share\/|instagr\.am/i.test(url)) {
@@ -319,7 +319,7 @@ export async function downloadInstagram(url, quality = 'melhor') {
   // 3) Cobalt
   log.dl('instagram: tentando via cobalt…');
   try {
-    const { buffers, audioBuffer, ...rest } = await cobaltDownload(resolved, quality);
+    const { buffers, audioBuffer, ...rest } = await cobaltDownload(resolved, quality, { maxBytes });
     if (buffers?.length) {
       return baseResult({ ...rest, buffers, audioBuffer, platform: 'Instagram' });
     }

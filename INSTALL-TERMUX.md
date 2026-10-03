@@ -1,213 +1,79 @@
-# 📱 GUIA COMPLETO — Instalação e Configuração no Termux
+# Instalação do MontxBOT no Termux
 
-> O NEXUS no Termux usa **pareamento por código**: nada de QR Code.
-> Este guia te leva do zero até o bot funcionando. Siga na ordem.
+O bot exige Node.js 22+ e FFmpeg. A sessão e a configuração ficam em `data/` e não devem ser compartilhadas: o diretório contém credenciais do WhatsApp e, se habilitado, cache privado.
 
----
+## 1. Instale os pacotes
 
-## 📲 PASSO 1 — Instalar o Termux
-
-1. Instale o **Termux pela F-Droid** (a versão da Play Store está desatualizada e quebra):
-   👉 https://f-droid.org/packages/com.termux/
-2. Abra o Termux e **dê permissão de armazenamento** quando pedir.
-
----
-
-## 🧰 PASSO 2 — Atualizar e instalar a base
-
-Cole **um bloco por vez** e aperte Enter (aceite os `y` quando perguntar):
+Use o Termux atualizado (recomendado via F-Droid) e execute:
 
 ```bash
 pkg update -y && pkg upgrade -y
-```
-
-```bash
 pkg install -y git nodejs-lts ffmpeg procps
 ```
 
+Confirme a versão do Node:
+
 ```bash
-termux-setup-storage
+node --version
 ```
 
-> `ffmpeg` é obrigatório para figurinhas. `procps` para o `./bot.sh stop`.
+Ela deve ser `v22` ou superior.
 
----
-
-## ⬇️ PASSO 3 — Baixar o bot
+## 2. Obtenha e instale o bot
 
 ```bash
-cd ~
 git clone https://github.com/montx2/Bot-zap-zap.git
 cd Bot-zap-zap
 ./install-termux.sh
+npm run doctor
 ```
 
-O script instala as dependências do Node automaticamente. Aguarde terminar
-(pode levar alguns minutos na primeira vez).
+O instalador usa o `package-lock.json` para instalar versões reproduzíveis; Baileys permanece fixado em 6.7.24.
 
----
+## 3. Pareie a conta
 
-## 🔑 PASSO 4 — Configurar as chaves (o "turbo" do bot) — OPCIONAL mas recomendado
+Use uma conta sob seu controle. Informe DDI + DDD + número, só dígitos:
 
-O bot **funciona sem nenhuma chave** (IA grátis Pollinations, downloads, etc).
-Mas para **remoção de fundo** e mais IA, adicione suas contas:
+```bash
+./bot.sh pair 5511999999999
+./bot.sh start
+```
+
+No WhatsApp, abra **Dispositivos conectados → Conectar com número de telefone** e insira o código de 8 letras exibido no Termux. Não compartilhe o código nem a pasta `data/auth/`.
+
+## 4. Configure serviços opcionais
+
+O bot pode operar sem chaves de API. Para provedores adicionais:
 
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-### 🎭 Remoção de fundo (para `.sfundo` / `.fundo`)
-Crie **várias contas grátis** em https://www.remove.bg/api (50 créditos/mês cada).
-Quanto mais contas, mais "ilimitado" fica — o bot gira entre elas:
+Mantenha `.env` privado. As chamadas de IA enviam o conteúdo necessário ao provedor configurado; endpoints customizados são confiáveis por configuração e podem acessar rede local. Consulte o README antes de habilitar serviços.
 
-```env
-REMOVE_BG_KEYS=chave_da_conta1,chave_da_conta2,chave_da_conta3
-```
+## 5. Uso básico e privacidade
 
-> O arquivo precisa ficar **na raiz do bot** (junto do `package.json`) e o bot só
-> lê o `.env` ao **iniciar** — depois de colar as chaves, reinicie. Para conferir o
-> que ele enxergou: `npm run env` no terminal ou `.pools` no WhatsApp.
+- `.menu` mostra os comandos.
+- O bot responde apenas no privado do dono até que um chat/grupo seja liberado com `.ativar`.
+- Captura automática de View Once, Anti-Delete e auto-download começam desligados. Ative somente por escolha explícita e leia as retenções/limites no README.
+- Use `termux-wake-lock` e remova a otimização de bateria do Termux para manter a sessão ativa.
 
-### 🧠 IA (opcional)
-```env
-GEMINI_KEYS=chave1,chave2    # grátis em https://aistudio.google.com
-GROQ_KEYS=chave1             # grátis em https://console.groq.com
-OPENAI_KEYS=chave1           # OpenAI (pago)
-```
-> Sem nada disso, a IA usa **Pollinations grátis** automaticamente.
+## Comandos do launcher
 
-Para salvar no nano: `Ctrl+O` → Enter → `Ctrl+X`.
-
----
-
-## 🔗 PASSO 5 — Parear seu WhatsApp (o coração do processo)
-
-Salve seu número (DDI + DDD + número, **só dígitos**):
-
-```bash
-./bot.sh pair 55SEUDDDSEUNUMERO
-```
-Exemplo real: `./bot.sh pair 5511999999999`
-
-Agora inicie o bot:
-
-```bash
-./bot.sh start
-```
-
-O terminal vai mostrar um **código de 8 letras**, tipo `ABCD-EFGH`.
-
-**No seu celular:**
-1. Abra o **WhatsApp** → **⋮** (três pontos) → **Dispositivos conectados**
-2. Toque em **Conectar um dispositivo**
-3. Toque em **Conectar com número de telefone**
-4. Digite o **código de 8 letras** que apareceu no Termux
-
-Aguarde uns segundos. Quando aparecer o banner **"✅ Conectado"**, está no ar! 🎉
-
----
-
-## 🎮 PASSO 6 — Usar o bot
-
-Mande **`.menu`** em qualquer conversa (inclusive "Conversar com você mesmo").
-
-| O que faz | Comando |
-|---|---|
-| Ver tudo | `.menu` |
-| Testar se está vivo | `.ping` |
-| Status e saúde | `.info` / `.doctor` / `.pools` |
-| Figurinha | `.s` (responda uma foto/vídeo/GIF) |
-| Figurinha direto de link | `.s <link>` (Pinterest, TikTok, Instagram, GIF…) |
-| Figurinha sem fundo | `.sfundo` (mídia ou link) |
-| Baixar TikTok | `.tiktok <link>` |
-| Baixar Pinterest | `.pin <link>` |
-| Baixar Instagram | `.insta <link>` |
-| Baixar qualquer rede | `.dl <link>` |
-| Conversar com IA | `.ia <pergunta>` |
-| Gerar imagem | `.criar <descrição>` |
-| Anti-delete status | `.antidelete` |
-
-**View Once:** responda QUALQUER foto/vídeo de visualização única com
-QUALQUER mensagem (um "oi" serve) e o bot baixa pra você. A captura
-automática também já vem ligada.
-
-**Auto-download:** cole um link de rede social solto no chat → ele baixa sozinho.
-
-**Figurinha direto do link (novo 🔥):** não precisa baixar nada antes —
-manda o link e recebe a figurinha pronta:
-
-```
-.s https://br.pinterest.com/pin/123456789/     → figurinha do pin
-.s pin.it/abc123                               → aceita link curto e até sem https://
-.s inteira https://pin.it/abc123               → imagem completa, sem esticar
-.sfundo https://pin.it/abc123                  → baixa e remove o fundo com IA
-.s <link1> <link2> <link3>                     → até 3 links de uma vez
-```
-
-Funciona com qualquer link que o `.dl` baixa (Pinterest, TikTok, Instagram,
-YouTube, X, Facebook, Threads, Reddit, GIFs…) e também **respondendo** uma
-mensagem que tenha o link. Link que já é arquivo (`.jpg`, `.png`, `.gif`,
-`.mp4`…) é baixado na hora, sem passar pelos extratores.
-
----
-
-## 🔋 PASSO 7 — Manter o bot vivo no Android
-
-O Android gosta de matar apps em segundo plano. Faça isto:
-
-```bash
-termux-wake-lock
-```
-
-1. **Configurações do Android → Aplicativos → Termux → Bateria** → marque **"Sem restrição"** / desative otimização.
-2. Não feche o Termux arrastando pra fora dos recentes.
-3. Se quiser que o bot **inicie sozinho ao ligar o celular**, instale o app
-   **Termux:Boot** (F-Droid) e crie o script de auto-início (veja README).
-
----
-
-## 🧾 Comandos do launcher (`./bot.sh`)
-
-| Comando | O que faz |
+| Comando | Ação |
 |---|---|
 | `./bot.sh start` | inicia o bot |
-| `./bot.sh pair NUMERO` | salva número de pareamento |
-| `./bot.sh stop` | para o bot |
-| `./bot.sh doctor` | diagnóstico do ambiente |
-| `./bot.sh test` | roda a suíte de testes (102 offline) |
-| `./bot.sh update` | atualiza código + dependências |
+| `./bot.sh pair NUMERO` | salva o número de pareamento |
+| `./bot.sh stop` | encerra o processo |
+| `./bot.sh doctor` | diagnóstico local |
+| `./bot.sh test` | roda a suíte isolada |
+| `./bot.sh update` | atualiza a branch atualmente selecionada e reinstala dependências |
 
----
+## Problemas comuns
 
-## ❓ SOLUÇÃO DE PROBLEMAS
-
-| Problema | Solução |
-|---|---|
-| **`ffmpeg ausente`** no `.doctor` | `pkg install ffmpeg` |
-| **`node: command not found`** | `pkg install nodejs-lts` |
-| **`Cannot find module`** ao iniciar | rode `npm install` dentro da pasta do bot |
-| **Código de pareamento não aparece** | confira o número: só dígitos, com DDI (55…). Rode `./bot.sh pair` de novo |
-| **`Número inválido`** | falta DDI ou DDD. Ex. correto: `5511999999999` |
-| **Não conecta / fica tentando** | verifique sua internet; o bot tenta sozinho de novo |
-| **Bot cai ao fechar a tela** | `termux-wake-lock` + bateria sem restrição (Passo 7) |
-| **Sessão expirou / deslogou** | `rm -rf data/auth` e repita o **Passo 5** |
-| **`.fundo`/`.sfundo` pede configuração** | adicione `REMOVE_BG_KEYS` no `.env` (Passo 4) e reinicie; confira com `npm run env` |
-| **`.s <link>` não gera a figurinha** | confira se o link abre no navegador. Links de vídeo muito longos passam do teto de 64 MB do `.s` — use um link curto (TikTok/Reels/Pin) ou baixe com `.dl <link>` |
-| **Quero zerar as configurações** | apague `data/config.json` e reinicie |
-| **Quero trocar de conta** | `rm -rf data/auth` + `./bot.sh pair NOVONUMERO` + `./bot.sh start` |
-
----
-
-## 🔄 Atualizar o bot no futuro
-
-```bash
-cd ~/Bot-zap-zap
-./bot.sh update
-./bot.sh start
-```
-
----
-
-**Pronto! Você tem o bot mais completo rodando no seu bolso. ⚡**
-Qualquer coisa: `.menu`, `.doctor` e `.info` são seus melhores amigos.
+- **Node abaixo de 22:** `pkg upgrade -y && pkg install nodejs-lts`.
+- **FFmpeg ausente:** `pkg install ffmpeg`.
+- **Dependências faltando:** `npm ci` na pasta do bot.
+- **Sessão encerrada:** confira a internet e o estado da conta; se for necessário refazer o pareamento, preserve `data/config.json` e remova somente a sessão antiga com cuidado.
+- **Provedor sem chave:** `npm run env` informa caminhos e contagens, sem revelar valores secretos.

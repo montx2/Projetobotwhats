@@ -16,46 +16,71 @@ export const DEFAULT_CONFIG = {
   nomePack: 'MontxBOT',
   autorPack: '×by ꧁montx2_꧂',
   prefixos: ['.', '!', '/', '#'],
+  autorizados: [], // JIDs explicitamente autorizados pelo dono
 
-  // ── Controle de Acesso (Modo Privado) ─────────────────────
-  modoPrivado: true, // SÓ funciona no privado do dono (e para quem estiver em autorizados)
-  autorizados: [], // JIDs de usuários ou grupos autorizados pelo dono via .autorizar
+  // Recursos que copiam mensagens começam desativados e são autorizados por chat.
+  viewOnce: { autoChats: [] },
+  antiDelete: { chats: [], ignorar: [] },
 
-  // ── View Once ─────────────────────────────────────────────
-  viewOnce: {
-    auto: true, // captura automática e envia SOMENTE para o privado do dono
-    destinoAuto: 'dono', // SEMPRE envia para o dono (nunca vaza no grupo/chat)
-    resposta: 'dono' // SÓ o dono pode baixar respondendo a uma view once
-  },
+  // Ferramentas de grupo são sempre opt-in e armazenadas separadas por JID.
+  grupos: {},
 
-  // ── Anti-Delete ───────────────────────────────────────────
-  antiDelete: {
-    ativo: true, // captura mensagens apagadas
-    restaurarNoChat: false, // NUNCA manda no grupo/chat alheio por padrão
-    avisarDono: true, // envia silenciosamente apenas no privado do dono
-    ignorar: [] // filtros: 'grupos', 'privado' ou JIDs específicos
-  },
-
-  // ── Downloads ─────────────────────────────────────────────
-  autoDownload: true, // link solto baixa sozinho APENAS no privado do dono (ou chat autorizado)
-  qualidadePadrao: 'melhor', // melhor | alta | media | baixa
-  maxMB: 90, // limite de tamanho para envio
-
-  // ── IA ────────────────────────────────────────────────────
+  autoDownload: false,
+  qualidadePadrao: 'melhor',
+  maxMB: 90,
   ia: {
-    modeloImagem: 'flux', // flux | turbo
-    vozPadrao: 'nova', // alloy echo fable onyx nova shimmer
+    modeloImagem: 'flux',
+    vozPadrao: 'nova',
     sistema:
       'Você é o MontxBOT, um assistente de WhatsApp claro, direto e cordial. ' +
       'Responda sempre em português do Brasil, de forma curta e útil. Use emojis com muita moderação.'
   },
-
-  // ── Comportamento ─────────────────────────────────────────
-  soDonoConfigura: true, // só o dono muda configurações
-  responderDesconhecido: false // responde quando não entende um prefixo
+  responderDesconhecido: false,
+  _schemaVersion: 4
 };
 
 const FILE = 'config.json';
+
+export function normalizeConfig(saved) {
+  const oldVersion = Number(saved?._schemaVersion) || 0;
+  const base = structuredClone(DEFAULT_CONFIG);
+  const source = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+  // Older installs captured content by default. Migration permanently turns
+  // those settings off; owners must opt each chat back in explicitly.
+  const migrated = oldVersion < 3;
+  const name = ['NEXUS', '⚡ NEXUS'].includes(source.nomeBot) ? base.nomeBot : source.nomeBot;
+  const iaSystem = typeof source.ia?.sistema === 'string' && source.ia.sistema.startsWith('Você é o NEXUS, um assistente de WhatsApp esperto')
+    ? base.ia.sistema
+    : source.ia?.sistema;
+  const prefixos = Array.isArray(source.prefixos) ? source.prefixos.map(String).filter(Boolean).slice(0, 8) : [];
+
+  return {
+    ...base,
+    ...(typeof name === 'string' ? { nomeBot: name.slice(0, 80) } : {}),
+    ...(typeof source.nomePack === 'string' ? { nomePack: source.nomePack.slice(0, 120) } : {}),
+    ...(typeof source.autorPack === 'string' ? { autorPack: source.autorPack.slice(0, 120) } : {}),
+    prefixos: prefixos.length ? prefixos : base.prefixos,
+    autorizados: stringList(source.autorizados),
+    viewOnce: { autoChats: migrated ? [] : stringList(source.viewOnce?.autoChats) },
+    antiDelete: {
+      chats: migrated ? [] : stringList(source.antiDelete?.chats),
+      ignorar: stringList(source.antiDelete?.ignorar)
+    },
+    grupos: normalizeGroupSettings(source.grupos),
+    autoDownload: migrated ? false : source.autoDownload === true,
+    qualidadePadrao: ['melhor', 'alta', 'media', 'baixa'].includes(source.qualidadePadrao)
+      ? source.qualidadePadrao
+      : base.qualidadePadrao,
+    maxMB: clampNumber(source.maxMB, 1, 200, base.maxMB),
+    ia: {
+      modeloImagem: typeof source.ia?.modeloImagem === 'string' ? source.ia.modeloImagem.slice(0, 80) : base.ia.modeloImagem,
+      vozPadrao: typeof source.ia?.vozPadrao === 'string' ? source.ia.vozPadrao.slice(0, 40) : base.ia.vozPadrao,
+      sistema: typeof iaSystem === 'string' ? iaSystem.slice(0, 4000) : base.ia.sistema
+    },
+    responderDesconhecido: source.responderDesconhecido === true,
+    _schemaVersion: 4
+  };
+}
 
 class Config {
   constructor() {
@@ -64,51 +89,16 @@ class Config {
 
   #load() {
     const saved = readJson(FILE, null);
-    const merged = deepMerge(structuredClone(DEFAULT_CONFIG), saved || {});
-    // Saneamento básico e migração de segurança (garante que nunca vaze em grupos/chats)
-    if (!Array.isArray(merged.prefixos) || !merged.prefixos.length) merged.prefixos = DEFAULT_CONFIG.prefixos;
-    if (!Array.isArray(merged.antiDelete.ignorar)) merged.antiDelete.ignorar = [];
-    if (!Array.isArray(merged.autorizados)) merged.autorizados = [];
-    if (typeof merged.modoPrivado !== 'boolean') merged.modoPrivado = true;
-
-    // Nome do bot: quem ainda tem o nome padrão antigo passa para o novo.
-    if (merged.nomeBot === '⚡ NEXUS' || merged.nomeBot === 'NEXUS') {
-      merged.nomeBot = DEFAULT_CONFIG.nomeBot;
-      if (saved) writeJsonNow(FILE, merged);
-    }
-
-    // Persona da IA: troca o nome antigo, mantendo prompts personalizados.
-    if (typeof merged.ia?.sistema === 'string' && merged.ia.sistema.startsWith('Você é o NEXUS, um assistente de WhatsApp esperto')) {
-      merged.ia.sistema = DEFAULT_CONFIG.ia.sistema;
-      if (saved) writeJsonNow(FILE, merged);
-    }
-
-    // Assinatura: quem ainda tem a assinatura padrão antiga passa para a nova
-    // (se você personalizou o nome/autor, o seu valor é mantido).
-    if (merged.nomePack === 'NEXUS ⚡' && merged.autorPack === 'feito com amor') {
-      merged.nomePack = DEFAULT_CONFIG.nomePack;
-      merged.autorPack = DEFAULT_CONFIG.autorPack;
-      if (saved) writeJsonNow(FILE, merged);
-    }
-
-    // Migração obrigatória da versão antiga que vazava em grupos:
-    if (!saved || saved._schemaVersion !== 2) {
-      merged.modoPrivado = true;
-      merged.viewOnce.destinoAuto = 'dono';
-      merged.viewOnce.resposta = 'dono';
-      merged.antiDelete.restaurarNoChat = false;
-      merged.antiDelete.avisarDono = true;
-      merged._schemaVersion = 2;
-      writeJsonNow(FILE, merged);
-    }
-    return merged;
+    const clean = normalizeConfig(saved);
+    if (!saved || JSON.stringify(clean) !== JSON.stringify(saved)) writeJsonNow(FILE, clean);
+    return clean;
   }
 
   get() {
     return this.data;
   }
 
-  /** Lê um valor por caminho: cfg.get('antiDelete.ativo') */
+  /** Lê um valor por caminho, por exemplo cfg.at('antiDelete.chats'). */
   at(pathStr) {
     return pathStr.split('.').reduce((acc, part) => (acc == null ? undefined : acc[part]), this.data);
   }
@@ -127,12 +117,12 @@ class Config {
   }
 
   save() {
-    this.data._schemaVersion = 2;
+    this.data._schemaVersion = 4;
     writeJsonNow(FILE, this.data);
   }
 
   saveDebounced() {
-    this.data._schemaVersion = 2;
+    this.data._schemaVersion = 4;
     writeJsonDebounced(FILE, this.data);
   }
 
@@ -142,15 +132,52 @@ class Config {
   }
 }
 
-function deepMerge(base, extra) {
-  for (const [key, value] of Object.entries(extra || {})) {
-    if (value && typeof value === 'object' && !Array.isArray(value) && base[key] && typeof base[key] === 'object') {
-      deepMerge(base[key], value);
-    } else if (value !== undefined) {
-      base[key] = value;
-    }
+function stringList(value) {
+  return Array.isArray(value)
+    ? [...new Set(value.map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 500)
+    : [];
+}
+
+function normalizeGroupSettings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result = {};
+  for (const [rawJid, rawSettings] of Object.entries(value).slice(0, 500)) {
+    const jid = String(rawJid || '').trim().toLowerCase().replace(/:\d+@/, '@');
+    if (!jid.endsWith('@g.us') || jid.length > 180) continue;
+    const settings = rawSettings && typeof rawSettings === 'object' && !Array.isArray(rawSettings) ? rawSettings : {};
+    const antiLink = settings.antiLink && typeof settings.antiLink === 'object' && !Array.isArray(settings.antiLink)
+      ? settings.antiLink
+      : {};
+    result[jid] = {
+      welcome: settings.welcome === true,
+      goodbye: settings.goodbye === true,
+      antiLink: {
+        enabled: antiLink.enabled === true,
+        allowlist: normalizeDomainList(antiLink.allowlist)
+      }
+    };
   }
-  return base;
+  return result;
+}
+
+function normalizeDomainList(value) {
+  if (!Array.isArray(value)) return [];
+  const domains = [];
+  for (const item of value) {
+    const domain = String(item || '').trim().toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+    const labels = domain.split('.');
+    const validLabel = (label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label);
+    const validTld = /^[a-z]{2,63}$|^xn--[a-z0-9-]{2,59}$/.test(labels.at(-1) || '');
+    if (labels.length < 2 || labels.some((label) => !validLabel(label)) || !validTld) continue;
+    if (!domains.includes(domain)) domains.push(domain);
+    if (domains.length >= 50) break;
+  }
+  return domains;
+}
+
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
 }
 
 export const cfg = new Config();

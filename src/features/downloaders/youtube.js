@@ -157,7 +157,7 @@ async function oembedMeta(canonical, videoId) {
  * @param {'melhor'|'alta'|'media'|'baixa'} quality
  * @param {{audioOnly?: boolean}} opts
  */
-export async function downloadYouTube(url, quality = 'melhor', { audioOnly = false } = {}) {
+export async function downloadYouTube(url, quality = 'melhor', { audioOnly = false, maxBytes } = {}) {
   const videoId = parseYouTubeId(url);
   const canonical = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
   const errors = [];
@@ -208,7 +208,7 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
   // 2) Cobalt (túnel comunitário)
   log.dl('youtube: tentando via cobalt…');
   try {
-    const { buffers, audioBuffer, ...rest } = await cobaltDownload(canonical, quality, { audioOnly });
+    const { buffers, audioBuffer, ...rest } = await cobaltDownload(canonical, quality, { audioOnly, maxBytes });
     if (buffers?.length) {
       const meta = await oembedMeta(canonical, videoId);
       return baseResult({

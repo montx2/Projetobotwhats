@@ -279,6 +279,16 @@ export async function startClient(handlers = {}) {
     }
   });
 
+  // Entradas/saídas de membros são consumidas somente pelos recursos opt-in de grupo.
+  clientSocket.ev.on('group-participants.update', async (update) => {
+    if (socket !== clientSocket) return;
+    try {
+      await handlers.onGroupParticipantsUpdate?.(clientSocket, update);
+    } catch (error) {
+      log.error('erro no handler de participantes do grupo', { name: error?.name });
+    }
+  });
+
   // Pareamento por código (Termux sempre; desktop opcional).
   // Cada socket novo gera um código NOVO; o anterior morre junto com o socket.
   let pairingStarted = false;
@@ -348,7 +358,12 @@ function scheduleReconnect(handlers, delayMs, code) {
 
 export function stopClient() {
   stopping = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   try {
     socket?.end(undefined);
   } catch {}
+  socket = null;
 }

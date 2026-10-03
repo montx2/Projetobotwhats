@@ -3,6 +3,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { KeyPool } from '../src/core/keypool.js';
+import { SlidingWindowLimiter } from '../src/core/limiter.js';
+import { log } from '../src/core/logger.js';
 import { parseQuality, QUALITIES } from '../src/features/downloaders/quality.js';
 import { isIgnored, normalizeIgnoreTarget } from '../src/features/antidelete.js';
 import { unwrapViewOnce, isViewOnce } from '../src/features/viewonce.js';
@@ -10,7 +12,7 @@ import { detectPlatform, isKnownSocialUrl } from '../src/features/download.js';
 import { isTikTokUrl } from '../src/features/downloaders/tiktok.js';
 import { isPinterestUrl } from '../src/features/downloaders/pinterest.js';
 import { isInstagramUrl } from '../src/features/downloaders/instagram.js';
-import { extractUrls, isGroup, parseBool } from '../src/util/text.js';
+import { extractUrls, isGroup, normalizeJid, parseBool } from '../src/util/text.js';
 import {
   isWebp,
   isAnimatedWebp,
@@ -30,7 +32,39 @@ import {
   looksLikeServerError,
   sniffImage
 } from '../src/util/imageinfo.js';
-import { DEFAULT_CONFIG } from '../src/core/config.js';
+import { DEFAULT_CONFIG, normalizeConfig } from '../src/core/config.js';
+import {
+  findDisallowedLinks,
+  isBotGroupAdministrator,
+  isGroupAdministrator,
+  normalizeAllowDomain
+} from '../src/features/group-tools.js';
+
+test('logger oculta JIDs e valores de credenciais', () => {
+  const originalLog = console.log;
+  let output = '';
+  console.log = (line) => { output = String(line); };
+  try {
+    log.warn('erro em 5511999999999:3@s.whatsapp.net grupo@g.us', {
+      authorization: 'Bearer segredo-privado',
+      token: 'token-privado'
+    });
+  } finally {
+    console.log = originalLog;
+  }
+  assert.match(output, /\[JID\]/);
+  assert.doesNotMatch(output, /5511999999999|grupo@g\.us|segredo-privado|token-privado/);
+});
+
+test('SlidingWindowLimiter respeita intervalo, janela e separação por ator', () => {
+  const limiter = new SlidingWindowLimiter({ limit: 2, windowMs: 100, minIntervalMs: 20 });
+  assert.equal(limiter.consume('alice', 100).allowed, true);
+  assert.deepEqual(limiter.consume('alice', 110), { allowed: false, retryAfterMs: 10, reason: 'interval' });
+  assert.equal(limiter.consume('alice', 120).allowed, true);
+  assert.deepEqual(limiter.consume('alice', 150), { allowed: false, retryAfterMs: 50, reason: 'window' });
+  assert.equal(limiter.consume('bob', 150).allowed, true, 'um remetente não consome a cota de outro');
+  assert.equal(limiter.consume('alice', 200).allowed, true, 'eventos antigos expiram da janela');
+});
 
 // ── inspeção de imagem (cabeçalho + conteúdo) ────────────────
 
@@ -162,7 +196,18 @@ test('KeyPool.run falha quando todos falham', async () => {
   await assert.rejects(() => pool.run(() => {
     const e = new Error('quota exceeded');
     throw e;
-  }), /falharam/);
+  }), /falharam|cooldown/);
+});
+
+test('KeyPool não reutiliza itens em cooldown e retorna retry-after', async () => {
+  const pool = new KeyPool('limited', ['x'], { cooldownMs: 60_000 });
+  pool.reportFailure('x', { cooldownMs: 45_000 });
+  let called = false;
+  await assert.rejects(
+    () => pool.run(() => { called = true; }),
+    (error) => error.pool === 'limited' && error.retryAfterMs > 0
+  );
+  assert.equal(called, false);
 });
 
 // ── Qualidade ────────────────────────────────────────────────
@@ -212,6 +257,11 @@ test('antiDelete lista vazia protege tudo', () => {
   assert.equal(isIgnored('55@s.whatsapp.net', []), false);
 });
 
+test('normalizeJid remove o sufixo de dispositivo sem mudar o domínio', () => {
+  assert.equal(normalizeJid('55119999:23@s.whatsapp.net'), '55119999@s.whatsapp.net');
+  assert.equal(normalizeJid('ABC@g.us'), 'abc@g.us');
+});
+
 test('normalizeIgnoreTarget resolve "aqui" e números', () => {
   const msg = { key: { remoteJid: 'grupo@g.us' } };
   assert.equal(normalizeIgnoreTarget('aqui', msg), 'grupo@g.us');
@@ -219,9 +269,10 @@ test('normalizeIgnoreTarget resolve "aqui" e números', () => {
   assert.equal(normalizeIgnoreTarget('5511999999999', msg), '5511999999999@s.whatsapp.net');
 });
 
-test('antiDelete vem ATIVO por padrão sem filtros', () => {
-  assert.equal(DEFAULT_CONFIG.antiDelete.ativo, true);
+test('antiDelete é opt-in por chat e começa desativado', () => {
+  assert.deepEqual(DEFAULT_CONFIG.antiDelete.chats, []);
   assert.deepEqual(DEFAULT_CONFIG.antiDelete.ignorar, []);
+  assert.equal(DEFAULT_CONFIG.autoDownload, false);
 });
 
 // ── View Once ────────────────────────────────────────────────
@@ -252,17 +303,79 @@ test('unwrapViewOnce retorna null para mensagens e mídias comuns (foto, vídeo,
   assert.ok(unwrapViewOnce({ imageMessage: { url: 'https://mmg.whatsapp.net/vo.jpg', viewOnce: true } }));
 });
 
-test('viewOnce e modoPrivado default: exclusivo no privado do dono', () => {
-  assert.equal(DEFAULT_CONFIG.modoPrivado, true);
+test('recursos que copiam mensagens são opt-in e limitados por chat', () => {
   assert.deepEqual(DEFAULT_CONFIG.autorizados, []);
-  assert.equal(DEFAULT_CONFIG.viewOnce.auto, true);
-  assert.equal(DEFAULT_CONFIG.viewOnce.destinoAuto, 'dono');
-  assert.equal(DEFAULT_CONFIG.viewOnce.resposta, 'dono');
-  assert.equal(DEFAULT_CONFIG.antiDelete.restaurarNoChat, false);
-  assert.equal(DEFAULT_CONFIG.antiDelete.avisarDono, true);
+  assert.deepEqual(DEFAULT_CONFIG.viewOnce.autoChats, []);
+  assert.deepEqual(DEFAULT_CONFIG.antiDelete.chats, []);
+  assert.deepEqual(DEFAULT_CONFIG.grupos, {});
+  assert.equal(DEFAULT_CONFIG.autoDownload, false);
+  assert.equal(DEFAULT_CONFIG._schemaVersion, 4);
+});
+
+test('migração de config antiga desativa captura e auto-download sem apagar acesso', () => {
+  const clean = normalizeConfig({
+    _schemaVersion: 2,
+    autorizados: ['grupo@g.us'],
+    viewOnce: { auto: true },
+    antiDelete: { ativo: true, ignorar: ['grupos'] },
+    autoDownload: true
+  });
+  assert.deepEqual(clean.autorizados, ['grupo@g.us']);
+  assert.deepEqual(clean.viewOnce.autoChats, []);
+  assert.deepEqual(clean.antiDelete.chats, []);
+  assert.deepEqual(clean.antiDelete.ignorar, ['grupos']);
+  assert.equal(clean.autoDownload, false);
+  assert.equal(clean._schemaVersion, 4);
+});
+
+test('configuração de grupo normaliza JID, defaults e allowlist com limites seguros', () => {
+  const clean = normalizeConfig({
+    _schemaVersion: 4,
+    grupos: {
+      '5511999999999:2@g.us': {
+        welcome: true,
+        goodbye: 'true',
+        antiLink: { enabled: true, allowlist: ['www.Example.com', 'example.com', '*.evil.test', 'bad host'] }
+      },
+      'contato@s.whatsapp.net': { welcome: true }
+    }
+  });
+  assert.deepEqual(clean.grupos, {
+    '5511999999999@g.us': {
+      welcome: true,
+      goodbye: false,
+      antiLink: { enabled: true, allowlist: ['example.com'] }
+    }
+  });
+});
+
+test('allowlist de anti-link aceita somente domínios e corresponde a subdomínios por limite de rótulo', () => {
+  assert.equal(normalizeAllowDomain('www.example.com'), 'example.com');
+  assert.equal(normalizeAllowDomain('*.example.com'), null);
+  assert.equal(normalizeAllowDomain('https://example.com/path'), null);
+  assert.equal(normalizeAllowDomain('127.0.0.1'), null);
+  assert.deepEqual(
+    findDisallowedLinks('https://example.com/a https://sub.example.com https://notexample.com', ['example.com']),
+    ['https://notexample.com']
+  );
+  assert.deepEqual(findDisallowedLinks('example.com www.example.com contato@example.com evil.test', ['example.com']), ['evil.test']);
+  const manyLinks = Array.from({ length: 17 }, (_, index) => `https://host${index}.test`).join(' ');
+  assert.ok(findDisallowedLinks(manyLinks, ['example.com']).includes('[excesso de links]'));
 });
 
 // ── Roteamento de plataformas ────────────────────────────────
+test('autorização de grupo compara IDs LID/PN e respeita isSuperAdmin do Baileys', () => {
+  const metadata = {
+    participants: [
+      { id: 'user-lid@lid', jid: '5531999991111@s.whatsapp.net', isSuperAdmin: true },
+      { id: 'bot-lid@lid', jid: '5531999992222@s.whatsapp.net', admin: 'admin' }
+    ]
+  };
+  assert.equal(isGroupAdministrator(metadata, { participantLid: 'user-lid@lid' }), true);
+  assert.equal(isGroupAdministrator(metadata, { participantPn: '5531999991111@s.whatsapp.net' }), true);
+  assert.equal(isBotGroupAdministrator(metadata, { user: { id: '5531999992222:1@s.whatsapp.net' } }), true);
+});
+
 test('detecta TikTok, Pinterest e Instagram', () => {
   assert.ok(isTikTokUrl('https://vm.tiktok.com/ZM123/'));
   assert.ok(isTikTokUrl('https://www.tiktok.com/@user/video/123'));

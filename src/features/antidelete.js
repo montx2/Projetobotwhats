@@ -1,16 +1,15 @@
-// 🛡️ ANTI-DELETE — nada some.
-// Quando alguém apaga uma mensagem, o bot envia o conteúdo recuperado
-// EXCLUSIVAMENTE para o privado do dono (nunca vaza no grupo ou no chat alheio).
-// Filtros de ignorar configuráveis:
-//   .antidelete ignorar grupos | privado | <jid> | aqui
+// 🛡️ ANTI-DELETE — retenção opt-in, por chat, com TTL e limites de mídia.
+// O conteúdo recuperado é enviado apenas ao privado do dono; View Once nunca é
+// incluída, e os filtros podem excluir grupos, privados ou JIDs específicos.
 
 import { SYM, header as uiHeader, section as uiSection, kv, toggle } from '../core/ui.js';
-import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { cfg } from '../core/config.js';
-import { log, baileysLogger } from '../core/logger.js';
+import { log } from '../core/logger.js';
 import { messageCache } from '../wa/cache.js';
-import { formatDate, truncate, isGroup } from '../util/text.js';
+import { formatDate, truncate, isGroup, normalizeJid } from '../util/text.js';
 import { isAnimatedWebp } from '../util/webp.js';
+import { downloadWhatsAppMedia, MAX_WHATSAPP_MEDIA_BYTES } from '../wa/media.js';
+import { isViewOnce } from './viewonce.js';
 
 /** O chat atual está na lista de ignorados? */
 export function isIgnored(jid, list = cfg.get().antiDelete.ignorar) {
@@ -20,9 +19,9 @@ export function isIgnored(jid, list = cfg.get().antiDelete.ignorar) {
       if (isGroup(jid)) return true;
     } else if (r === 'privado' || r === 'private' || r === 'pv') {
       if (!isGroup(jid)) return true;
-    } else if (r === jid.toLowerCase()) {
+    } else if (normalizeJid(r) === normalizeJid(jid)) {
       return true;
-    } else if (jid.toLowerCase().startsWith(r.replace(/@.*/, '')) && r.includes('@')) {
+    } else if (r.includes('@') && normalizeJid(jid).startsWith(normalizeJid(r).replace(/@.*/, ''))) {
       return true;
     }
   }
@@ -42,12 +41,43 @@ export function normalizeIgnoreTarget(arg, msg) {
 
 const MEDIA_KEYS = ['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage', 'documentMessage'];
 
+function unwrapMessage(message) {
+  let current = message;
+  const wrappers = ['ephemeralMessage', 'deviceSentMessage', 'documentWithCaptionMessage', 'editedMessage'];
+  for (let i = 0; i < 6 && current; i++) {
+    const wrapper = wrappers.find((key) => current[key]?.message);
+    if (!wrapper) break;
+    current = current[wrapper].message;
+  }
+  return current;
+}
+
 function findMedia(message) {
-  if (!message) return null;
+  const content = unwrapMessage(message);
+  if (!content) return null;
   for (const k of MEDIA_KEYS) {
-    if (message[k]) return { type: k, node: message[k] };
+    if (content[k]) return { type: k, node: content[k] };
   }
   return null;
+}
+
+async function downloadDeletedMedia(sock, entry, chatJid, media) {
+  const download = (node) => downloadWhatsAppMedia(node, String(media.type).replace(/Message$/, ''), {
+    maxBytes: MAX_WHATSAPP_MEDIA_BYTES
+  });
+  try {
+    return await download(media.node);
+  } catch (firstError) {
+    if (typeof sock?.updateMediaMessage !== 'function') throw firstError;
+    const holder = {
+      key: { remoteJid: chatJid, id: entry.id, fromMe: entry.fromMe },
+      message: entry.message
+    };
+    const refreshed = await sock.updateMediaMessage(holder);
+    const refreshedContent = unwrapMessage(refreshed?.message || refreshed);
+    const node = refreshedContent?.[media.type] || media.node;
+    return download(node);
+  }
 }
 
 function header(entry, chatJid) {
@@ -67,7 +97,6 @@ function header(entry, chatJid) {
  */
 export async function handleDelete(sock, revokeMsg, { ownerJid }) {
   const settings = cfg.get().antiDelete;
-  if (!settings.ativo) return false;
   if (!ownerJid || isGroup(ownerJid)) return false;
 
   const proto = revokeMsg.message?.protocolMessage;
@@ -75,26 +104,23 @@ export async function handleDelete(sock, revokeMsg, { ownerJid }) {
   if (!targetKey?.id) return false;
 
   const chatJid = targetKey.remoteJid || revokeMsg.key.remoteJid;
+  if (!Array.isArray(settings.chats) || !settings.chats.some((chat) => normalizeJid(chat) === normalizeJid(chatJid))) return false;
   if (isIgnored(chatJid, settings.ignorar)) return false;
 
-  const entry = messageCache.get(chatJid, targetKey.id) || messageCache.getById(targetKey.id);
+  const entry = messageCache.get(chatJid, targetKey.id);
   if (!entry) return false;
   if (entry.fromMe) return false; // ignora apagadas pelo próprio bot/dono
+  if (isViewOnce(entry.message)) return false; // não converte revogação em captura de View Once
 
   const caption = header(entry, chatJid);
-  log.warn(`anti-delete: mensagem apagada em ${chatJid} (${targetKey.id}) → enviando ao dono`);
+  log.warn('anti-delete: mensagem apagada em chat habilitado; enviando ao privado do dono');
 
   const media = findMedia(entry.message);
   let sentMedia = false;
 
   if (media) {
     try {
-      const buffer = await downloadMediaMessage(
-        { key: { remoteJid: chatJid, id: entry.id, fromMe: false }, message: entry.message },
-        'buffer',
-        {},
-        { logger: baileysLogger, reuploadRequest: sock.updateMediaMessage }
-      );
+      const buffer = await downloadDeletedMedia(sock, entry, chatJid, media);
       if (buffer?.length) {
         const payload =
           media.type === 'imageMessage'
@@ -124,12 +150,12 @@ export async function handleDelete(sock, revokeMsg, { ownerJid }) {
         sentMedia = true;
       }
     } catch (error) {
-      log.warn(`anti-delete: mídia irrecuperável (${error.message})`);
+      log.warn('anti-delete: mídia irrecuperável', { name: error?.name, status: error?.status, code: error?.code });
     }
   }
 
   if (!sentMedia) {
-    const text = extractAnyText(entry.message);
+    const text = extractAnyText(unwrapMessage(entry.message));
     await sock.sendMessage(ownerJid, {
       text: `${caption}\n\n${text ? `💬 "${truncate(text, 1800)}"` : '📎 [conteúdo de mídia não recuperável]'}`
     });
@@ -157,21 +183,22 @@ export function extractAnyText(message) {
   );
 }
 
-/** Texto de status do anti-delete para o comando .antidelete */
+/** Texto de status do Anti-Delete no chat que o dono consultou. */
 export function statusText(jid) {
   const s = cfg.get().antiDelete;
-  const ignoredHere = isIgnored(jid, s.ignorar);
+  const enabled = Array.isArray(s.chats) && s.chats.some((chat) => normalizeJid(chat) === normalizeJid(jid)) && !isIgnored(jid, s.ignorar);
   return [
-    uiHeader('Anti-Delete', 'proteção silenciosa'),
+    uiHeader('Anti-Delete', 'retenção opt-in por chat'),
     '',
     [
-      kv('Status', toggle(s.ativo, 'ativo', 'desativado')),
-      kv('Destino', 'somente o seu privado'),
-      kv('Neste chat', ignoredHere ? `${SYM.off} ignorado` : `${SYM.on} monitorado`)
+      kv('Neste chat', toggle(enabled, 'ativo', 'desativado')),
+      kv('Chats habilitados', String(s.chats?.length || 0)),
+      kv('Destino', 'somente o privado do dono'),
+      kv('Retenção', 'até 24 horas; mídia limitada a 64 MB')
     ].join('\n'),
     '',
-    uiSection('Filtros', s.ignorar.length ? s.ignorar : ['nenhum, protegendo tudo']),
+    uiSection('Filtros', s.ignorar.length ? s.ignorar : ['nenhum']),
     '',
-    '_Adicione com_ `.antidelete ignorar grupos`'
+    '_Use_ `.antidelete on aqui` _ou_ `.antidelete on <JID>` _para habilitar um chat._'
   ].join('\n');
 }
