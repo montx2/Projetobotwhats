@@ -144,7 +144,7 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 
 ### Jogos & arcade
 
-Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.jogos` para ver o catálogo; há uma partida de tabuleiro ativa por chat e `.jogos cancelar` encerra a rodada atual. Os palpites aceitos podem ser enviados com o comando ou diretamente, sem prefixo.
+Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.jogos` para ver o catálogo; há uma partida de tabuleiro ativa por chat. Se alguém tentar abrir outro jogo com uma partida em curso, o bot explica qual partida está rolando, qual o progresso, como continuar e que `.encerrar` (ou `.jogos cancelar`) encerra a rodada atual. Os palpites aceitos podem ser enviados com o comando ou diretamente, sem prefixo.
 
 ```text
 .velha [facil|medio|dificil]      → Jogo da velha contra o bot
@@ -168,7 +168,7 @@ Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.
 
 **Jokenpô PvP secreto.** Se a jogada fosse digitada no grupo, quem joga por último veria a do outro e ganharia sempre. Por isso, depois do `.ppt aceitar`, o bot **chama os dois no privado**: cada um responde `1` 🪨, `2` 📄 ou `3` ✂️ (ou `pedra`, `papel`, `tesoura`, `.ppt pedra`) e o bot só **revela no grupo quando os dois já travaram a jogada** — com suspense de *JO... KEN... PÔ!*. Empate repete a rodada sem contar; quem não joga em 2 minutos perde por W.O.; o convite expira em 3 minutos; jogar no grupo não vale. O dono joga pelo próprio chat "Você". Se o bot não conseguir chamar alguém, o grupo é avisado e a pessoa pode chamar o número do bot e mandar `1`, `2` ou `3`. Cada pessoa só participa de uma série por vez.
 
-Os tabuleiros são desenhados com **emoji** (❌ ⭕ 🟩🟨⬛ 🟦 🚩 💣 🔴), que ocupam sempre a mesma largura no WhatsApp — por isso a grade nunca desalinha, em Android, iOS ou Web. Caracteres de desenho de caixa (`┌─┬┐│`) não são usados porque o WhatsApp os renderiza com fontes diferentes. Só a forca usa um bloco monoespaçado, em ASCII puro e sem moldura. Os nomes de perfil nunca entram nas grades. Partidas em andamento ficam em memória; o ranking fica persistente em `data/games-score.json`, separado por chat. `.desativar` remove a partida e o placar daquele chat.
+Os tabuleiros são desenhados com **emoji** (❌ ⭕ 🟩🟨⬛ 🟦 🚩 💣 🔴), que ocupam sempre a mesma largura no WhatsApp — por isso a grade nunca desalinha, em Android, iOS ou Web. Caracteres de desenho de caixa (`┌─┬┐│`) não são usados porque o WhatsApp os renderiza com fontes diferentes. Só a forca usa um bloco monoespaçado, em ASCII puro e sem moldura. No Termo, cada palpite também vem escrito letra a letra com a sua cor (ex.: `1 *CAVAL* › C 🟩 · A 🟩 · V ⬛ · A 🟨 · L ⬛`), além da lista de letras que não estão na palavra, para ninguém precisar decifrar a grade. Os nomes de perfil nunca entram nas grades. Partidas em andamento ficam em memória; o ranking fica persistente em `data/games-score.json`, separado por chat. `.desativar` remove a partida e o placar daquele chat.
 
 Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Faça downloads somente de conteúdo que você tem direito e autorização para acessar.
 

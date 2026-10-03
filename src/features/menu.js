@@ -45,7 +45,8 @@ const GAME_ITEMS = [
   ['.anagrama / .quiz', 'palavras embaralhadas e perguntas rápidas'],
   ['.adivinhe / .ppt', 'número secreto ou Jokenpô'],
   ['.dado [NdM] / .moeda / .roleta', 'rolagens rápidas'],
-  ['.placar', 'ranking deste chat · .placar reset (admin/dono)']
+  ['.placar', 'ranking deste chat · .placar reset (admin/dono)'],
+  ['.encerrar', 'finaliza a partida ativa neste chat']
 ];
 
 /**

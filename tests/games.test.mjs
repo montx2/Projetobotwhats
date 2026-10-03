@@ -715,3 +715,121 @@ test('o roteador entrega a jogada secreta vinda do privado (mesmo de quem não f
   assert.equal(getChatScoreboard(jid).find((row) => row.id === alice)?.wins, 1);
   clearChatGames(jid);
 });
+
+test('partida em andamento bloqueia novo jogo com aviso profissional e .encerrar libera o chat', async () => {
+  const jid = 'lock-chat-test@s.whatsapp.net';
+  const player = '551100000091@s.whatsapp.net';
+  const replies = createReplyCollector();
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: [], reply: replies.reply });
+  assert.match(String(replies.sent.at(-1)), /Termo/);
+
+  // o MESMO jogo pedido de novo: mostra a partida atual com o aviso de progresso
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: [], reply: replies.reply });
+  let again = String(replies.sent.at(-1));
+  assert.match(again, /Partida em andamento/);
+  assert.match(again, /digite `\.encerrar` para encerrar a qualquer momento/);
+  assert.match(again, /0\/6 tentativas/);
+  assert.match(again, /⬜⬜⬜⬜⬜/, 'o tabuleiro atual continua visível');
+
+  // OUTRO jogo pedido com partida ativa: aviso com progresso e como encerrar
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'velha', args: [], reply: replies.reply });
+  let notice = String(replies.sent.at(-1));
+  assert.match(notice, /Partida em andamento/);
+  assert.match(notice, /partida de Termo ativa neste chat/);
+  assert.match(notice, /0\/6 tentativas/);
+  assert.match(notice, /envie um palpite de 5 letras/);
+  assert.match(notice, /Para encerrar: \*`\.encerrar`\*/);
+  assert.match(notice, /finalize a partida de Termo antes de abrir outra/);
+
+  // OUTRO jogo pedido com partida ativa: mesmo aviso, pedindo para finalizar antes
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'velha', args: [], reply: replies.reply });
+  notice = String(replies.sent.at(-1));
+  assert.match(notice, /Partida em andamento/);
+  assert.match(notice, /finalize a partida de Termo antes de abrir outra/);
+  assert.match(notice, /\.encerrar/);
+
+  // dica de outro jogo com partida ativa também explica a partida em curso
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'quiz', args: ['dica'], reply: replies.reply });
+  assert.match(String(replies.sent.at(-1)), /Partida em andamento/);
+
+  // palpite avulso de outro jogo com partida ativa também explica a partida em curso
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'forca', args: ['carta'], reply: replies.reply });
+  assert.match(String(replies.sent.at(-1)), /Partida em andamento/);
+  assert.match(String(replies.sent.at(-1)), /finalize a partida de Termo antes de abrir outra/);
+
+  // .jogos cancelar ainda encerra
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'jogos', args: ['cancelar'], reply: replies.reply });
+  assert.match(String(replies.sent.at(-1)), /Partida encerrada/);
+  assert.match(String(replies.sent.at(-1)), /partida de Termo foi finalizada/);
+
+  // .encerrar sem partida avisa que não há nada rolando
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'encerrar', args: [], reply: replies.reply });
+  assert.match(String(replies.sent.at(-1)), /Nenhuma partida ativa/);
+
+  // .encerrar durante a partida libera o chat
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: [], reply: replies.reply });
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'encerrar', args: [], reply: replies.reply });
+  assert.match(String(replies.sent.at(-1)), /Partida encerrada/);
+
+  // com o chat livre, outro jogo começa normalmente
+  await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'velha', args: [], reply: replies.reply });
+  assert.match(String(replies.sent.at(-1)), /Jogo da velha/);
+  clearChatGames(jid);
+});
+
+test('Termo explica cada palpite letra a letra e lista as letras fora da palavra', async () => {
+  const realRandom = Math.random;
+  Math.random = () => 0; // primeira palavra da lista: "abriu"
+  try {
+    const jid = 'termo-read-test@s.whatsapp.net';
+    const player = '551100000092@s.whatsapp.net';
+    const replies = createReplyCollector();
+    await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: [], reply: replies.reply });
+    const opened = String(replies.sent.at(-1));
+    assert.doesNotMatch(opened, /Leitura dos palpites/, 'sem palpites ainda não há leitura');
+
+    await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: ['saias'], reply: replies.reply });
+    const board = String(replies.sent.at(-1));
+    assert.match(board, /LEITURA DOS PALPITES/);
+    assert.match(board, /1️⃣ \*SAIAS\* › S ⬛ · A 🟨 · I 🟨 · A ⬛ · S ⬛/, 'cada letra ao lado da sua cor');
+    assert.match(board, /Fora da palavra · \*S\*/, 'letras descartadas ficam explícitas');
+    assert.match(board, /🟩 letra certa no lugar · 🟨 letra em outra posição · ⬛ letra fora/);
+
+    // palpite direto (sem prefixo) também traz a leitura
+    await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: ['bravo'], reply: replies.reply });
+    assert.match(String(replies.sent.at(-1)), /2️⃣ \*BRAVO\* › B 🟨 · R 🟨 · A 🟨 · V ⬛ · O ⬛/);
+    clearChatGames(jid);
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+test('Termo vitorioso e derrota mostram a leitura final letra a letra', async () => {
+  const realRandom = Math.random;
+  Math.random = () => 0; // "abriu"
+  try {
+    const jid = 'termo-win-test@s.whatsapp.net';
+    const player = '551100000093@s.whatsapp.net';
+    const replies = createReplyCollector();
+    await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: [], reply: replies.reply });
+    await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: ['abriu'], reply: replies.reply });
+    const win = String(replies.sent.at(-1));
+    assert.match(win, /vitória em 1 tentativa/);
+    assert.match(win, /LEITURA FINAL/);
+    assert.match(win, /1️⃣ \*ABRIU\* › A 🟩 · B 🟩 · R 🟩 · I 🟩 · U 🟩/);
+    assert.equal(getChatScoreboard(jid)[0].wins, 1);
+    clearChatGames(jid);
+
+    await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: [], reply: replies.reply });
+    for (const wrong of ['saias', 'bravo', 'carta', 'certo', 'nuvem', 'piano']) {
+      await handleGameCommand({ sock: {}, msg: makeMessage(jid, player), name: 'termo', args: [wrong], reply: replies.reply });
+    }
+    const loss = String(replies.sent.at(-1));
+    assert.match(loss, /fim de jogo/);
+    assert.match(loss, /A palavra era ABRIU/);
+    assert.match(loss, /LEITURA FINAL/);
+    clearChatGames(jid);
+  } finally {
+    Math.random = realRandom;
+  }
+});
