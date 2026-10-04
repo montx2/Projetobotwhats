@@ -16,6 +16,7 @@ import { handleGroupParticipantsUpdate } from './features/group-tools.js';
 import { hasFfmpeg } from './util/ffmpeg.js';
 import { bgStatus, warnIfBgUnconfigured } from './features/bgremoval.js';
 import { envSummary } from './core/config.js';
+import { stopCobaltDiscovery } from './features/downloaders/cobalt-instances.js';
 import { isGroup } from './util/text.js';
 
 ensureDirs();
@@ -217,6 +218,7 @@ function shutdown(signal, exitCode = 0) {
   process.exitCode = exitCode;
   log.warn(`recebido ${signal} — salvando e encerrando…`);
   stopClient();
+  stopCobaltDiscovery(); // limpa o timer de revalidação de instâncias (sem vazamento)
   flushStore();
   setTimeout(() => process.exit(exitCode), 750).unref();
 }
