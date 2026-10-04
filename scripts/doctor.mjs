@@ -38,14 +38,26 @@ if (voice.piper.installed) ok(`voz offline neural: piper (${voice.piper.model})`
 
 // yt-dlp: usado automaticamente SÓ para links do YouTube (URL canônica montada
 // pelo bot). Para os demais sites continua desligado por padrão, por segurança.
-const { findYtdlp, isYtdlpEnabled, canUseYtdlp, youtubeWatchUrl } = await import('../src/features/downloaders/ytdlp.js');
+const { findYtdlp, isYtdlpEnabled, canUseYtdlp, youtubeWatchUrl, ytdlpVersion, hasCookies } = await import(
+  '../src/features/downloaders/ytdlp.js'
+);
 const ytdlp = findYtdlp();
 if (canUseYtdlp(youtubeWatchUrl('dQw4w9WgXcQ'))) {
   ok(`yt-dlp ativo para YouTube: ${ytdlp.join(' ')}${isYtdlpEnabled() ? ' (e demais sites)' : ' (demais sites: NEXUS_ENABLE_YTDLP=false)'}`);
+  // Versão velha é a causa nº 1 de "Sign in to confirm you're not a bot": o
+  // YouTube muda o desafio a cada poucas semanas.
+  const version = ytdlpVersion();
+  const parts = String(version).match(/^(\d{4})\.(\d{2})\.(\d{2})/);
+  if (parts) {
+    const days = Math.floor((Date.now() - Date.UTC(+parts[1], +parts[2] - 1, +parts[3])) / 86_400_000);
+    if (days >= 30) warn(`yt-dlp ${version} tem ${days} dias — atualize: pip install -U yt-dlp (evita o falso "bot check")`);
+    else ok(`yt-dlp atualizado (${version}, ${days} dia(s))`);
+  }
+  if (hasCookies()) ok('cookies do YouTube configurados (usados quando o IP cai no muro de verificação)');
 } else if (!ytdlp) {
-  warn('yt-dlp não encontrado — .ytmp3/.yt do YouTube dependem dele (o Innertube dá 403). Termux/Linux: pip install -U yt-dlp');
+  warn('yt-dlp não encontrado — é o extrator mais forte para .ytmp3/.yt. Termux/Linux: pip install -U yt-dlp');
 } else {
-  warn('yt-dlp desligado por NEXUS_DISABLE_YTDLP=true — .ytmp3/.yt do YouTube podem falhar (403)');
+  warn('yt-dlp desligado por NEXUS_DISABLE_YTDLP=true — .ytmp3/.yt vão depender só de Innertube/Cobalt');
 }
 
 // Dependências

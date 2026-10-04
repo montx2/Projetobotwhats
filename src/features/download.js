@@ -26,6 +26,7 @@ import { isFacebookUrl, downloadFacebook } from './downloaders/facebook.js';
 import { isThreadsUrl, isRedditUrl, isTwitchUrl, isVimeoUrl, downloadGeneric } from './downloaders/generic.js';
 import { cobaltDownload } from './downloaders/cobalt.js';
 import { canUseYtdlp, ytdlpBuffer, ytdlpInfo, youtubeWatchUrl } from './downloaders/ytdlp.js';
+import { isGoogleVideoUrl, fetchGoogleVideoBuffer } from './downloaders/gvs.js';
 import { probeStream } from './downloaders/media.js';
 import { detectAudioMime, hasFfmpeg, applyAudioFilter } from '../util/ffmpeg.js';
 
@@ -62,9 +63,21 @@ export function isKnownSocialUrl(url) {
 /** Baixa uma URL de mídia aplicando os cabeçalhos esperados (Referer, User-Agent específico etc.). */
 async function downloadMedia(itemOrUrl, onProgress, maxBytes = 200 * 1024 * 1024) {
   const url = typeof itemOrUrl === 'string' ? itemOrUrl : itemOrUrl?.url;
-  const customHeaders = typeof itemOrUrl === 'object' && itemOrUrl?.headers ? itemOrUrl.headers : {};
+  const item = typeof itemOrUrl === 'object' && itemOrUrl ? itemOrUrl : {};
+  const customHeaders = item.headers || {};
   const referer = customHeaders.referer || customHeaders.Referer || mediaReferer(url);
   log.dl(`baixando ${shortUrl(url)}…`);
+
+  // CDN do YouTube: GET aberto é recusado com 403 em parte das URLs (e o resto
+  // é estrangulado). O player real pede FAIXAS — então o bot faz igual.
+  if (item.ranged || isGoogleVideoUrl(url)) {
+    return fetchGoogleVideoBuffer(url, {
+      headers: { ...(referer ? { referer } : {}), ...customHeaders },
+      maxBytes,
+      totalBytes: Number(item.contentLength) || 0
+    });
+  }
+
   return fetchBuffer(url, {
     timeoutMs: 180_000,
     maxBytes,
@@ -227,10 +240,15 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
 
   const strategies = [];
   const preErrors = [];
+  // Dica acionável (ex.: "o YouTube pediu verificação") que sobrevive à cascata
+  // e chega ao usuário em vez de morrer no log.
+  let failureHint = '';
 
-  // YouTube: o Innertube (ANDROID_VR/IOS) devolve links do googlevideo que hoje
-  // respondem 403 no download. O yt-dlp (com runtime JS) é o caminho confiável,
-  // então ele vai PRIMEIRO. Só recebe a URL canônica montada a partir do ID.
+  // YouTube: o yt-dlp (com runtime JS) continua sendo o extrator mais forte —
+  // resolve cifra, escolhe formato e cobre casos que a Innertube não alcança —
+  // então vai PRIMEIRO. Quando ele cai no muro de verificação, a Innertube
+  // (agora com URLs sondadas antes de usar) e o Cobalt assumem logo em seguida.
+  // Só recebe a URL canônica montada a partir do ID, nunca a URL do usuário.
   const ytWatchUrl = platform === 'YouTube' ? youtubeWatchUrl(parseYouTubeId(url)) : null;
   let ytdlpTried = false;
   if (ytWatchUrl && canUseYtdlp(ytWatchUrl)) {
@@ -241,34 +259,47 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
     } catch (error) {
       const message = String(error?.message || error).slice(0, 200);
       preErrors.push(message);
+      if (error?.hint) failureHint ||= error.hint;
       log.warn('yt-dlp (YouTube) falhou; tentando Innertube', { message });
     }
   }
 
+  // `cobaltTried` sai true quando o extrator dedicado JÁ esgotou o Cobalt por
+  // conta própria (inclusive ao lançar erro, que só acontece no fim da cascata
+  // interna dele). Se ele devolveu uma URL cedo — Innertube, embed, oEmbed — o
+  // Cobalt NÃO foi tentado, e repetir aqui é a diferença entre entregar a mídia
+  // e responder "download falhou".
+  let dedicatedCobaltTried = false;
   const dedicated = await byPlatform(url, platform, quality, audioOnly, maxBytes).catch((error) => {
     log.warn(`${platform} (dedicado) falhou`, { name: error?.name, status: error?.status, code: error?.code });
+    dedicatedCobaltTried = error?.cobaltTried === true;
+    if (error?.hint) failureHint ||= error.hint;
     return null;
   });
   if (dedicated?.media?.length || dedicated?.buffers?.length) {
     const enriched = dedicated;
     const out = await withBuffers(enriched, onProgress, maxBytes).catch(async (error) => {
       log.warn('download de buffers falhou; tentando reservas', { name: error?.name, status: error?.status, code: error?.code });
+      preErrors.push(`${platform}: ${String(error?.message || error).slice(0, 110)}`);
       return null;
     });
     if (out?.buffers?.length) return normalize(out, platform);
+    dedicatedCobaltTried = dedicated.cobaltTried === true;
   }
 
   // Reservas em cascata.
-  // Os extratores dedicados já tentam o Cobalt por conta própria, então só
-  // vale chamá-lo de novo quando NÃO houve extrator dedicado (cauda longa) —
-  // repetir a chamada dobraria a espera sem mudar o que pode ser alcançado.
+  // Os extratores dedicados tentam o Cobalt por conta própria, então só vale
+  // chamá-lo de novo quando ele NÃO chegou a rodar lá dentro (cauda longa, ou
+  // extrator que devolveu uma URL que depois não baixou).
   const dedicatedTriesCobalt =
-    platform === 'TikTok' ||
-    platform === 'Instagram' ||
-    platform === 'Pinterest' ||
-    platform === 'YouTube' ||
-    platform === 'X (Twitter)' ||
-    platform === 'Facebook';
+    dedicatedCobaltTried ||
+    ((platform === 'TikTok' ||
+      platform === 'Instagram' ||
+      platform === 'Pinterest' ||
+      platform === 'YouTube' ||
+      platform === 'X (Twitter)' ||
+      platform === 'Facebook') &&
+      !dedicated);
 
   if (!dedicatedTriesCobalt) {
     strategies.push([
@@ -306,6 +337,7 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
     result = await firstOf(strategies);
   } catch (error) {
     if (preErrors.length) error.message = `${preErrors.join(' | ')} | ${error.message}`;
+    if (failureHint && !error.hint) error.hint = failureHint;
     throw error;
   }
   return normalize(result, platform);

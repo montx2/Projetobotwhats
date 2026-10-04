@@ -3,26 +3,65 @@
 //
 // Por que Innertube e não só Cobalt:
 //   • É UM POST JSON. Não precisa de yt-dlp, Python nem ffmpeg.
-//   • O cliente ANDROID_VR (app do Oculus) é o ÚNICO que ainda publica um
-//     stream "muxado" (vídeo+áudio num arquivo só, itag 18) com URL não
-//     assinada. O cliente WEB devolve `signatureCipher`, que só se resolve
-//     baixando e interpretando o JS do player — caro e frágil.
-//   • IOS entra como reserva: é adaptativo (sem muxado), mas ainda responde
-//     áudio não assinado quando o ANDROID_VR é bloqueado por "bot".
+//   • Alguns clientes oficiais ainda publicam URL DIRETA (sem `signatureCipher`,
+//     que só se resolve interpretando o JS do player — caro e frágil).
 //
-// Teto honesto: 360p para vídeo (o YouTube só publica um stream muxado).
-// Áudio sai em qualidade cheia, porque stream só de áudio não precisa muxar.
+// 🩹 Correção 2026 (o `.ytmp3` que respondia "download falhou … 403"):
+//   O YouTube passou a exigir PO token no CDN (GVS) para quase todos os
+//   clientes. O ANDROID_VR, que era o nosso primeiro, hoje só entrega o itag 18
+//   sem token — a faixa de áudio dele responde 403 no download. Como o extrator
+//   devolvia essa URL sem testar, o bot "achava" a mídia e só quebrava na hora
+//   de baixar, e aí nem o Cobalt era tentado.
+//
+//   Agora: VISIONOS (Apple Vision Pro) vai primeiro — continua emitindo URL
+//   direta, sem cifra e sem PO token —, e TODA URL escolhida é sondada (início
+//   e fim) antes de ser devolvida. URL recusada pelo CDN é descartada na hora,
+//   e a cascata segue para o próximo cliente / Invidious / Cobalt.
+//
+// Teto honesto: 360p quando só há stream muxado (itag 18); com VISIONOS o vídeo
+// adaptativo existe, mas sem ffmpeg não dá para juntar faixas, então o muxado
+// continua sendo o alvo para vídeo. Áudio sai em qualidade cheia.
 //
 // Reservas: Invidious API → Cobalt (túnel) → e, se houver binário, yt-dlp.
 
 import { postJson, fetchJson, httpGet, randomUA } from '../../core/http.js';
 import { log } from '../../core/logger.js';
 import { cobaltDownload } from './cobalt.js';
+import { isGoogleVideoUrl, probeGoogleVideo } from './gvs.js';
 
 const PLAYER_ENDPOINT = 'https://www.youtube.com/youtubei/v1/player';
+const YT_ORIGIN = 'https://www.youtube.com';
 
-/** Clientes impersonados: versões reais — o YouTube recusa cliente inventado. */
+/** Dica mostrada quando o YouTube responde com o muro de "confirme que não é um robô". */
+export const YT_BOT_WALL_HINT =
+  'O YouTube exigiu verificação para este IP. Atualize o extrator (pip install -U yt-dlp) ' +
+  'e, se persistir, aponte YTDLP_COOKIES=/caminho/cookies.txt no .env (cookies exportados de uma aba anônima logada).';
+
+/**
+ * Clientes impersonados: versões reais — o YouTube recusa cliente inventado.
+ * A ordem é a parte que importa, e ela vale por um motivo medido:
+ *   1. VISIONOS  → URL direta, sem PO token, aceita Range em qualquer faixa.
+ *   2. ANDROID_VR→ ainda útil para o muxado (itag 18); o áudio costuma dar 403.
+ *   3. IOS       → reserva quando os dois acima caem no muro de "bot".
+ *   4. ANDROID (sem androidSdkVersion) → variante que não dispara PO token.
+ * Quando o YouTube aposentar uma versão, é só bumpar `clientVersion` aqui.
+ */
 const CLIENTS = [
+  {
+    name: 'VISIONOS',
+    context: {
+      clientName: 'VISIONOS',
+      clientVersion: '1.02',
+      deviceMake: 'Apple',
+      deviceModel: 'RealityDevice17,1',
+      osName: 'visionOS',
+      osVersion: '26.5.23O471',
+      hl: 'en',
+      gl: 'US'
+    },
+    userAgent:
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15'
+  },
   {
     name: 'ANDROID_VR',
     context: {
@@ -51,6 +90,19 @@ const CLIENTS = [
       gl: 'US'
     },
     userAgent: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)'
+  },
+  {
+    // Sem `androidSdkVersion` o YouTube não exige PO token deste cliente.
+    name: 'ANDROID',
+    context: {
+      clientName: 'ANDROID',
+      clientVersion: '20.10.38',
+      osName: 'Android',
+      osVersion: '11',
+      hl: 'en',
+      gl: 'US'
+    },
+    userAgent: 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip'
   }
 ];
 
@@ -109,19 +161,72 @@ function baseResult(extra = {}) {
 
 const byBitrateDesc = (a, b) => (b.bitrate || 0) - (a.bitrate || 0);
 
-/** Melhor stream MUXADO (vídeo+áudio juntos): só `streamingData.formats`. */
-function pickProgressive(data) {
-  const formats = (data.streamingData?.formats || []).filter((f) => f.url && !f.signatureCipher);
-  return formats.sort(byBitrateDesc)[0];
+/** Streams MUXADOS (vídeo+áudio no mesmo arquivo), do melhor para o pior. */
+function progressiveFormats(data) {
+  return (data.streamingData?.formats || []).filter((f) => f.url && !f.signatureCipher).sort(byBitrateDesc);
 }
 
-/** Melhor stream só de áudio, preferindo MP4/AAC (WebM não toca em iOS). */
-function pickAudio(data) {
+/** Streams só de áudio, preferindo MP4/AAC (WebM não toca em iOS). */
+function audioFormats(data) {
   const audio = (data.streamingData?.adaptiveFormats || []).filter(
     (f) => f.url && !f.signatureCipher && String(f.mimeType || '').startsWith('audio/')
   );
-  const mp4 = audio.filter((f) => String(f.mimeType || '').includes('mp4'));
-  return (mp4.length ? mp4 : audio).sort(byBitrateDesc)[0];
+  const mp4 = audio.filter((f) => String(f.mimeType || '').includes('mp4')).sort(byBitrateDesc);
+  const rest = audio.filter((f) => !String(f.mimeType || '').includes('mp4')).sort(byBitrateDesc);
+  return [...mp4, ...rest];
+}
+
+/** Melhor stream só de áudio (sem sondagem — usado como faixa extra do vídeo). */
+function pickAudio(data) {
+  return audioFormats(data)[0];
+}
+
+/**
+ * Transforma um formato da Innertube no item de mídia que o downloader usa.
+ * `ranged` avisa o baixador para pedir faixas (o GVS recusa GET aberto em
+ * algumas URLs) e `contentLength` evita uma sondagem extra.
+ */
+function toMediaItem(format, type, client, label) {
+  const size = Number(format?.contentLength) || 0;
+  return {
+    type,
+    url: format.url,
+    label: label || format.qualityLabel || (type === 'audio' ? 'áudio' : 'vídeo'),
+    headers: client?.userAgent ? { 'user-agent': client.userAgent } : undefined,
+    ranged: isGoogleVideoUrl(format.url),
+    ...(size ? { contentLength: size } : {})
+  };
+}
+
+/**
+ * Devolve o PRIMEIRO formato que o CDN realmente entrega.
+ *
+ * É a correção central do 403: antes o extrator devolvia a primeira URL que
+ * aparecia no JSON e o download morria depois, longe da cascata de reservas.
+ * Agora a URL recusada (403/401 = PO token exigido) é descartada aqui, com o
+ * motivo registrado, e a busca continua.
+ *
+ * Uma URL "unknown" (rede instável, resposta estranha) é aceita: não dá para
+ * provar que está quebrada, e o baixador ainda tem as reservas se falhar.
+ */
+async function firstPlayableFormat(formats, client, { errors, videoId, limit = 2 } = {}) {
+  let fallback = null;
+  for (const format of (formats || []).slice(0, limit)) {
+    if (!format?.url) continue;
+    if (!isGoogleVideoUrl(format.url)) return format; // Invidious/proxy: sem sondagem
+    const probe = await probeGoogleVideo(format.url, {
+      headers: client?.userAgent ? { 'user-agent': client.userAgent } : {},
+      totalBytes: Number(format.contentLength) || 0
+    });
+    if (probe.verdict === 'ok') return format;
+    if (probe.verdict === 'gated') {
+      errors?.push(`${client?.name || 'innertube'}: itag ${format.itag} recusado pelo CDN (${probe.status})`);
+      log.warn(`youtube: ${client?.name || 'innertube'} itag ${format.itag} exige PO token (HTTP ${probe.status}) — descartando`, { videoId });
+      continue;
+    }
+    fallback ||= format; // não deu para confirmar; guarda como última opção
+  }
+  return fallback;
 }
 
 function pickThumbnail(data, videoId) {
@@ -137,7 +242,16 @@ function pickThumbnail(data, videoId) {
   return best || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 }
 
-async function askClient(client, videoId) {
+/**
+ * Pergunta ao player da Innertube por um cliente específico.
+ * `visitorData` (quando um cliente anterior já devolveu um) faz o YouTube
+ * tratar as chamadas como a MESMA sessão — reduz muito o muro de "bot".
+ * @returns {Promise<{data?: object, reason?: string, visitorData?: string}>}
+ */
+async function askClient(client, videoId, { visitorData } = {}) {
+  const context = { client: { ...client.context } };
+  if (visitorData) context.client.visitorData = visitorData;
+
   const data = await postJson(
     PLAYER_ENDPOINT,
     {
@@ -146,19 +260,32 @@ async function askClient(client, videoId) {
       // voltam como UNPLAYABLE mesmo estando disponíveis.
       contentCheckOk: true,
       racyCheckOk: true,
-      context: { client: client.context }
+      context
     },
     {
       headers: {
         'content-type': 'application/json',
         accept: 'application/json',
-        'user-agent': client.userAgent
+        'user-agent': client.userAgent,
+        origin: YT_ORIGIN,
+        referer: `${YT_ORIGIN}/watch?v=${videoId}`,
+        ...(visitorData ? { 'x-goog-visitor-id': visitorData } : {})
       },
       timeoutMs: 20_000
     }
   );
-  if (data?.playabilityStatus?.status !== 'OK') return null;
-  return data;
+
+  const nextVisitor = data?.responseContext?.visitorData || visitorData || '';
+  const status = data?.playabilityStatus?.status;
+  if (status !== 'OK') {
+    const reason =
+      data?.playabilityStatus?.reason ||
+      data?.playabilityStatus?.messages?.[0] ||
+      status ||
+      'sem resposta';
+    return { reason: `${status || 'FALHA'}: ${String(reason).slice(0, 80)}`, visitorData: nextVisitor };
+  }
+  return { data, visitorData: nextVisitor };
 }
 
 /** Invidious fallback extractor */
@@ -278,13 +405,18 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
   let innertubeAudio = null;
   let innertubeBase = null;
 
-  // 1) Innertube — tenta cada cliente até algum responder utilizável
+  // 1) Innertube — tenta cada cliente até algum responder stream que o CDN
+  //    realmente entregue (URL só é aceita depois de sondada).
+  let visitorData = '';
+  let botWall = false;
   if (videoId) {
     for (const client of CLIENTS) {
       try {
-        const data = await askClient(client, videoId);
+        const { data, reason, visitorData: nextVisitor } = await askClient(client, videoId, { visitorData });
+        if (nextVisitor) visitorData = nextVisitor;
         if (!data) {
-          errors.push(`${client.name}: ${data === null ? 'bloqueado' : 'sem stream'}`);
+          if (/not a bot|LOGIN_REQUIRED|Sign in/i.test(reason || '')) botWall = true;
+          errors.push(`${client.name}: ${reason || 'bloqueado'}`);
           continue;
         }
         const details = data.videoDetails || {};
@@ -294,37 +426,39 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
           duration: Number(details.lengthSeconds) || 0,
           thumbnail: pickThumbnail(data, videoId)
         };
-        const audio = pickAudio(data);
 
-        if (audioOnly && audio?.url) {
-          return baseResult({
-            ...base,
-            kind: 'audio',
-            media: [{ type: 'audio', url: audio.url, label: 'áudio', headers: { 'user-agent': client.userAgent } }]
-          });
+        if (audioOnly) {
+          const audio = await firstPlayableFormat(audioFormats(data), client, { errors, videoId });
+          if (audio?.url) {
+            return baseResult({
+              ...base,
+              kind: 'audio',
+              media: [toMediaItem(audio, 'audio', client, 'áudio')]
+            });
+          }
+          errors.push(`${client.name}: sem faixa de áudio utilizável`);
+          continue;
         }
 
-        const progressive = pickProgressive(data);
+        const progressive = await firstPlayableFormat(progressiveFormats(data), client, { errors, videoId });
         if (progressive?.url) {
+          const audio = pickAudio(data);
           return baseResult({
             ...base,
             kind: 'video',
-            media: [
-              {
-                type: 'video',
-                url: progressive.url,
-                label: progressive.qualityLabel || 'vídeo',
-                headers: { 'user-agent': client.userAgent }
-              }
-            ],
-            audioOnly: audio ? { type: 'audio', url: audio.url, label: 'áudio', headers: { 'user-agent': client.userAgent } } : null
+            media: [toMediaItem(progressive, 'video', client)],
+            audioOnly: audio ? toMediaItem(audio, 'audio', client, 'áudio') : null
           });
         }
 
-        // Sem muxado: guarda a faixa de áudio como reserva se Cobalt não tiver vídeo
-        if (audio?.url && !innertubeAudio) {
-          innertubeAudio = { ...audio, headers: { 'user-agent': client.userAgent } };
-          innertubeBase = base;
+        // Sem muxado: guarda uma faixa de áudio VALIDADA como reserva, para o
+        // caso de o Cobalt também não ter vídeo.
+        if (!innertubeAudio) {
+          const audio = await firstPlayableFormat(audioFormats(data), client, { errors, videoId, limit: 1 });
+          if (audio?.url) {
+            innertubeAudio = toMediaItem(audio, 'audio', client, 'áudio');
+            innertubeBase = base;
+          }
         }
         errors.push(`${client.name}: sem stream muxado`);
       } catch (error) {
@@ -346,28 +480,33 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
           thumbnail: data.videoThumbnails?.[0]?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
         };
         const audios = (data.adaptiveFormats || []).filter((f) => String(f.type || '').startsWith('audio/'));
-        const bestAudio = audios.sort(byBitrateDesc)[0];
-        const progressive = (data.formatStreams || []).sort(byBitrateDesc)[0];
-
         const resolveUrl = (streamUrl) => (streamUrl.startsWith('http') ? streamUrl : `${inst}${streamUrl}`);
+        const withResolvedUrl = (f) => (f?.url ? { ...f, url: resolveUrl(f.url) } : f);
+
+        const bestAudio = withResolvedUrl(
+          await firstPlayableFormat(audios.sort(byBitrateDesc).map(withResolvedUrl), null, { errors, videoId })
+        );
+        const progressive = withResolvedUrl(
+          await firstPlayableFormat((data.formatStreams || []).sort(byBitrateDesc).map(withResolvedUrl), null, { errors, videoId })
+        );
 
         if (audioOnly && bestAudio?.url) {
           return baseResult({
             ...base,
             kind: 'audio',
-            media: [{ type: 'audio', url: resolveUrl(bestAudio.url), label: 'áudio' }]
+            media: [toMediaItem(bestAudio, 'audio', null, 'áudio')]
           });
         }
         if (progressive?.url) {
           return baseResult({
             ...base,
             kind: 'video',
-            media: [{ type: 'video', url: resolveUrl(progressive.url), label: progressive.qualityLabel || 'vídeo' }],
-            audioOnly: bestAudio ? { type: 'audio', url: resolveUrl(bestAudio.url), label: 'áudio' } : null
+            media: [toMediaItem(progressive, 'video', null)],
+            audioOnly: bestAudio ? toMediaItem(bestAudio, 'audio', null, 'áudio') : null
           });
         }
         if (bestAudio?.url && !innertubeAudio) {
-          innertubeAudio = { url: resolveUrl(bestAudio.url) };
+          innertubeAudio = toMediaItem(bestAudio, 'audio', null, 'áudio');
           innertubeBase = base;
         }
       }
@@ -394,7 +533,8 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
         author: meta.author || rest.author || '',
         thumbnail: meta.thumbnail || rest.thumbnail || '',
         buffers,
-        audioBuffer
+        audioBuffer,
+        cobaltTried: true
       });
     }
     errors.push('cobalt: sem buffer');
@@ -408,12 +548,16 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
     return baseResult({
       ...innertubeBase,
       kind: 'audio',
-      media: [{ type: 'audio', url: innertubeAudio.url, label: 'áudio', headers: innertubeAudio.headers }]
+      media: [innertubeAudio],
+      cobaltTried: true
     });
   }
 
-  throw new Error(
+  const error = new Error(
     `YouTube falhou em todas as estratégias: ${errors.join(' | ')}. ` +
       'O vídeo pode ser privado, com restrição de idade/região, ao vivo ou removido.'
   );
+  error.cobaltTried = true;
+  if (botWall) error.hint = YT_BOT_WALL_HINT;
+  throw error;
 }
