@@ -20,12 +20,12 @@ import { parseQuality, qualityLabel } from './downloaders/quality.js';
 import { isTikTokUrl, downloadTikTok, tiktokAudio } from './downloaders/tiktok.js';
 import { isPinterestUrl, downloadPinterest } from './downloaders/pinterest.js';
 import { isInstagramUrl, downloadInstagram } from './downloaders/instagram.js';
-import { isYouTubeUrl, downloadYouTube } from './downloaders/youtube.js';
+import { isYouTubeUrl, downloadYouTube, parseYouTubeId } from './downloaders/youtube.js';
 import { isTwitterUrl, downloadTwitter } from './downloaders/twitter.js';
 import { isFacebookUrl, downloadFacebook } from './downloaders/facebook.js';
 import { isThreadsUrl, isRedditUrl, isTwitchUrl, isVimeoUrl, downloadGeneric } from './downloaders/generic.js';
 import { cobaltDownload } from './downloaders/cobalt.js';
-import { hasYtDlp, ytdlpBuffer, ytdlpInfo } from './downloaders/ytdlp.js';
+import { canUseYtdlp, ytdlpBuffer, ytdlpInfo, youtubeWatchUrl } from './downloaders/ytdlp.js';
 import { probeStream } from './downloaders/media.js';
 import { detectAudioMime, hasFfmpeg, applyAudioFilter } from '../util/ffmpeg.js';
 
@@ -188,6 +188,23 @@ function validateResultBufferLimits(result, maxBytes) {
   return result;
 }
 
+/** Baixa pelo yt-dlp local e devolve no formato dos demais extratores. */
+async function viaYtdlp(url, platform, { audioOnly, maxBytes, onProgress }) {
+  await onProgress?.(wait('Usando yt-dlp local'));
+  const { buffer, info: ytInfo } = await ytdlpBuffer(url, { audioOnly, maxBytes });
+  const info = ytInfo || (await ytdlpInfo(url).catch(() => null));
+  return {
+    platform,
+    title: info?.title || '',
+    author: info?.author || '',
+    thumbnail: info?.thumbnail || '',
+    duration: info?.duration || 0,
+    kind: audioOnly ? 'audio' : 'video',
+    buffers: [buffer],
+    media: [{ type: audioOnly ? 'audio' : 'video', url }]
+  };
+}
+
 /**
  * Resolve uma URL para um resultado pronto de download.
  * @param {string} url
@@ -209,6 +226,24 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
   await onProgress?.(wait(`Buscando em ${platform} · ${qLabel}`));
 
   const strategies = [];
+  const preErrors = [];
+
+  // YouTube: o Innertube (ANDROID_VR/IOS) devolve links do googlevideo que hoje
+  // respondem 403 no download. O yt-dlp (com runtime JS) é o caminho confiável,
+  // então ele vai PRIMEIRO. Só recebe a URL canônica montada a partir do ID.
+  const ytWatchUrl = platform === 'YouTube' ? youtubeWatchUrl(parseYouTubeId(url)) : null;
+  let ytdlpTried = false;
+  if (ytWatchUrl && canUseYtdlp(ytWatchUrl)) {
+    ytdlpTried = true;
+    try {
+      const out = await viaYtdlp(ytWatchUrl, platform, { audioOnly, maxBytes, onProgress });
+      if (out?.buffers?.length) return normalize(validateResultBufferLimits(out, maxBytes), platform);
+    } catch (error) {
+      const message = String(error?.message || error).slice(0, 200);
+      preErrors.push(message);
+      log.warn('yt-dlp (YouTube) falhou; tentando Innertube', { message });
+    }
+  }
 
   const dedicated = await byPlatform(url, platform, quality, audioOnly, maxBytes).catch((error) => {
     log.warn(`${platform} (dedicado) falhou`, { name: error?.name, status: error?.status, code: error?.code });
@@ -245,22 +280,13 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
     ]);
   }
 
-  if (hasYtDlp()) {
+  const ytdlpUrl = ytWatchUrl || url;
+  if (!ytdlpTried && canUseYtdlp(ytdlpUrl)) {
     strategies.push([
       'yt-dlp',
       async () => {
-        await onProgress?.(wait('Usando yt-dlp local'));
-        const { buffer } = await ytdlpBuffer(url, { audioOnly, maxBytes });
-        const info = await ytdlpInfo(url).catch(() => null);
-        return {
-          platform,
-          title: info?.title || '',
-          author: info?.author || '',
-          duration: info?.duration || 0,
-          kind: audioOnly ? 'audio' : 'video',
-          buffers: [buffer],
-          media: [{ type: audioOnly ? 'audio' : 'video', url }]
-        };
+        const out = await viaYtdlp(ytdlpUrl, platform, { audioOnly, maxBytes, onProgress });
+        return out?.buffers?.length ? out : null;
       }
     ]);
   }
@@ -275,7 +301,13 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
     }
   ]);
 
-  const result = await firstOf(strategies);
+  let result;
+  try {
+    result = await firstOf(strategies);
+  } catch (error) {
+    if (preErrors.length) error.message = `${preErrors.join(' | ')} | ${error.message}`;
+    throw error;
+  }
   return normalize(result, platform);
 }
 

@@ -198,7 +198,7 @@ Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Fa�
 - O bot limita cada arquivo a `maxMB` (90 MiB por padrão, configurável entre 1 e 200). Lotes também têm teto agregado de 200 MiB. Figurinhas e mídias recebidas do WhatsApp usam limites próprios.
 - Comandos de alto custo têm limitação de frequência e concorrência para reduzir spam e consumo de memória.
 - URLs fornecidas por usuários precisam ser HTTP/HTTPS e o destino inicial não pode ser local/privado. O cliente HTTP do bot valida cada redirecionamento e limita o corpo das respostas.
-- O `yt-dlp` local fica **desligado por padrão**: o binário segue redirecionamentos próprios que não passam pela validação por salto do bot. Só habilite com `NEXUS_ENABLE_YTDLP=true` se confiar nos links e puder controlar a rede de saída; `NEXUS_DISABLE_YTDLP=true` desliga mesmo assim.
+- O `yt-dlp` local é usado automaticamente **só para links do YouTube** (o bot monta a URL canônica a partir do ID, sem redirecionamento controlado pelo usuário) e é o que faz `.yt`/`.ytmp3` funcionarem hoje: `pip install -U yt-dlp` e `pkg install ffmpeg` no Termux. Para os demais sites ele fica **desligado por padrão**, porque o binário segue redirecionamentos próprios que não passam pela validação por salto do bot; só habilite com `NEXUS_ENABLE_YTDLP=true` se confiar nos links e puder controlar a rede de saída. `NEXUS_DISABLE_YTDLP=true` desliga tudo.
 
 ## Configuração
 
