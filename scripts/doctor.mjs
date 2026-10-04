@@ -36,13 +36,17 @@ if (voice.espeak.installed) ok(`voz offline: espeak instalado (${voice.espeak.bi
 else warn('voz offline: espeak não instalado (opcional) — Termux: pkg install espeak · Linux: apt install espeak-ng');
 if (voice.piper.installed) ok(`voz offline neural: piper (${voice.piper.model})`);
 
-// yt-dlp (opcional e desligado por padrão por segurança)
-const { hasYtDlp, findYtdlp, isYtdlpEnabled } = await import('../src/features/downloaders/ytdlp.js');
+// yt-dlp: usado automaticamente SÓ para links do YouTube (URL canônica montada
+// pelo bot). Para os demais sites continua desligado por padrão, por segurança.
+const { findYtdlp, isYtdlpEnabled, canUseYtdlp, youtubeWatchUrl } = await import('../src/features/downloaders/ytdlp.js');
 const ytdlp = findYtdlp();
-if (!isYtdlpEnabled()) {
-  warn(`yt-dlp ${ytdlp ? `detectado (${ytdlp.join(' ')})` : 'não detectado'}, mas desativado por padrão. Habilite conscientemente com NEXUS_ENABLE_YTDLP=true.`);
-} else if (hasYtDlp()) ok(`yt-dlp habilitado: ${ytdlp.join(' ')}`);
-else warn('yt-dlp habilitado, mas não encontrado — Termux/Linux: pip install -U yt-dlp');
+if (canUseYtdlp(youtubeWatchUrl('dQw4w9WgXcQ'))) {
+  ok(`yt-dlp ativo para YouTube: ${ytdlp.join(' ')}${isYtdlpEnabled() ? ' (e demais sites)' : ' (demais sites: NEXUS_ENABLE_YTDLP=false)'}`);
+} else if (!ytdlp) {
+  warn('yt-dlp não encontrado — .ytmp3/.yt do YouTube dependem dele (o Innertube dá 403). Termux/Linux: pip install -U yt-dlp');
+} else {
+  warn('yt-dlp desligado por NEXUS_DISABLE_YTDLP=true — .ytmp3/.yt do YouTube podem falhar (403)');
+}
 
 // Dependências
 if (fs.existsSync(path.join(ROOT, 'node_modules', '@whiskeysockets', 'baileys'))) ok('Dependências npm instaladas');

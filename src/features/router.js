@@ -75,7 +75,7 @@ import {
 import { hasFfmpeg, toVoiceOpus, toAudioMp3, toVideoMp4, decodeWebpToPng, detectAudioMime } from '../util/ffmpeg.js';
 import { cobaltPool } from './downloaders/cobalt.js';
 import { searchYouTube } from './downloaders/youtube.js';
-import { hasYtDlp, isYtdlpEnabled, findYtdlp } from './downloaders/ytdlp.js';
+import { hasYtDlp, isYtdlpEnabled, canUseYtdlp, youtubeWatchUrl } from './downloaders/ytdlp.js';
 import { SlidingWindowLimiter } from '../core/limiter.js';
 import {
   convertCurrency,
@@ -1011,7 +1011,7 @@ async function runCommand(sock, msg, cmd, ctx) {
             'vxtwitter: ativo (X)',
             'pinterest widget: ativo',
             `cobalt: ${cobaltPool().available}/${cobaltPool().size} instâncias`,
-            `yt-dlp: ${!isYtdlpEnabled() ? 'desativado por padrão' : hasYtDlp() ? 'habilitado' : 'habilitado, mas não instalado'}`,
+            `yt-dlp: ${canUseYtdlp(youtubeWatchUrl('dQw4w9WgXcQ')) ? `ativo (YouTube${hasYtDlp() ? ' e demais sites' : ''})` : 'indisponível (pip install -U yt-dlp)'}`,
             `auto-dl: ${cfg.get().autoDownload ? 'ligado' : 'desligado'}`
           ],
           ownerName: owner ? 'você' : undefined
@@ -1916,7 +1916,7 @@ function doctorText() {
   const nodeOk = Number(process.versions.node.split('.')[0]) >= 22;
   const ff = hasFfmpeg();
   const ytdlpEnabled = isYtdlpEnabled();
-  const ytdlpBinary = ytdlpEnabled ? findYtdlp() : null;
+  const ytdlpForYouTube = canUseYtdlp(youtubeWatchUrl('dQw4w9WgXcQ'));
   const cb = cobaltPool();
   const env = envSummary();
   return card([
@@ -1925,7 +1925,7 @@ function doctorText() {
       `${SYM.section} *AMBIENTE*`,
       kv('Node', `${process.version} ${nodeOk ? SYM.ok : `${SYM.warn} use 22+`}`),
       kv('FFmpeg', ff ? `${SYM.ok} instalado` : `${SYM.err} ausente (figurinhas precisam dele)`),
-      kv('yt-dlp', !ytdlpEnabled ? 'desativado por padrão' : ytdlpBinary ? `${SYM.ok} habilitado` : 'habilitado, mas binário ausente'),
+      kv('yt-dlp', ytdlpForYouTube ? `${SYM.ok} ativo (YouTube${ytdlpEnabled ? ' e demais sites' : ''})` : `${SYM.warn} indisponível — .ytmp3/.yt precisam dele: pip install -U yt-dlp`),
       kv('Plataforma', process.platform),
       kv('Memória', `${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB`)
     ].join('\n'),
