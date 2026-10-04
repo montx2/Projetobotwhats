@@ -208,7 +208,7 @@ test('YouTube: Innertube ANDROID_VR devolve stream muxado + faixa de áudio mp4'
   );
 });
 
-test('YouTube: ANDROID_VR bloqueado → IOS devolve pelo menos o áudio', async () => {
+test('YouTube: 1º cliente no muro de "bot" → o próximo da fila ainda entrega o áudio', async () => {
   const blocked = { playabilityStatus: { status: 'LOGIN_REQUIRED', reason: 'Sign in to confirm you are not a bot' } };
   const ios = {
     playabilityStatus: { status: 'OK' },
@@ -231,7 +231,7 @@ test('YouTube: ANDROID_VR bloqueado → IOS devolve pelo menos o áudio', async 
     ],
     async () => {
       const r = await downloadYouTube('https://youtu.be/dQw4w9WgXcQ', 'melhor');
-      assert.equal(call, 2, 'deve tentar o 2º cliente');
+      assert.ok(call >= 2, 'deve seguir para o próximo cliente quando o 1º é bloqueado');
       assert.equal(r.kind, 'audio');
       assert.equal(r.media[0].url, 'https://rr2.googlevideo.com/only-audio.m4a');
     }
@@ -937,10 +937,17 @@ test('searchYouTube encontra video por termo de busca', async () => {
   });
 });
 
-test('downloadYouTube inclui headers com user-agent correto para evitar 403', async () => {
+test('downloadYouTube marca a mídia com o user-agent do cliente e pede download em faixas', async () => {
   await mockFetch([['youtubei/v1/player', () => jsonResponse(PLAYER_OK)]], async () => {
     const r = await downloadYouTube('https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'melhor', { audioOnly: true });
     assert.equal(r.kind, 'audio');
-    assert.ok(r.media[0].headers?.['user-agent']?.includes('com.google.android.apps.youtube.vr.oculus'));
+    // O CDN confere o UA de quem pediu a URL: tem que ser o do cliente que a emitiu.
+    assert.equal(
+      r.media[0].headers?.['user-agent'],
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
+      'VISIONOS é o primeiro cliente (URL direta, sem PO token)'
+    );
+    // `ranged` é o que impede o GET aberto que o googlevideo responde com 403.
+    assert.equal(r.media[0].ranged, true);
   });
 });

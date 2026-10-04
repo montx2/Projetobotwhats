@@ -1840,9 +1840,13 @@ async function downloadCommand({ sock, msg, args, ctx, url, audioOnly = false, f
   } catch (error) {
     log.warn(`download falhou (${shortUrl(targetUrl)})`, { name: error?.name, status: error?.status, code: error?.code });
     const detail = String(error.message || error).slice(0, 260);
+    // `hint` só existe quando o motivo tem conserto conhecido (ex.: o YouTube
+    // pediu verificação). Mostrar isso evita o "tente de novo" que nunca passa.
+    const hint = error?.hint ? `${SYM.item} ${String(error.hint).slice(0, 300)}\n` : '';
     return reply(
       fail('Não consegui baixar este link', detail) +
         '\n\n' +
+        hint +
         `${SYM.item} Tente novamente em instantes, envie o link direto do app\n` +
         `${SYM.item} Ou use \`.dl <link> baixa\``
     );

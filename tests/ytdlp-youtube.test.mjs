@@ -10,6 +10,8 @@ import path from 'node:path';
 import { setDnsLookupForTests } from '../src/core/http.js';
 import {
   canUseYtdlp,
+  cookieArgs,
+  isBotWallError,
   resetYtdlpCache,
   youtubeWatchUrl,
   ytdlpBuffer
@@ -49,7 +51,10 @@ const fakeBin = path.join(tmpRoot, 'yt-dlp');
 const logFile = path.join(tmpRoot, 'calls.log');
 fs.writeFileSync(fakeBin, FAKE_SCRIPT, { mode: 0o755 });
 
-const ENV_KEYS = ['YTDLP_PATH', 'NEXUS_ENABLE_YTDLP', 'NEXUS_DISABLE_YTDLP', 'FAKE_YTDLP_MODE', 'FAKE_YTDLP_LOG', 'YTDLP_JS_RUNTIME'];
+const ENV_KEYS = [
+  'YTDLP_PATH', 'NEXUS_ENABLE_YTDLP', 'NEXUS_DISABLE_YTDLP', 'FAKE_YTDLP_MODE', 'FAKE_YTDLP_LOG',
+  'YTDLP_JS_RUNTIME', 'YTDLP_COOKIES', 'YTDLP_COOKIES_FROM_BROWSER', 'YTDLP_PLAYER_CLIENTS', 'YTDLP_MAX_ATTEMPTS'
+];
 
 function withEnv(env, fn) {
   const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -155,6 +160,53 @@ test('ytdlpBuffer recusa URL que não é do YouTube quando NEXUS_ENABLE_YTDLP es
   });
 });
 
+test('cookies: arquivo válido vira --cookies; inexistente e navegador inválido são ignorados', { skip: isWindows }, async () => {
+  const cookieFile = path.join(tmpRoot, 'cookies.txt');
+  fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n');
+  await withEnv({ YTDLP_PATH: fakeBin, YTDLP_COOKIES: cookieFile }, () => {
+    assert.deepEqual(cookieArgs(), ['--cookies', cookieFile]);
+  });
+  await withEnv({ YTDLP_PATH: fakeBin, YTDLP_COOKIES: path.join(tmpRoot, 'nao-existe.txt') }, () => {
+    assert.deepEqual(cookieArgs(), [], 'arquivo ausente não vira argumento');
+  });
+  await withEnv({ YTDLP_PATH: fakeBin, YTDLP_COOKIES_FROM_BROWSER: 'firefox:perfil' }, () => {
+    assert.deepEqual(cookieArgs(), ['--cookies-from-browser', 'firefox:perfil']);
+  });
+  await withEnv({ YTDLP_PATH: fakeBin, YTDLP_COOKIES_FROM_BROWSER: 'chrome; rm -rf /' }, () => {
+    assert.deepEqual(cookieArgs(), [], 'valor com caractere de shell é recusado');
+  });
+});
+
+test('cookies configurados entram no comando e o plano de reserva roda SEM eles', { skip: isWindows }, async () => {
+  const cookieFile = path.join(tmpRoot, 'cookies.txt');
+  fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n');
+  await withEnv({ YTDLP_PATH: fakeBin, YTDLP_COOKIES: cookieFile, FAKE_YTDLP_MODE: 'fail' }, async () => {
+    await assert.rejects(ytdlpBuffer(YT, { audioOnly: true }), /Sign in to confirm/);
+    const all = calls();
+    assert.equal(all.length, 3);
+    assert.ok(all[0].includes('--cookies'), 'a 1ª tentativa usa os cookies');
+    // Com cookies o yt-dlp PULA os clientes que dispensam PO token (android_vr,
+    // tv_simply, ios) — por isso a última tentativa tira os cookies do caminho.
+    assert.ok(!all[2].includes('--cookies'), 'a última tentativa roda sem cookies');
+    assert.ok(all[2].some((a) => String(a).includes('android_vr')));
+  });
+});
+
+test('YTDLP_PLAYER_CLIENTS manda na 1ª tentativa e YTDLP_MAX_ATTEMPTS limita a insistência', { skip: isWindows }, async () => {
+  await withEnv({ YTDLP_PATH: fakeBin, YTDLP_PLAYER_CLIENTS: 'tv_simply,mweb', FAKE_YTDLP_MODE: 'fail', YTDLP_MAX_ATTEMPTS: '1' }, async () => {
+    await assert.rejects(ytdlpBuffer(YT, { audioOnly: true }), /Sign in to confirm/);
+    const all = calls();
+    assert.equal(all.length, 1, 'YTDLP_MAX_ATTEMPTS=1 → uma tentativa só');
+    assert.equal(all[0][all[0].indexOf('--extractor-args') + 1], 'youtube:player_client=tv_simply,mweb');
+  });
+});
+
+test('isBotWallError separa o muro de verificação de um erro comum', () => {
+  assert.equal(isBotWallError("ERROR: [youtube] x: Sign in to confirm you're not a bot"), true);
+  assert.equal(isBotWallError('ERROR: [youtube] x: LOGIN_REQUIRED'), true);
+  assert.equal(isBotWallError('ERROR: unable to write file'), false);
+});
+
 const PLAYER_AUDIO = {
   playabilityStatus: { status: 'OK' },
   videoDetails: { title: 'Via Innertube', author: 'Canal X', lengthSeconds: '100' },
@@ -209,7 +261,15 @@ test('.ytmp3: yt-dlp falha (bot check) → cai no Innertube e entrega o áudio d
       const r = await resolveDownload(YT, 'melhor', { audioOnly: true });
       assert.equal(r.kind, 'audio');
       assert.equal(r.title, 'Via Innertube');
-      assert.equal(calls().length, 1, 'yt-dlp roda uma vez só (sem repetir como reserva)');
+      // Bot check é retentável: o yt-dlp repete com OUTROS clientes do player
+      // (é o que destrava na prática) — mas só dentro da própria chamada, e
+      // nunca de novo como reserva depois que a cascata seguiu adiante.
+      assert.equal(calls().length, 3, 'três planos de cliente, uma única passagem');
+      assert.ok(calls()[0].every((a) => !String(a).startsWith('youtube:player_client')), '1º plano usa os clientes padrão do yt-dlp');
+      assert.ok(
+        calls()[1].includes('--extractor-args') && calls()[1].some((a) => String(a).includes('player_client=')),
+        '2º plano troca os clientes do player'
+      );
     } finally {
       net.restore();
     }
@@ -222,9 +282,10 @@ test('.ytmp3: yt-dlp e Innertube falham → erro final traz o motivo do yt-dlp',
     try {
       await assert.rejects(resolveDownload(YT, 'melhor', { audioOnly: true }), (error) => {
         assert.match(error.message, /yt-dlp: ERROR: .*Sign in to confirm/);
+        assert.match(String(error.hint || ''), /YTDLP_COOKIES/, 'o erro carrega a dica acionável');
         return true;
       });
-      assert.equal(calls().length, 1);
+      assert.equal(calls().length, 3, 'os 3 planos rodam e param (sem repetir como reserva)');
     } finally {
       net.restore();
     }

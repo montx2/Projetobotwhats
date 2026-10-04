@@ -198,7 +198,34 @@ Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Fa�
 - O bot limita cada arquivo a `maxMB` (90 MiB por padrão, configurável entre 1 e 200). Lotes também têm teto agregado de 200 MiB. Figurinhas e mídias recebidas do WhatsApp usam limites próprios.
 - Comandos de alto custo têm limitação de frequência e concorrência para reduzir spam e consumo de memória.
 - URLs fornecidas por usuários precisam ser HTTP/HTTPS e o destino inicial não pode ser local/privado. O cliente HTTP do bot valida cada redirecionamento e limita o corpo das respostas.
-- O `yt-dlp` local é usado automaticamente **só para links do YouTube** (o bot monta a URL canônica a partir do ID, sem redirecionamento controlado pelo usuário) e é o que faz `.yt`/`.ytmp3` funcionarem hoje: `pip install -U yt-dlp` e `pkg install ffmpeg` no Termux. Para os demais sites ele fica **desligado por padrão**, porque o binário segue redirecionamentos próprios que não passam pela validação por salto do bot; só habilite com `NEXUS_ENABLE_YTDLP=true` se confiar nos links e puder controlar a rede de saída. `NEXUS_DISABLE_YTDLP=true` desliga tudo.
+- O `yt-dlp` local é usado automaticamente **só para links do YouTube** (o bot monta a URL canônica a partir do ID, sem redirecionamento controlado pelo usuário) e é o extrator mais forte para `.yt`/`.ytmp3`: `pip install -U yt-dlp` e `pkg install ffmpeg` no Termux. Para os demais sites ele fica **desligado por padrão**, porque o binário segue redirecionamentos próprios que não passam pela validação por salto do bot; só habilite com `NEXUS_ENABLE_YTDLP=true` se confiar nos links e puder controlar a rede de saída. `NEXUS_DISABLE_YTDLP=true` desliga tudo.
+
+### YouTube: “Sign in to confirm you’re not a bot” e os 403 do `.ytmp3`
+
+O `.ytmp3`/`.yt` tenta, nesta ordem: **yt-dlp → Innertube → Invidious → Cobalt**. Se uma etapa cai, a próxima assume — nenhuma delas é obrigatória.
+
+O que o bot faz sozinho quando o YouTube aperta:
+
+- **Troca de cliente no yt-dlp.** O muro de verificação não trata todos os clientes do player igual. A 1ª tentativa usa a lista padrão do yt-dlp e, se vier “not a bot”/403, ele repete com outras combinações (`YTDLP_PLAYER_CLIENTS` força a primeira, `YTDLP_MAX_ATTEMPTS` limita a insistência).
+- **Clientes sem PO token no Innertube.** `VISIONOS` vai primeiro (devolve URL direta, sem cifra e sem token), com `ANDROID_VR`, `IOS` e `ANDROID` como reservas.
+- **Toda URL é sondada antes de ser usada.** O CDN do YouTube passou a liberar só o começo de alguns streams e responder **403 no resto**. O bot testa o primeiro e o último byte: URL que não passa é descartada na hora e a cascata segue, em vez de quebrar na metade do download.
+- **Download em faixas.** O `googlevideo` recusa `GET` aberto em parte das URLs; o bot baixa em blocos de ~1 MiB, como o player real.
+
+Quando nada disso basta, o problema é o **IP** (datacenter/VPN ou excesso de requisições) — e aí o bot responde com a dica em vez de um “tente de novo” vazio. Na ordem do que resolve:
+
+```bash
+pip install -U yt-dlp   # 1. desafio muda a cada poucas semanas; build de +1 mês falha parecendo bloqueio
+                        # 2. desligue VPN/proxy — IP de datacenter é o mais penalizado
+```
+
+```env
+# 3. só então: cookies de uma conta logada, exportados em ABA ANÔNIMA
+#    (feche a aba logo depois; o YouTube rotaciona a sessão)
+YTDLP_COOKIES=/data/data/com.termux/files/home/cookies.txt
+YTDLP_COOKIES_FROM_BROWSER=          # alternativa em PC: chrome · firefox:perfil
+```
+
+Com cookies o yt-dlp **pula** os clientes que dispensam PO token (`android_vr`, `tv_simply`, `ios`), então o bot mantém uma tentativa final **sem** cookies — cobre os dois cenários sem você escolher. `npm run doctor` mostra a versão do yt-dlp, avisa quando ela está velha e confirma se os cookies foram lidos.
 
 ## Configuração
 
