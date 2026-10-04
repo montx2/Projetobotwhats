@@ -5,7 +5,7 @@
 
 import fs from 'node:fs';
 import { readJson, writeJsonNow, writeJsonDebounced } from './store.js';
-import { envList, envListAny, envListNumbered, envBool, loadDotEnv, ENV_FILE } from './env.js';
+import { envList, envListAny, envListNumbered, envBool, envNumber, loadDotEnv, ENV_FILE } from './env.js';
 
 // Garante o .env carregado ANTES de qualquer leitura de process.env abaixo.
 // (src/core/env.js já carrega no import — isto é reforço extra e idempotente.)
@@ -287,6 +287,12 @@ const ENV_SCHEMA = {
   espeakVoice: () => process.env.ESPEAK_VOICE || '',
   cobaltInstances: () => envList('COBALT_INSTANCES'),
   cobaltApiKey: () => process.env.COBALT_API_KEY || '',
+  // Descoberta automática de instâncias Cobalt: o bot consulta as listas
+  // públicas, testa cada candidata (descarta Turnstile) e guarda o resultado
+  // em data/cache/cobalt-instances.json. COBALT_INSTANCES preenchido = modo
+  // manual e a descoberta fica desligada.
+  cobaltAutoDiscover: () => envBool('COBALT_AUTO_DISCOVER', true),
+  cobaltDiscoverIntervalH: () => envNumber('COBALT_DISCOVER_INTERVAL_H', 12),
   tiktokApi: () => envList('TIKTOK_API'),
   waVersionOverride: () => process.env.WA_VERSION_OVERRIDE || ''
 };
@@ -331,6 +337,8 @@ export function envSummary() {
     geminiImageModels: ENV.geminiImageModels.length,
     vozesExtra: ENV.vozesExtra ? ENV.vozesExtra.split(/[,;\n]+/).filter((item) => item.includes('=')).length : 0,
     vozLocal: ENV.vozLocal,
-    cobaltInstances: ENV.cobaltInstances.length
+    cobaltInstances: ENV.cobaltInstances.length,
+    cobaltAutoDiscover: ENV.cobaltAutoDiscover,
+    cobaltDiscoverIntervalH: ENV.cobaltDiscoverIntervalH
   };
 }

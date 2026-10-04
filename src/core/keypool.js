@@ -57,6 +57,24 @@ export class KeyPool {
     this.#touch(item, 'ok');
   }
 
+  /**
+   * Troca a lista de itens sem recriar o pool (usado pela descoberta automática
+   * de instâncias Cobalt: cooldown de 5 min e estatísticas seguem valendo para
+   * quem permanece; quem sai leva cooldown/stats embora).
+   */
+  replaceItems(items) {
+    const next = [...new Set((items || []).map((i) => String(i || '').trim()).filter(Boolean))];
+    for (const item of this.items) {
+      if (!next.includes(item)) {
+        this.cooldowns.delete(item);
+        this.stats.delete(item);
+      }
+    }
+    this.items = next;
+    if (this.index >= next.length) this.index = 0;
+    return next.length;
+  }
+
   /** Marca falha: item entra em cooldown. */
   reportFailure(item, { cooldownMs = this.cooldownMs, reason = '' } = {}) {
     const duration = Math.max(1_000, Math.min(60 * 60_000, Number(cooldownMs) || this.cooldownMs));

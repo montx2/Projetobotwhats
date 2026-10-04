@@ -26,7 +26,7 @@ import {
 import { downloadTwitter, parseTweet } from '../src/features/downloaders/twitter.js';
 import { downloadFacebook } from '../src/features/downloaders/facebook.js';
 import { parseTwitchClipSlug } from '../src/features/downloaders/generic.js';
-import { cobaltDownload } from '../src/features/downloaders/cobalt.js';
+import { cobaltDownload, cobaltPool } from '../src/features/downloaders/cobalt.js';
 import { detectPlatform, resolveDownload, sendDownload } from '../src/features/download.js';
 import {
   kindByExtension,
@@ -758,8 +758,15 @@ test('Cobalt: picker de carrossel devolve todos os itens', async () => {
 });
 
 test('Cobalt: instância que responde erro transiente é trocada pela próxima', async () => {
-  // Só UMA instância responde bem; as outras 4 devolvem 429 do Cobalt.
+  // Só UMA instância responde bem; as demais devolvem 429 do Cobalt.
   // Independentemente da ordem do pool, o resultado precisa chegar.
+  // (Estado do pool zerado para o teste ser determinístico: sem cooldown
+  // herdado de testes anteriores e rotação começando do início.)
+  const pool = cobaltPool();
+  const previous = { cooldowns: pool.cooldowns, stats: pool.stats, index: pool.index };
+  pool.cooldowns = new Map();
+  pool.stats = new Map();
+  pool.index = 0;
   let refused = 0;
   await mockFetch(
     [
@@ -777,9 +784,15 @@ test('Cobalt: instância que responde erro transiente é trocada pela próxima',
       ]
     ],
     async () => {
-      const r = await cobaltDownload('https://www.tiktok.com/@a/video/1', 'melhor');
-      assert.equal(r.buffers[0].toString(), 'OK');
-      assert.ok(refused >= 1, 'deve ter recusado pelo menos uma instância antes de acertar');
+      try {
+        const r = await cobaltDownload('https://www.tiktok.com/@a/video/1', 'melhor');
+        assert.equal(r.buffers[0].toString(), 'OK');
+        assert.ok(refused >= 1, 'deve ter recusado pelo menos uma instância antes de acertar');
+      } finally {
+        pool.cooldowns = previous.cooldowns;
+        pool.stats = previous.stats;
+        pool.index = previous.index;
+      }
     }
   );
 });

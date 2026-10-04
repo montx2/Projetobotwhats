@@ -421,6 +421,43 @@ TIKTOK_API=https://seu-endpoint-tiktok
 
 Endpoints customizados são considerados confiáveis pelo operador e podem usar rede local. Não aponte o bot para serviços desconhecidos. Chaves e instâncias em pool respeitam cooldowns e limites reportados pelo provedor; **adicionar contas não torna uma cota ilimitada nem deve contornar regras do serviço**. A chave Cobalt só é enviada às instâncias definidas em `COBALT_INSTANCES`, nunca às instâncias públicas padrão.
 
+#### Instâncias Cobalt auto-suficientes
+
+O Cobalt não tem instância oficial aberta: quem hospeda pode desligar o serviço
+ou passar a exigir **Cloudflare Turnstile** (desafio de navegador que um bot
+jamais resolve) a qualquer momento. Por isso o bot descobre, testa e mantém a
+lista de instâncias **sozinho**:
+
+1. **Descoberta** — consulta `instances.cobalt.best` (fonte principal) e
+   `cobalt.directory` (reserva) e filtra candidatas: online, https, versão 10+
+   e sem autenticação conhecida.
+2. **Verificação de saúde** — testa cada candidata de verdade: `GET /` (versão
+   e sitekey do Turnstile) + um `POST` real com timeout curto. Classifica como
+   `ok`, `turnstile`, `rate-limited` ou `morta`; fora do formato da API do
+   cobalt é descartada. Instâncias com Turnstile **nunca** entram no pool.
+3. **Cache** — a lista boa fica em `data/cache/cobalt-instances.json` (com
+   timestamp) e é recarregada no boot com zero latência.
+4. **Revalidação** — a cada `COBALT_DISCOVER_INTERVAL_H` horas (padrão 12) e
+   também **na hora** quando todas as instâncias do pool entram em cooldown —
+   o bot se recupera no meio da falha, sem esperar o próximo ciclo.
+
+Precedência (o bot nunca fica sem pool): `COBALT_INSTANCES` no `.env`
+(modo manual, descoberta desligada) → cache local → descoberta → lista padrão
+embutida. Configuração:
+
+```env
+COBALT_AUTO_DISCOVER=true      # ligar/desligar a descoberta (padrão: true)
+COBALT_DISCOVER_INTERVAL_H=12  # intervalo da revalidação (1–168h)
+```
+
+Segurança: toda requisição usa o cliente HTTP do bot (validação de
+SSRF/redirecionamento e limite de corpo); só URLs https públicas na raiz do
+domínio são aceitas, com teto de instâncias adotadas. Quando uma instância
+recusa por Turnstile, o log e a mensagem de erro dizem isso claramente
+("exige verificação de navegador, trocando de instância") em vez do `HTTP 401`
+genérico. O `.info` e o `npm run doctor` mostram quantas instâncias estão
+ativas, de onde vieram (manual/cache/descoberta/padrão) e a última atualização.
+
 ### Comandos locais de configuração
 
 ```text

@@ -73,7 +73,7 @@ import {
   requireGroupAdministrator
 } from './group-tools.js';
 import { hasFfmpeg, toVoiceOpus, toAudioMp3, toVideoMp4, decodeWebpToPng, detectAudioMime } from '../util/ffmpeg.js';
-import { cobaltPool } from './downloaders/cobalt.js';
+import { cobaltInfoRows, cobaltStatusLine } from './downloaders/cobalt-instances.js';
 import { searchYouTube } from './downloaders/youtube.js';
 import { hasYtDlp, isYtdlpEnabled, canUseYtdlp, youtubeWatchUrl } from './downloaders/ytdlp.js';
 import { SlidingWindowLimiter } from '../core/limiter.js';
@@ -1010,7 +1010,7 @@ async function runCommand(sock, msg, cmd, ctx) {
             'innertube: ativo (YouTube)',
             'vxtwitter: ativo (X)',
             'pinterest widget: ativo',
-            `cobalt: ${cobaltPool().available}/${cobaltPool().size} instâncias`,
+            ...cobaltInfoRows(),
             `yt-dlp: ${canUseYtdlp(youtubeWatchUrl('dQw4w9WgXcQ')) ? `ativo (YouTube${hasYtDlp() ? ' e demais sites' : ''})` : 'indisponível (pip install -U yt-dlp)'}`,
             `auto-dl: ${cfg.get().autoDownload ? 'ligado' : 'desligado'}`
           ],
@@ -1572,7 +1572,7 @@ async function runCommand(sock, msg, cmd, ctx) {
         ` ${SYM.detail} sem internet o motor offline (espeak/piper) assume o comando`,
         '',
         `${SYM.section} *DOWNLOADS*`,
-        ` ${SYM.detail} cobalt ${env.cobaltInstances} instância(s)`,
+        ...cobaltInfoRows(),
         '',
         ` ${SYM.detail} .pools reset libera os cooldowns agora`,
         ` ${SYM.detail} .pools recarregar relê o .env sem reiniciar`
@@ -1917,7 +1917,6 @@ function doctorText() {
   const ff = hasFfmpeg();
   const ytdlpEnabled = isYtdlpEnabled();
   const ytdlpForYouTube = canUseYtdlp(youtubeWatchUrl('dQw4w9WgXcQ'));
-  const cb = cobaltPool();
   const env = envSummary();
   return card([
     header('Diagnóstico', 'saúde do sistema'),
@@ -1941,7 +1940,7 @@ function doctorText() {
       `${SYM.section} *SERVIÇOS*`,
       kv('Remoção de fundo', bgStatus().join(' · ')),
       kv('IA', aiStatus().join(' · ')),
-      kv('Cobalt', `${cb.available}/${cb.size} instâncias saudáveis`)
+      kv('Cobalt', cobaltStatusLine())
     ].join('\n'),
     ff ? ok('Tudo certo por aqui') : warn('Instale o FFmpeg', 'Termux: pkg install ffmpeg  ·  Linux: apt install ffmpeg')
   ]);

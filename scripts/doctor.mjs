@@ -94,9 +94,38 @@ if (!envLoad.loaded) {
   } else {
     console.log('ℹ️ Modelos: usando as listas padrão do bot (com reserva automática quando um modelo é descontinuado).');
   }
-  const cobalt = envList('COBALT_INSTANCES').length;
-  if (cobalt) ok(`downloads universais (Cobalt): ${cobalt} instância(s)`);
-  else warn('downloads universais (Cobalt): vazio — o bot usa as instâncias públicas (opcional)');
+}
+
+// Cobalt — funciona até SEM .env (auto-descoberta ligada por padrão), então o
+// diagnóstico entra fora do bloco do .env. Aqui é leitura offline do cache:
+// o doctor não faz rede.
+{
+  const { readCobaltCache, DEFAULT_INSTANCES, agoText } = await import('../src/features/downloaders/cobalt-instances.js');
+  const manual = envList('COBALT_INSTANCES').length;
+  const autoDiscover = envBool('COBALT_AUTO_DISCOVER', true);
+  if (manual) {
+    ok(`downloads universais (Cobalt): modo manual — ${manual} instância(s) do .env (descoberta desligada)`);
+  } else {
+    const cache = readCobaltCache();
+    if (cache) {
+      ok(
+        `downloads universais (Cobalt): ${cache.instances.length} instância(s) descoberta(s) no cache · ` +
+        `última atualização ${agoText(cache.updatedAt)}${cache.source ? ` · fonte: ${cache.source}` : ''}`
+      );
+    } else if (autoDiscover) {
+      console.log(
+        `ℹ️ downloads universais (Cobalt): sem cache ainda — o bot descobre instâncias sozinho ao iniciar ` +
+        `(${DEFAULT_INSTANCES.length} padrão como reserva imediata)`
+      );
+    } else {
+      warn(
+        `downloads universais (Cobalt): sem cache e COBALT_AUTO_DISCOVER=false — ` +
+        `usando as ${DEFAULT_INSTANCES.length} instâncias padrão embutidas`
+      );
+    }
+    const intervalH = Math.min(168, Math.max(1, Math.round(Number(process.env.COBALT_DISCOVER_INTERVAL_H) || 12)));
+    console.log(`ℹ️ Cobalt auto-descoberta: ${autoDiscover ? `ligada (revalida a cada ${intervalH}h)` : 'desligada (COBALT_AUTO_DISCOVER=false)'}`);
+  }
 }
 
 // Sessão

@@ -6,34 +6,34 @@
 // do CDN de origem e funciona de qualquer IP (inclusive Termux/datacenter).
 // É a única via que responde de forma confiável para boa parte da cauda longa.
 //
-// Fontes reais: lista pública + verificação comunitária
-// (https://instances.cobalt.best e o projeto Vette1123/social-media-downloader,
-// que mediu as instâncias a partir de produção em 2026-08).
+// A lista de instâncias agora é auto-suficiente (cobalt-instances.js):
+// descoberta nas listas públicas + verificação de saúde (sem Turnstile) +
+// cache em data/ + revalidação periódica e emergencial. Este módulo só mantém
+// o KeyPool (cooldown de 5 min) e a conversação com a API.
 
 import { KeyPool } from '../../core/keypool.js';
 import { ENV, cfg } from '../../core/config.js';
 import { postJson, fetchBuffer, shortUrl } from '../../core/http.js';
 import { log } from '../../core/logger.js';
+import { resolveInitialCobaltInstances, cobaltManager } from './cobalt-instances.js';
 
-// Ordem: instâncias verificadas primeiro; as demais entram como reserva.
-// Uma instância morta só custa um timeout — mas UMA entrada é pouco, porque
-// significa uma única cota de rate limit, então mantemos várias.
+// Modo manual (COBALT_INSTANCES no .env) tem prioridade absoluta: sem
+// descoberta, e as URLs do operador são consideradas confiáveis (podem ser
+// locais e usar a Api-Key do COBALT_API_KEY).
 const CONFIGURED_INSTANCES = ENV.cobaltInstances;
-const DEFAULT_INSTANCES = [
-  'https://co.otomir23.me',
-  'https://cobaltapi.cjs.nz',
-  'https://cobalt-api.meowing.de',
-  'https://cobalt-backend.canine.tools',
-  'https://capi.3kh0.net',
-  'https://cobalt.api.kwiatekm.tokyo',
-  'https://api.cobalt.tools'
-];
+const MANUAL_MODE = CONFIGURED_INSTANCES.length > 0;
 
-const pool = new KeyPool(
-  'cobalt',
-  CONFIGURED_INSTANCES.length ? CONFIGURED_INSTANCES : DEFAULT_INSTANCES,
-  { cooldownMs: 5 * 60_000 }
-);
+// Boot com zero latência: manual → cache → padrão embutido. A descoberta em
+// segundo plano (quando ligada) troca a lista sem derrubar nada. O attach
+// registra a origem no gerenciador — em modo manual ele mesmo se recusa a
+// descobrir/schedule.
+const INITIAL_INSTANCES = resolveInitialCobaltInstances();
+const pool = new KeyPool('cobalt', INITIAL_INSTANCES.instances, { cooldownMs: 5 * 60_000 });
+cobaltManager.attach(pool, INITIAL_INSTANCES);
+
+// Instância com Turnstile nunca vai funcionar num bot (exige desafio de
+// navegador): esfria por um bom tempo em vez de gastar tentativa a cada 5 min.
+const AUTH_COOLDOWN_MS = 60 * 60_000;
 
 const QUALITY_MAP = { melhor: 'max', alta: '1080', media: '720', baixa: '480' };
 
@@ -81,6 +81,63 @@ function kindFromUrl(url) {
 }
 
 /**
+ * Traduz a recusa de uma instância em erro claro + cooldown.
+ * Turnstile = "exige verificação de navegador": nunca vai passar num bot, e o
+ * segredo era o erro genérico "HTTP 401" que não dizia nada a ninguém.
+ */
+function mapInstanceFailure(error) {
+  const code = String(error?.data?.error?.code || '');
+  const status = Number(error?.status || 0);
+  const poolError = (message, extra = {}) => {
+    const err = new Error(`cobalt: ${message}`);
+    err.status = 429; // faz o KeyPool esfriar a instância e tentar a próxima
+    err.retryAfterMs = extra.cooldownMs;
+    Object.assign(err, extra.flags || {});
+    return err;
+  };
+  if (/^error\.api\.auth\.jwt/.test(code)) {
+    return poolError('instância exige verificação de navegador (Turnstile) — trocando de instância', {
+      cooldownMs: AUTH_COOLDOWN_MS,
+      flags: { turnstile: true }
+    });
+  }
+  if (/^error\.api\.auth\.key/.test(code)) {
+    return poolError('instância exige chave de API própria — trocando de instância', {
+      cooldownMs: AUTH_COOLDOWN_MS,
+      flags: { authKey: true }
+    });
+  }
+  // 401/403 SEM corpo cobalt = challenge/bloqueio de WAF (Cloudflare): a
+  // instância não serve para o bot agora. Com código cobalt, o erro é da URL
+  // (conteúdo) e segue o comportamento antigo: tenta a próxima sem esfriar.
+  if (!code && (status === 401 || status === 403)) {
+    return poolError('instância recusou o bot (autenticação/Cloudflare) — trocando de instância', {
+      cooldownMs: AUTH_COOLDOWN_MS
+    });
+  }
+  return error;
+}
+
+/** Pool falhou por completo: mensagem honesta quando o motivo é Turnstile, e
+ *  revalidação emergencial da lista quando TODO mundo entrou em cooldown. */
+function handlePoolFailure(error) {
+  if (error?.pool !== 'cobalt') return;
+  const causes = Array.isArray(error.causes) ? error.causes : [];
+  const turnstileCount = causes.filter((c) => c?.turnstile).length;
+  if (causes.length && turnstileCount === causes.length) {
+    error.message =
+      'cobalt: todas as instâncias exigem verificação de navegador (Turnstile) — um bot não consegue resolvê-las. ' +
+      'Defina COBALT_INSTANCES no .env com uma instância própria ou sem Turnstile';
+  } else if (turnstileCount) {
+    error.message = `${error.message} (${turnstileCount} instância(s) exigem verificação de navegador)`;
+  }
+  const now = Date.now();
+  const allCooling =
+    pool.items.length > 0 && pool.items.every((item) => (pool.cooldowns.get(item) || 0) > now);
+  if (allCooling) cobaltManager.onPoolExhausted();
+}
+
+/**
  * Baixa qualquer URL suportada pelo Cobalt.
  * @returns {{platform:string,title:string,kind:string,media:Array,audioOnly:?Object}}
  */
@@ -90,94 +147,102 @@ export async function cobaltDownload(url, quality = 'melhor', { audioOnly = fals
     ? { url, downloadMode: 'audio', audioFormat: 'mp3', filenameStyle: 'basic' }
     : { url, videoQuality: QUALITY_MAP[quality] || 'max', filenameStyle: 'basic' };
 
-  const data = await pool.run(
-    async (instance) => {
-      const res = await postJson(`${instance.replace(/\/$/, '')}/`, body, {
-        headers: {
-          accept: 'application/json',
-          ...(CONFIGURED_INSTANCES.length && process.env.COBALT_API_KEY
-            ? { Authorization: `Api-Key ${process.env.COBALT_API_KEY}` }
-            : {})
-        },
-        timeoutMs: 60_000,
-        allowPrivate: CONFIGURED_INSTANCES.length > 0
-      });
+  let data;
+  try {
+    data = await pool.run(
+      async (instance) => {
+        const res = await postJson(`${instance.replace(/\/$/, '')}/`, body, {
+          headers: {
+            accept: 'application/json',
+            ...(MANUAL_MODE && ENV.cobaltApiKey
+              ? { Authorization: `Api-Key ${ENV.cobaltApiKey}` }
+              : {})
+          },
+          timeoutMs: 60_000,
+          allowPrivate: MANUAL_MODE
+        }).catch((error) => {
+          throw mapInstanceFailure(error);
+        });
 
-      if (res?.status === 'error') {
-        const code = res?.error?.code || 'cobalt error';
-        const err = new Error(`cobalt: ${code}`);
-        // Erros de conteúdo/suporte dizem respeito à URL, não à instância:
-        // esfriar a instância por causa de um link não suportado custaria a
-        // próxima requisição da melhor fonte.
-        if (/rate|limit|unavailable|fetch|critical|timed?\s?out/i.test(code)) err.status = 429;
-        throw err;
-      }
+        if (res?.status === 'error') {
+          const code = res?.error?.code || 'cobalt error';
+          const err = new Error(`cobalt: ${code}`);
+          // Erros de conteúdo/suporte dizem respeito à URL, não à instância:
+          // esfriar a instância por causa de um link não suportado custaria a
+          // próxima requisição da melhor fonte.
+          if (/rate|limit|unavailable|fetch|critical|timed?\s?out/i.test(code)) err.status = 429;
+          throw err;
+        }
 
-      if (['tunnel', 'redirect', 'stream'].includes(res?.status)) {
-        const byName = kindFromFilename(res.filename);
-        const kind = audioOnly ? 'audio' : byName !== 'unknown' ? byName : kindFromUrl(res.url);
-        const title = String(res.filename || '').replace(/\.[^.]+$/, '');
-        const type = audioOnly ? 'audio' : kind === 'image' ? 'image' : kind === 'audio' ? 'audio' : 'video';
-        return {
-          platform: 'Cobalt',
-          title,
-          author: '',
-          duration: 0,
-          thumbnail: '',
-          kind: type,
-          media: [{ type, url: res.url, label: title }],
-          audioOnly: type === 'audio' ? { type: 'audio', url: res.url, label: title || 'áudio' } : null,
-          tunnel: res.status === 'tunnel'
-        };
-      }
-
-      if (res?.status === 'picker' && Array.isArray(res.picker)) {
-        if (audioOnly && res.audio) {
-          const title = String(res.filename || '').replace(/\.[^.]+$/, '') || 'áudio';
+        if (['tunnel', 'redirect', 'stream'].includes(res?.status)) {
+          const byName = kindFromFilename(res.filename);
+          const kind = audioOnly ? 'audio' : byName !== 'unknown' ? byName : kindFromUrl(res.url);
+          const title = String(res.filename || '').replace(/\.[^.]+$/, '');
+          const type = audioOnly ? 'audio' : kind === 'image' ? 'image' : kind === 'audio' ? 'audio' : 'video';
           return {
             platform: 'Cobalt',
             title,
             author: '',
             duration: 0,
             thumbnail: '',
-            kind: 'audio',
-            media: [{ type: 'audio', url: res.audio, label: title }],
-            audioOnly: { type: 'audio', url: res.audio, label: title }
+            kind: type,
+            media: [{ type, url: res.url, label: title }],
+            audioOnly: type === 'audio' ? { type: 'audio', url: res.url, label: title || 'áudio' } : null,
+            tunnel: res.status === 'tunnel'
           };
         }
-        const items = res.picker.filter((p) => p?.url);
-        if (!items.length) throw new Error('cobalt: picker vazio');
-        const media = items.map((p, i) => ({
-          type: p.type === 'gif' ? 'gif' : /^video$/i.test(p.type || '') ? 'video' : 'image',
-          url: p.url,
-          label: `item ${i + 1}`,
-          thumb: p.thumb || ''
-        }));
-        const videos = media.filter((m) => m.type === 'video');
-        return {
-          platform: 'Cobalt',
-          title: String(res.filename || '').replace(/\.[^.]+$/, '') || 'post',
-          author: '',
-          duration: 0,
-          thumbnail: items[0]?.thumb || '',
-          kind: videos.length ? 'carrossel' : 'slideshow',
-          media,
-          audioOnly: res.audio ? { type: 'audio', url: res.audio, label: 'áudio' } : null
-        };
-      }
 
-      const err = new Error(`cobalt: status inesperado (${res?.status})`);
-      err.status = 422;
-      throw err;
-    },
-    {
-      label: url.slice(0, 60),
-      isExhausted: (e) => {
-        const s = Number(e?.status);
-        return [429, 502, 503, 500].includes(s) || /rate|limit|unavailable|fetch|critical/i.test(String(e?.message || ''));
+        if (res?.status === 'picker' && Array.isArray(res.picker)) {
+          if (audioOnly && res.audio) {
+            const title = String(res.filename || '').replace(/\.[^.]+$/, '') || 'áudio';
+            return {
+              platform: 'Cobalt',
+              title,
+              author: '',
+              duration: 0,
+              thumbnail: '',
+              kind: 'audio',
+              media: [{ type: 'audio', url: res.audio, label: title }],
+              audioOnly: { type: 'audio', url: res.audio, label: title }
+            };
+          }
+          const items = res.picker.filter((p) => p?.url);
+          if (!items.length) throw new Error('cobalt: picker vazio');
+          const media = items.map((p, i) => ({
+            type: p.type === 'gif' ? 'gif' : /^video$/i.test(p.type || '') ? 'video' : 'image',
+            url: p.url,
+            label: `item ${i + 1}`,
+            thumb: p.thumb || ''
+          }));
+          const videos = media.filter((m) => m.type === 'video');
+          return {
+            platform: 'Cobalt',
+            title: String(res.filename || '').replace(/\.[^.]+$/, '') || 'post',
+            author: '',
+            duration: 0,
+            thumbnail: items[0]?.thumb || '',
+            kind: videos.length ? 'carrossel' : 'slideshow',
+            media,
+            audioOnly: res.audio ? { type: 'audio', url: res.audio, label: 'áudio' } : null
+          };
+        }
+
+        const err = new Error(`cobalt: status inesperado (${res?.status})`);
+        err.status = 422;
+        throw err;
+      },
+      {
+        label: url.slice(0, 60),
+        isExhausted: (e) => {
+          const s = Number(e?.status);
+          return [429, 502, 503, 500].includes(s) || /rate|limit|unavailable|fetch|critical/i.test(String(e?.message || ''));
+        }
       }
-    }
-  );
+    );
+  } catch (error) {
+    handlePoolFailure(error);
+    throw error;
+  }
 
   // Baixa os buffers já no formato esperado pelo sendDownload
   const buffers = [];
