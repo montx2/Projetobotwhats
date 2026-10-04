@@ -27,7 +27,7 @@ import { downloadTwitter, parseTweet } from '../src/features/downloaders/twitter
 import { downloadFacebook } from '../src/features/downloaders/facebook.js';
 import { parseTwitchClipSlug } from '../src/features/downloaders/generic.js';
 import { cobaltDownload } from '../src/features/downloaders/cobalt.js';
-import { detectPlatform, resolveDownload } from '../src/features/download.js';
+import { detectPlatform, resolveDownload, sendDownload } from '../src/features/download.js';
 import {
   kindByExtension,
   looksLikeImageBytes,
@@ -96,6 +96,8 @@ export function mockFetch(routes, fn) {
 test('parseYouTubeId cobre watch, shorts, youtu.be e embed', () => {
   assert.equal(parseYouTubeId('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
   assert.equal(parseYouTubeId('https://youtu.be/dQw4w9WgXcQ?t=30'), 'dQw4w9WgXcQ');
+  assert.equal(parseYouTubeId('https://youtu.be/RS4ZzYjFZcE?is=Jl8YxIYMyy-iEeqd'), 'RS4ZzYjFZcE');
+  assert.equal(parseYouTubeId('https://www.youtube.com/watch?feature=share&v=RS4ZzYjFZcE'), 'RS4ZzYjFZcE');
   assert.equal(parseYouTubeId('https://www.youtube.com/shorts/dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
   assert.equal(parseYouTubeId('https://www.youtube.com/embed/dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
   assert.equal(parseYouTubeId('https://www.tiktok.com/@a/video/1'), null);
@@ -780,4 +782,109 @@ test('Cobalt: instância que responde erro transiente é trocada pela próxima',
       assert.ok(refused >= 1, 'deve ter recusado pelo menos uma instância antes de acertar');
     }
   );
+});
+
+test('YouTube audioOnly via Cobalt entrega resultado com kind audio e media audio', async () => {
+  const cobaltAudio = {
+    status: 'tunnel',
+    url: 'https://tun.co/audio.mp3',
+    filename: 'musica_top.mp3'
+  };
+  await mockFetch(
+    [
+      ['youtubei/v1/player', () => jsonResponse({ playabilityStatus: { status: 'UNPLAYABLE' } })],
+      ['youtube.com/oembed', () => jsonResponse({ title: 'Música Top', author_name: 'Artista' })],
+      [/cobalt|otomir23|cjs\.nz|meowing|canine|3kh0/, () => jsonResponse(cobaltAudio)],
+      ['tun.co', () => bufferResponse(Buffer.from('ID3...AUDIOBYTES'), { contentType: 'audio/mpeg' })]
+    ],
+    async () => {
+      const r = await downloadYouTube('https://youtu.be/RS4ZzYjFZcE?is=Jl8YxIYMyy-iEeqd', 'melhor', { audioOnly: true });
+      assert.equal(r.kind, 'audio');
+      assert.equal(r.platform, 'YouTube');
+      assert.equal(r.title, 'Música Top');
+      assert.equal(r.media[0].type, 'audio');
+      assert.ok(r.buffers[0].length > 0);
+    }
+  );
+});
+
+test('YouTube video tenta Cobalt para obter vídeo quando Innertube não tem stream muxado', async () => {
+  const innertubeNoMux = {
+    playabilityStatus: { status: 'OK' },
+    videoDetails: { title: 'Clipe', author: 'Canal', lengthSeconds: '180' },
+    streamingData: {
+      formats: [],
+      adaptiveFormats: [{ itag: 140, url: 'https://rr2.googlevideo.com/audio.m4a', mimeType: 'audio/mp4' }]
+    }
+  };
+  const cobaltVideo = {
+    status: 'tunnel',
+    url: 'https://tun.co/video.mp4',
+    filename: 'clipe_hd.mp4'
+  };
+  await mockFetch(
+    [
+      ['youtubei/v1/player', () => jsonResponse(innertubeNoMux)],
+      ['youtube.com/oembed', () => jsonResponse({ title: 'Clipe Oficial', author_name: 'Canal' })],
+      [/cobalt|otomir23|cjs\.nz|meowing|canine|3kh0/, () => jsonResponse(cobaltVideo)],
+      ['tun.co', () => bufferResponse(Buffer.from('....ftypisom...VIDEODATA'), { contentType: 'video/mp4' })]
+    ],
+    async () => {
+      const r = await downloadYouTube('https://www.youtube.com/watch?v=RS4ZzYjFZcE', 'melhor', { audioOnly: false });
+      assert.equal(r.kind, 'video');
+      assert.equal(r.title, 'Clipe Oficial');
+      assert.equal(r.media[0].type, 'video');
+    }
+  );
+});
+
+test('sendDownload envia áudio MP4/M4A com mimetype audio/mp4 e extensão .m4a', async () => {
+  const sent = [];
+  const sock = {
+    sendMessage: async (jid, content, opts) => {
+      sent.push({ jid, content, opts });
+      return { key: { id: 'SENT1' } };
+    }
+  };
+  // Buffer com magic bytes de container MP4 (M4A)
+  const m4aBuffer = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x4d, 0x34, 0x41, 0x20]);
+  const result = {
+    platform: 'YouTube',
+    title: 'Musica Legal',
+    author: 'Banda',
+    kind: 'audio',
+    media: [{ type: 'audio', url: 'https://example.com/audio.m4a' }],
+    buffers: [m4aBuffer]
+  };
+
+  await sendDownload(sock, '123@s.whatsapp.net', result, { quality: 'melhor' });
+  assert.equal(sent.length, 1);
+  assert.ok(sent[0].content.audio, 'deve enviar como áudio');
+  assert.equal(sent[0].content.mimetype, 'audio/mp4');
+  assert.equal(sent[0].content.fileName, 'Musica Legal.m4a');
+  assert.equal(sent[0].content.video, undefined, 'NÃO deve enviar como vídeo');
+});
+
+test('sendDownload envia áudio MP3 com mimetype audio/mpeg e extensão .mp3', async () => {
+  const sent = [];
+  const sock = {
+    sendMessage: async (jid, content, opts) => {
+      sent.push({ jid, content, opts });
+      return { key: { id: 'SENT1' } };
+    }
+  };
+  const mp3Buffer = Buffer.from([0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00]);
+  const result = {
+    platform: 'YouTube',
+    title: 'Musica MP3',
+    kind: 'audio',
+    media: [{ type: 'audio', url: 'https://example.com/audio.mp3' }],
+    buffers: [mp3Buffer]
+  };
+
+  await sendDownload(sock, '123@s.whatsapp.net', result, { quality: 'melhor' });
+  assert.equal(sent.length, 1);
+  assert.ok(sent[0].content.audio, 'deve enviar como áudio');
+  assert.equal(sent[0].content.mimetype, 'audio/mpeg');
+  assert.equal(sent[0].content.fileName, 'Musica MP3.mp3');
 });

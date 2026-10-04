@@ -59,10 +59,28 @@ export function isYouTubeUrl(url) {
 }
 
 export function parseYouTubeId(url) {
-  const u = String(url);
+  const u = String(url || '').trim();
+  if (!u) return null;
+  if (/^[\w-]{11}$/.test(u)) return u;
+  try {
+    const parsed = new URL(u.startsWith('http') ? u : `https://${u}`);
+    if (parsed.hostname.includes('youtu.be')) {
+      const id = parsed.pathname.slice(1).split(/[/?#]/)[0];
+      if (/^[\w-]{11}$/.test(id)) return id;
+    }
+    const v = parsed.searchParams.get('v');
+    if (v && /^[\w-]{11}$/.test(v)) return v;
+    const pathSegments = parsed.pathname.split('/').filter(Boolean);
+    for (const key of ['shorts', 'embed', 'live', 'v', 'e']) {
+      const idx = pathSegments.indexOf(key);
+      if (idx !== -1 && pathSegments[idx + 1] && /^[\w-]{11}$/.test(pathSegments[idx + 1])) {
+        return pathSegments[idx + 1];
+      }
+    }
+  } catch {}
   return (
-    u.match(/(?:v=|youtu\.be\/|shorts\/|embed\/|live\/)([\w-]{11})/)?.[1] ||
-    u.match(/^\s*([\w-]{11})\s*$/)?.[1] ||
+    u.match(/(?:v=|youtu\.be\/|shorts\/|embed\/|live\/|v\/|e\/)([\w-]{11})/)?.[1] ||
+    u.match(/^[\w-]{11}$/)?.[0] ||
     null
   );
 }
@@ -161,6 +179,8 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
   const videoId = parseYouTubeId(url);
   const canonical = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
   const errors = [];
+  let innertubeAudio = null;
+  let innertubeBase = null;
 
   // 1) Innertube — tenta cada cliente até algum responder utilizável
   if (videoId) {
@@ -193,27 +213,33 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
             audioOnly: audio ? { type: 'audio', url: audio.url, label: 'áudio' } : null
           });
         }
-        // Sem muxado: entrega pelo menos o áudio em vez de um beco sem saída.
-        if (audio?.url) {
-          log.dl('youtube: sem stream muxado — entregando a faixa de áudio');
-          return baseResult({ ...base, kind: 'audio', media: [{ type: 'audio', url: audio.url, label: 'áudio' }] });
+
+        // Sem muxado: guarda a faixa de áudio como reserva se Cobalt não tiver vídeo
+        if (audio?.url && !innertubeAudio) {
+          innertubeAudio = audio;
+          innertubeBase = base;
         }
-        errors.push(`${client.name}: sem stream`);
+        errors.push(`${client.name}: sem stream muxado`);
       } catch (error) {
         errors.push(`${client.name}: ${String(error.message).slice(0, 60)}`);
       }
     }
   }
 
-  // 2) Cobalt (túnel comunitário)
+  // 2) Cobalt (túnel comunitário — faz remux de vídeo/áudio ou baixa MP3)
   log.dl('youtube: tentando via cobalt…');
   try {
     const { buffers, audioBuffer, ...rest } = await cobaltDownload(canonical, quality, { audioOnly, maxBytes });
     if (buffers?.length) {
       const meta = await oembedMeta(canonical, videoId);
+      const isAudio = audioOnly || rest.kind === 'audio';
       return baseResult({
         ...rest,
         platform: 'YouTube',
+        kind: isAudio ? 'audio' : (rest.kind || 'video'),
+        media: (rest.media?.length ? rest.media : [{ url: canonical, label: isAudio ? 'áudio' : 'vídeo' }]).map((m) =>
+          isAudio ? { ...m, type: 'audio' } : m
+        ),
         title: meta.title || rest.title || '',
         author: meta.author || rest.author || '',
         thumbnail: meta.thumbnail || rest.thumbnail || '',
@@ -224,6 +250,16 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
     errors.push('cobalt: sem buffer');
   } catch (error) {
     errors.push(`cobalt: ${String(error.message).slice(0, 60)}`);
+  }
+
+  // 3) Se o usuário pediu vídeo e o Cobalt falhou, mas temos a faixa de áudio do Innertube, entrega áudio
+  if (innertubeAudio?.url) {
+    log.dl('youtube: sem stream muxado — entregando a faixa de áudio');
+    return baseResult({
+      ...innertubeBase,
+      kind: 'audio',
+      media: [{ type: 'audio', url: innertubeAudio.url, label: 'áudio' }]
+    });
   }
 
   throw new Error(

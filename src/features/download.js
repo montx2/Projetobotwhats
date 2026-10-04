@@ -27,6 +27,7 @@ import { isThreadsUrl, isRedditUrl, isTwitchUrl, isVimeoUrl, downloadGeneric } f
 import { cobaltDownload } from './downloaders/cobalt.js';
 import { hasYtDlp, ytdlpBuffer, ytdlpInfo } from './downloaders/ytdlp.js';
 import { probeStream } from './downloaders/media.js';
+import { detectAudioMime, hasFfmpeg, applyAudioFilter } from '../util/ffmpeg.js';
 
 export { parseQuality };
 
@@ -262,14 +263,16 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
 }
 
 function normalize(result, platform) {
+  const isAudio = result.kind === 'audio' || result.media?.[0]?.type === 'audio' || result.audioOnly === true;
+  const kind = isAudio ? 'audio' : result.kind || (result.media?.[0]?.type === 'image' ? 'image' : 'video');
   return {
     platform: result.platform && result.platform !== 'Cobalt' ? result.platform : platform,
     title: result.title || '',
     author: result.author || '',
     duration: result.duration || 0,
     thumbnail: result.thumbnail || '',
-    kind: result.kind || (result.media?.[0]?.type === 'image' ? 'image' : 'video'),
-    media: result.media || [],
+    kind,
+    media: (result.media || []).map((m) => (isAudio ? { ...m, type: 'audio' } : m)),
     buffers: result.buffers || [],
     // Rendições extras (mesma mídia em outro tamanho) e flags de confiança que
     // o extrator marcou: o `.s <link>` usa isso para tentar outra versão quando
@@ -300,7 +303,7 @@ export async function sendDownload(sock, jid, result, { quality, url, onProgress
   let sent = 0;
   const sendOpts = quoted ? { quoted } : undefined;
   for (let i = 0; i < buffers.length; i++) {
-    const buffer = buffers[i];
+    let buffer = buffers[i];
     const mb = buffer.length / (1024 * 1024);
     if (mb > maxMB) {
       const warnMsg = warn(
@@ -318,13 +321,37 @@ export async function sendDownload(sock, jid, result, { quality, url, onProgress
     );
     const caption = buffers.length > 1 ? `${header}\n(${i + 1}/${buffers.length})` : header;
     const type = result.media?.[i]?.type || result.kind;
-    if (type === 'audio' || result.kind === 'audio') {
+    const isAudio = result.kind === 'audio' || type === 'audio';
+
+    if (isAudio) {
+      let mime = detectAudioMime(buffer);
+      if (mime === 'audio/webm' || (buffer.length > 4 && buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3)) {
+        if (hasFfmpeg()) {
+          try {
+            const converted = await applyAudioFilter(buffer, { filter: 'anull', ext: '.mp3', bitrate: '128k' });
+            if (converted?.length) {
+              buffer = converted;
+              mime = 'audio/mpeg';
+            }
+          } catch {}
+        }
+      }
+
+      const ext = mime === 'audio/mp4' ? 'm4a' : mime.includes('ogg') ? 'ogg' : mime === 'audio/wav' ? 'wav' : 'mp3';
+      const cleanTitle = (result.title || 'nexus-audio').replace(/[/\\?%*:|"<>]/g, '_').slice(0, 80);
+      const fileName = `${cleanTitle}.${ext}`;
+
       await sock.sendMessage(
         jid,
-        { audio: buffer, mimetype: 'audio/mpeg', fileName: 'nexus-audio.mp3' },
+        {
+          audio: buffer,
+          mimetype: mime,
+          fileName,
+          ptt: false
+        },
         sendOpts
       );
-    } else if (type === 'video' || result.kind === 'video' || result.kind === 'carrossel' || detectVideo(buffer)) {
+    } else if (type === 'video' || result.kind === 'video' || result.kind === 'carrossel' || (!isAudio && detectVideo(buffer))) {
       await sock.sendMessage(jid, { video: buffer, caption, mimetype: 'video/mp4' }, sendOpts);
     } else if (type === 'gif') {
       await sock.sendMessage(jid, { video: buffer, caption, gifPlayback: true }, sendOpts);
@@ -334,7 +361,8 @@ export async function sendDownload(sock, jid, result, { quality, url, onProgress
     sent++;
   }
   if (result.audioBuffer && result.kind !== 'audio') {
-    await sock.sendMessage(jid, { audio: result.audioBuffer, mimetype: 'audio/mpeg' }, sendOpts).catch(() => {});
+    const aMime = detectAudioMime(result.audioBuffer);
+    await sock.sendMessage(jid, { audio: result.audioBuffer, mimetype: aMime, ptt: false }, sendOpts).catch(() => {});
   }
   if (sent > 0) {
     await onProgress?.(ok('Download concluído', result.platform || 'mídia'));
@@ -345,8 +373,14 @@ export async function sendDownload(sock, jid, result, { quality, url, onProgress
 }
 
 function detectVideo(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return false;
   // assinatura mp4: "ftyp" no offset 4
-  return buffer.length > 12 && buffer.toString('ascii', 4, 8) === 'ftyp';
+  if (buffer.toString('ascii', 4, 8) !== 'ftyp') return false;
+  const brand = buffer.toString('ascii', 8, 12).toLowerCase();
+  if (brand.startsWith('m4a') || brand.startsWith('m4b') || brand.startsWith('f4a')) {
+    return false;
+  }
+  return true;
 }
 
 /** Auto-download de links soltos: funciona no privado do dono e nos chats ativados. */
