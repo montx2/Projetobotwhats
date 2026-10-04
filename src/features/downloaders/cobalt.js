@@ -113,9 +113,9 @@ export async function cobaltDownload(url, quality = 'melhor', { audioOnly = fals
 
       if (['tunnel', 'redirect', 'stream'].includes(res?.status)) {
         const byName = kindFromFilename(res.filename);
-        const kind = byName !== 'unknown' ? byName : kindFromUrl(res.url);
+        const kind = audioOnly ? 'audio' : byName !== 'unknown' ? byName : kindFromUrl(res.url);
         const title = String(res.filename || '').replace(/\.[^.]+$/, '');
-        const type = kind === 'image' ? 'image' : kind === 'audio' ? 'audio' : 'video';
+        const type = audioOnly ? 'audio' : kind === 'image' ? 'image' : kind === 'audio' ? 'audio' : 'video';
         return {
           platform: 'Cobalt',
           title,
@@ -130,6 +130,19 @@ export async function cobaltDownload(url, quality = 'melhor', { audioOnly = fals
       }
 
       if (res?.status === 'picker' && Array.isArray(res.picker)) {
+        if (audioOnly && res.audio) {
+          const title = String(res.filename || '').replace(/\.[^.]+$/, '') || 'áudio';
+          return {
+            platform: 'Cobalt',
+            title,
+            author: '',
+            duration: 0,
+            thumbnail: '',
+            kind: 'audio',
+            media: [{ type: 'audio', url: res.audio, label: title }],
+            audioOnly: { type: 'audio', url: res.audio, label: title }
+          };
+        }
         const items = res.picker.filter((p) => p?.url);
         if (!items.length) throw new Error('cobalt: picker vazio');
         const media = items.map((p, i) => ({

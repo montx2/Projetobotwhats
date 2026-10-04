@@ -213,13 +213,14 @@ export function detectMediaExt(buf, fallback = '.jpg') {
  */
 export function detectAudioMime(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 4) return 'audio/mpeg';
+  if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return 'audio/webm';
   const head4 = buf.toString('latin1', 0, 4);
   if (head4 === 'RIFF' && buf.toString('latin1', 8, 12) === 'WAVE') return 'audio/wav';
   if (head4 === 'OggS') return 'audio/ogg; codecs=opus';
   if (head4 === 'fLaC') return 'audio/flac';
+  if (buf.length >= 8 && buf.toString('latin1', 4, 8) === 'ftyp') return 'audio/mp4';
   const head3 = buf.toString('latin1', 0, 3);
   if (head3 === 'ID3' || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)) return 'audio/mpeg';
-  if (buf.length > 12 && buf.toString('latin1', 4, 8) === 'ftyp') return 'audio/mp4';
   return 'audio/mpeg';
 }
 

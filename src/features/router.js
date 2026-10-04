@@ -101,8 +101,8 @@ const EXPENSIVE_COMMANDS = new Set([
   'criar', 'img',
   'gerar', 'imagine', 'desenhar', 'voz', 'tts', 'falar', 'vozes', 'traduz', 'traduzir', 'resumo', 'resumir',
   'dl', 'download', 'baixar', 'tt', 'tiktok', 'tiktokdl', 'ttmp3', 'tiktokmp3', 'ttaudio',
-  'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels', 'yt', 'youtube', 'ytb',
-  'video', 'ytmp3', 'youtubemp3', 'ytaudio', 'mp3', 'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb'
+  'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels', 'yt', 'youtube', 'ytb', 'ytv', 'ytmp4',
+  'video', 'ytmp3', 'youtubemp3', 'ytaudio', 'yta', 'mp3', 'play', 'musica', 'música', 'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb'
 ]);
 const MEDIA_KEYS = new Set(['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage', 'documentMessage']);
 const MESSAGE_WRAPPERS = new Set([
@@ -125,6 +125,17 @@ function hasQuotedMessage(message, depth = 0) {
   return false;
 }
 
+function getQuotedText(msg) {
+  const m = msg?.message || {};
+  const ctx =
+    m.extendedTextMessage?.contextInfo ||
+    m.imageMessage?.contextInfo ||
+    m.videoMessage?.contextInfo ||
+    m.stickerMessage?.contextInfo ||
+    m.documentMessage?.contextInfo;
+  return extractAnyText(ctx?.quotedMessage || {});
+}
+
 function isExpensiveRequest(command, msg) {
   if (!EXPENSIVE_COMMANDS.has(command.name)) return false;
   const name = command.name;
@@ -134,8 +145,14 @@ function isExpensiveRequest(command, msg) {
   if (['s', 'fig', 'figu', 'sticker', 'stiker', 'figurinha', 'sfundo', 'stickerfundo', 'sfundinho', 'fundo', 'removefundo', 'rmbg', 'removebg'].includes(name)) {
     return Boolean(args.length || hasAttachment || quoted);
   }
-  if (['dl', 'download', 'baixar', 'tt', 'tiktok', 'tiktokdl', 'ttmp3', 'tiktokmp3', 'ttaudio', 'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels', 'yt', 'youtube', 'ytb', 'video', 'ytmp3', 'youtubemp3', 'ytaudio', 'mp3', 'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb'].includes(name)) {
-    return Boolean(pickUrl(args));
+  if ([
+    'dl', 'download', 'baixar', 'tt', 'tiktok', 'tiktokdl', 'ttmp3', 'tiktokmp3', 'ttaudio',
+    'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels',
+    'yt', 'youtube', 'ytb', 'ytv', 'ytmp4', 'video',
+    'ytmp3', 'youtubemp3', 'ytaudio', 'yta', 'mp3', 'play', 'musica', 'música',
+    'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb'
+  ].includes(name)) {
+    return Boolean(pickUrl(args, getQuotedText(msg)));
   }
   if (['ia', 'ai', 'gpt', 'chat'].includes(name)) {
     if (args[0]?.toLowerCase() === 'reset') return false;
@@ -614,10 +631,17 @@ export async function handleMessage(sock, msg, deps) {
   }
 }
 
-/** Acha a primeira URL nos argumentos (funciona com a qualidade em qualquer posição). */
-function pickUrl(args) {
-  const url = (args || []).find((a) => /^https?:\/\//i.test(a));
-  return url || null;
+/** Acha a primeira URL nos argumentos ou na mensagem citada. */
+function pickUrl(args, quotedText) {
+  const fromArgs = extractUrls((args || []).join(' '));
+  if (fromArgs.length) return fromArgs[0];
+  const urlArg = (args || []).find((a) => /^https?:\/\//i.test(a));
+  if (urlArg) return urlArg;
+  if (quotedText) {
+    const fromQuoted = extractUrls(quotedText);
+    if (fromQuoted.length) return fromQuoted[0];
+  }
+  return null;
 }
 
 /**
@@ -814,6 +838,7 @@ async function runCommand(sock, msg, cmd, ctx) {
   const jid = msg.key.remoteJid;
   const owner = isOwner(jid, msg.key.participant);
   const argText = args.join(' ');
+  const quotedText = getQuotedText(msg);
 
   if (isGameCommand(name)) return handleGameCommand({ sock, msg, name, args, reply, owner });
 
@@ -1306,14 +1331,14 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'dl':
     case 'download':
     case 'baixar':
-      return downloadCommand({ sock, msg, args, ctx, url: pickUrl(args), fallback: downloadMenu() });
+      return downloadCommand({ sock, msg, args, ctx, url: pickUrl(args, quotedText), fallback: downloadMenu() });
 
     case 'tiktok':
     case 'tt':
     case 'tiktokdl':
       return downloadCommand({
         sock, msg, args, ctx,
-        url: pickUrl(args),
+        url: pickUrl(args, quotedText),
         fallback: usage('.tiktok <link>', '.tiktok https://vm.tiktok.com/…')
       });
 
@@ -1322,7 +1347,7 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'ttaudio':
       return downloadCommand({
         sock, msg, args, ctx,
-        url: pickUrl(args),
+        url: pickUrl(args, quotedText),
         audioOnly: true,
         fallback: usage('.ttmp3 <link>', null, 'Envie o link do TikTok para receber só o áudio.')
       });
@@ -1332,7 +1357,7 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'pint':
       return downloadCommand({
         sock, msg, args, ctx,
-        url: pickUrl(args),
+        url: pickUrl(args, quotedText),
         fallback: usage('.pin <link>', null, 'Envie o link do Pinterest (aceita pin.it).')
       });
 
@@ -1342,27 +1367,33 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'reels':
       return downloadCommand({
         sock, msg, args, ctx,
-        url: pickUrl(args),
+        url: pickUrl(args, quotedText),
         fallback: usage('.insta <link>', null, 'Envie o link do post, reel ou story.')
       });
 
     case 'yt':
     case 'youtube':
     case 'ytb':
+    case 'ytv':
+    case 'ytmp4':
     case 'video':
       return downloadCommand({
         sock, msg, args, ctx,
-        url: pickUrl(args),
+        url: pickUrl(args, quotedText),
         fallback: usage('.yt <link>', null, 'Envie o link do vídeo do YouTube.')
       });
 
     case 'ytmp3':
     case 'youtubemp3':
     case 'ytaudio':
+    case 'yta':
     case 'mp3':
+    case 'play':
+    case 'musica':
+    case 'música':
       return downloadCommand({
         sock, msg, args, ctx,
-        url: pickUrl(args),
+        url: pickUrl(args, quotedText),
         audioOnly: true,
         fallback: usage('.ytmp3 <link>', null, 'Envie o link do YouTube (ou de qualquer rede) para receber só o áudio.')
       });
@@ -1373,7 +1404,7 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'tweet':
       return downloadCommand({
         sock, msg, args, ctx,
-        url: pickUrl(args),
+        url: pickUrl(args, quotedText),
         fallback: usage('.tw <link>', null, 'Envie o link do post no X/Twitter.')
       });
 
@@ -1382,7 +1413,7 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'fb':
       return downloadCommand({
         sock, msg, args, ctx,
-        url: pickUrl(args),
+        url: pickUrl(args, quotedText),
         fallback: usage('.face <link>', null, 'Envie o link do vídeo do Facebook.')
       });
 
