@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setDnsLookupForTests } from '../src/core/http.js';
 
-import { parseYouTubeId, downloadYouTube } from '../src/features/downloaders/youtube.js';
+import { parseYouTubeId, downloadYouTube, searchYouTube } from '../src/features/downloaders/youtube.js';
 import { downloadTikTok, tiktokVideoId } from '../src/features/downloaders/tiktok.js';
 import {
   canonicalPinUrl,
@@ -887,4 +887,47 @@ test('sendDownload envia áudio MP3 com mimetype audio/mpeg e extensão .mp3', a
   assert.ok(sent[0].content.audio, 'deve enviar como áudio');
   assert.equal(sent[0].content.mimetype, 'audio/mpeg');
   assert.equal(sent[0].content.fileName, 'Musica MP3.mp3');
+});
+
+test('searchYouTube encontra video por termo de busca', async () => {
+  const searchMock = {
+    contents: {
+      twoColumnSearchResultsRenderer: {
+        primaryContents: {
+          sectionListRenderer: {
+            contents: [
+              {
+                itemSectionRenderer: {
+                  contents: [
+                    {
+                      videoRenderer: {
+                        videoId: 'RS4ZzYjFZcE',
+                        title: { simpleText: 'Hino do Vasco da Gama' },
+                        ownerText: { runs: [{ text: 'Canal Vasco' }] }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  };
+
+  await mockFetch([['youtubei/v1/search', () => jsonResponse(searchMock)]], async () => {
+    const res = await searchYouTube('hino do vasco');
+    assert.equal(res?.videoId, 'RS4ZzYjFZcE');
+    assert.equal(res?.title, 'Hino do Vasco da Gama');
+    assert.equal(res?.url, 'https://www.youtube.com/watch?v=RS4ZzYjFZcE');
+  });
+});
+
+test('downloadYouTube inclui headers com user-agent correto para evitar 403', async () => {
+  await mockFetch([['youtubei/v1/player', () => jsonResponse(PLAYER_OK)]], async () => {
+    const r = await downloadYouTube('https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'melhor', { audioOnly: true });
+    assert.equal(r.kind, 'audio');
+    assert.ok(r.media[0].headers?.['user-agent']?.includes('com.google.android.apps.youtube.vr.oculus'));
+  });
 });

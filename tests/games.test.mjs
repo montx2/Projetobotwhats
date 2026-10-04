@@ -532,6 +532,7 @@ test('Jokenpô PvP: W.O. por tempo, convite que expira e desafio fora de grupo',
   // quem jogou leva por W.O.
   setPptTimingForTests({ revealMs: 0, pickMs: 40 });
   const woChat = 'ppt-wo@g.us';
+  clearChatGames(woChat);
   const wo = await startSecretSeries({ jid: woChat, alice, bob });
   await tryHandlePrivateGameChoice(wo.sock, dm(alice, 'pedra'), 'pedra');
   await wait(120);

@@ -24,7 +24,9 @@ const DEFAULT_INSTANCES = [
   'https://cobaltapi.cjs.nz',
   'https://cobalt-api.meowing.de',
   'https://cobalt-backend.canine.tools',
-  'https://capi.3kh0.net'
+  'https://capi.3kh0.net',
+  'https://cobalt.api.kwiatekm.tokyo',
+  'https://api.cobalt.tools'
 ];
 
 const pool = new KeyPool(

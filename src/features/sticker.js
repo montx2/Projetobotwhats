@@ -129,6 +129,118 @@ async function downloadStickerMedia(sock, holder, picked) {
   throw new Error(`Não consegui baixar a mídia (${errors[0] || 'erro desconhecido'})`);
 }
 
+const ALL_MEDIA_MAP = {
+  imageMessage: 'image',
+  videoMessage: 'video',
+  stickerMessage: 'sticker',
+  audioMessage: 'audio'
+};
+
+function pickAnyType(rawMessage, unwrapViewOnce) {
+  const message = unwrapMessage(rawMessage);
+  if (!message) return null;
+
+  for (const [rawType, kind] of Object.entries(ALL_MEDIA_MAP)) {
+    if (message[rawType]) return { type: kind, rawType, node: message[rawType] };
+  }
+
+  if (message.documentMessage) {
+    const doc = message.documentMessage;
+    const mime = String(doc.mimetype || '').toLowerCase();
+    const name = String(doc.fileName || '').toLowerCase();
+    if (mime.includes('webp') || name.endsWith('.webp')) {
+      return { type: 'sticker', rawType: 'documentMessage', node: doc };
+    }
+    if (mime.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|aac|opus|flac)$/i.test(name)) {
+      return { type: 'audio', rawType: 'documentMessage', node: doc };
+    }
+    if (mime.startsWith('video/') || mime.includes('gif') || /\.(mp4|mov|webm|mkv|gif)$/i.test(name)) {
+      return { type: 'video', rawType: 'documentMessage', node: doc };
+    }
+    if (mime.startsWith('image/') || /\.(jpe?g|png|bmp)$/i.test(name)) {
+      return { type: 'image', rawType: 'documentMessage', node: doc };
+    }
+  }
+
+  const vo = unwrapViewOnce(rawMessage);
+  if (vo) {
+    return {
+      type: ALL_MEDIA_MAP[vo.type] || (vo.type === 'audioMessage' ? 'audio' : 'image'),
+      rawType: vo.type,
+      node: vo.node
+    };
+  }
+  return null;
+}
+
+export async function extractAnyMediaSource(sock, msg, { onProgress, allowViewOnce = false } = {}) {
+  const { unwrapViewOnce } = await import('./viewonce.js');
+  const m = msg.message || {};
+
+  if (!allowViewOnce && (unwrapViewOnce(m) || isQuotedViewOnce(m, unwrapViewOnce))) {
+    return null;
+  }
+
+  const direct = pickAnyType(m, unwrapViewOnce);
+  if (direct) {
+    await onProgress?.(`${SYM.wait} Baixando mídia…`);
+    const buffer = await downloadStickerMedia(sock, msg, direct);
+    return { buffer, type: direct.type, node: direct.node };
+  }
+
+  const ctx = findContextInfo(m);
+  const quoted = ctx?.quotedMessage;
+  if (quoted) {
+    const q = pickAnyType(quoted, unwrapViewOnce);
+    if (q) {
+      await onProgress?.(`${SYM.wait} Baixando mídia citada…`);
+      const fake = {
+        key: {
+          remoteJid: msg.key.remoteJid,
+          id: ctx.stanzaId || msg.key.id,
+          fromMe: false,
+          ...(ctx.participant ? { participant: ctx.participant } : {})
+        },
+        message: unwrapMessage(quoted) || quoted
+      };
+      try {
+        const buffer = await downloadStickerMedia(sock, fake, q);
+        return { buffer, type: q.type, node: q.node };
+      } catch (err) {
+        if (ctx.stanzaId) {
+          const cached = messageCache.get(msg.key.remoteJid, ctx.stanzaId);
+          const cq = cached && pickAnyType(cached.message, unwrapViewOnce);
+          if (cq) {
+            const cachedHolder = {
+              key: { remoteJid: msg.key.remoteJid, id: cached.id, fromMe: !!cached.fromMe },
+              message: cached.message
+            };
+            const buffer = await downloadStickerMedia(sock, cachedHolder, cq);
+            return { buffer, type: cq.type, node: cq.node };
+          }
+        }
+        throw err;
+      }
+    }
+  }
+
+  if (ctx?.stanzaId) {
+    const cached = messageCache.get(msg.key.remoteJid, ctx.stanzaId);
+    const cq = cached && pickAnyType(cached.message, unwrapViewOnce);
+    if (cq) {
+      await onProgress?.(`${SYM.wait} Baixando mídia do histórico…`);
+      const cachedHolder = {
+        key: { remoteJid: msg.key.remoteJid, id: cached.id, fromMe: !!cached.fromMe },
+        message: cached.message
+      };
+      const buffer = await downloadStickerMedia(sock, cachedHolder, cq);
+      return { buffer, type: cq.type, node: cq.node };
+    }
+  }
+
+  return null;
+}
+
 /**
  * Extrai a mídia citada/anexada relevante para figurinha.
  *
