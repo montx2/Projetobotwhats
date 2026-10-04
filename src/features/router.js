@@ -16,7 +16,7 @@ import { messageCache, isBotSent, markBotSent, containsViewOnce } from '../wa/ca
 import { extractAnyText, isIgnored, normalizeIgnoreTarget, handleDelete, statusText } from './antidelete.js';
 import { SYM, header, section, card, footer, ok, fail, warn, wait, usage, kv, toggle } from '../core/ui.js';
 import { isViewOnce, onViewOnceMessage, unwrapViewOnce } from './viewonce.js';
-import { makeSticker, packInfo, isAnimatedWebp, parseFit } from './sticker.js';
+import { makeSticker, packInfo, isAnimatedWebp, parseFit, extractAnyMediaSource } from './sticker.js';
 import { stickerSourcesForCommand } from './stickerlink.js';
 import { removeBackground, bgStatus, bgPools } from './bgremoval.js';
 import {
@@ -72,8 +72,9 @@ import {
   requireAuthorizedGroup,
   requireGroupAdministrator
 } from './group-tools.js';
-import { hasFfmpeg, toVoiceOpus, detectAudioMime } from '../util/ffmpeg.js';
+import { hasFfmpeg, toVoiceOpus, toAudioMp3, toVideoMp4, decodeWebpToPng, detectAudioMime } from '../util/ffmpeg.js';
 import { cobaltPool } from './downloaders/cobalt.js';
+import { searchYouTube } from './downloaders/youtube.js';
 import { hasYtDlp, isYtdlpEnabled, findYtdlp } from './downloaders/ytdlp.js';
 import { SlidingWindowLimiter } from '../core/limiter.js';
 import {
@@ -100,6 +101,7 @@ const EXPENSIVE_COMMANDS = new Set([
   'clima', 'tempo', 'previsao', 'previsão', 'cotacao', 'cotação', 'cambio', 'câmbio', 'feriados',
   'criar', 'img',
   'gerar', 'imagine', 'desenhar', 'voz', 'tts', 'falar', 'vozes', 'traduz', 'traduzir', 'resumo', 'resumir',
+  'tomp3', 'toaudio', 'audio', 'toptt', 'tovn', 'tovoz', 'tovideo', 'tomp4', 'togif', 'toimg', 'tofoto', 'foto',
   'dl', 'download', 'baixar', 'tt', 'tiktok', 'tiktokdl', 'ttmp3', 'tiktokmp3', 'ttaudio',
   'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels', 'yt', 'youtube', 'ytb', 'ytv', 'ytmp4',
   'video', 'ytmp3', 'youtubemp3', 'ytaudio', 'yta', 'mp3', 'play', 'musica', 'música', 'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb'
@@ -142,7 +144,7 @@ function isExpensiveRequest(command, msg) {
   const args = command.args || [];
   const quoted = hasQuotedMessage(msg.message);
   const hasAttachment = hasNestedMedia(msg.message);
-  if (['s', 'fig', 'figu', 'sticker', 'stiker', 'figurinha', 'sfundo', 'stickerfundo', 'sfundinho', 'fundo', 'removefundo', 'rmbg', 'removebg'].includes(name)) {
+  if (['s', 'fig', 'figu', 'sticker', 'stiker', 'figurinha', 'sfundo', 'stickerfundo', 'sfundinho', 'fundo', 'removefundo', 'rmbg', 'removebg', 'tomp3', 'toaudio', 'audio', 'toptt', 'tovn', 'tovoz', 'tovideo', 'tomp4', 'togif', 'toimg', 'tofoto', 'foto'].includes(name)) {
     return Boolean(args.length || hasAttachment || quoted);
   }
   if ([
@@ -1327,6 +1329,28 @@ async function runCommand(sock, msg, cmd, ctx) {
       return reply(`${SYM.section} *RESUMO*\n\n${truncate(result, 3800)}`);
     }
 
+    // ── TRANSFORMAÇÃO E CONVERSÃO DE MÍDIA ─────────────
+    case 'tomp3':
+    case 'toaudio':
+      return mediaConvertCommand({ sock, msg, args, ctx, targetType: 'audio' });
+
+    case 'tovn':
+    case 'toptt':
+    case 'tovoz':
+      return mediaConvertCommand({ sock, msg, args, ctx, targetType: 'voice' });
+
+    case 'toimg':
+    case 'tofoto':
+    case 'foto':
+      return mediaConvertCommand({ sock, msg, args, ctx, targetType: 'image' });
+
+    case 'tovideo':
+    case 'tomp4':
+      return mediaConvertCommand({ sock, msg, args, ctx, targetType: 'video' });
+
+    case 'togif':
+      return mediaConvertCommand({ sock, msg, args, ctx, targetType: 'gif' });
+
     // ── DOWNLOADS (qualquer rede social) ────────────────
     case 'dl':
     case 'download':
@@ -1376,27 +1400,40 @@ async function runCommand(sock, msg, cmd, ctx) {
     case 'ytb':
     case 'ytv':
     case 'ytmp4':
-    case 'video':
+    case 'video': {
+      const url = pickUrl(args, quotedText);
+      if (!url && !args.length) {
+        const hasMedia = hasQuotedMessage(msg.message) || hasNestedMedia(msg.message);
+        if (hasMedia) return mediaConvertCommand({ sock, msg, args, ctx, targetType: 'video' });
+      }
       return downloadCommand({
         sock, msg, args, ctx,
-        url: pickUrl(args, quotedText),
-        fallback: usage('.yt <link>', null, 'Envie o link do vídeo do YouTube.')
+        url,
+        fallback: usage('.yt <link ou busca>', '.yt hino do vasco', 'Envie o link do vídeo do YouTube ou o nome para buscar.')
       });
+    }
 
     case 'ytmp3':
     case 'youtubemp3':
     case 'ytaudio':
     case 'yta':
     case 'mp3':
+    case 'audio':
     case 'play':
     case 'musica':
-    case 'música':
+    case 'música': {
+      const url = pickUrl(args, quotedText);
+      if (!url && !args.length) {
+        const hasMedia = hasQuotedMessage(msg.message) || hasNestedMedia(msg.message);
+        if (hasMedia) return mediaConvertCommand({ sock, msg, args, ctx, targetType: 'audio' });
+      }
       return downloadCommand({
         sock, msg, args, ctx,
-        url: pickUrl(args, quotedText),
+        url,
         audioOnly: true,
-        fallback: usage('.ytmp3 <link>', null, 'Envie o link do YouTube (ou de qualquer rede) para receber só o áudio.')
+        fallback: usage('.ytmp3 <link ou busca>', '.play hino do vasco', 'Envie o link do YouTube ou o nome da música para receber só o áudio.')
       });
+    }
 
     case 'tw':
     case 'twitter':
@@ -1552,20 +1589,256 @@ async function runCommand(sock, msg, cmd, ctx) {
 }
 
 /**
+ * Handler de conversão de mídia: transforma figurinhas em fotos/vídeos, vídeos/áudios em MP3,
+ * áudios em notas de voz (PTT), figurinhas animadas em vídeos ou GIFs.
+ */
+async function mediaConvertCommand({ sock, msg, args, ctx, targetType }) {
+  const { reply, inOwnerPrivate } = ctx;
+  const jid = msg.key.remoteJid;
+  const quotedText = getQuotedText(msg);
+  const url = pickUrl(args, quotedText);
+
+  if (targetType === 'audio') {
+    const media = await extractAnyMediaSource(sock, msg, {
+      onProgress: reply,
+      allowViewOnce: inOwnerPrivate
+    }).catch(() => null);
+
+    if (media?.buffer) {
+      await reply(wait('Convertendo em áudio MP3…'));
+      let audioBuf = media.buffer;
+      let mime = 'audio/mpeg';
+      if (hasFfmpeg()) {
+        try {
+          audioBuf = await toAudioMp3(media.buffer);
+        } catch (e) {
+          log.warn('toAudioMp3 falhou', { error: e.message });
+        }
+      } else {
+        mime = detectAudioMime(media.buffer);
+      }
+      await sock.sendMessage(
+        jid,
+        {
+          audio: audioBuf,
+          mimetype: mime,
+          fileName: 'audio.mp3',
+          ptt: false
+        },
+        { quoted: msg }
+      );
+      return reply(ok('Áudio pronto', 'convertido para MP3'));
+    }
+
+    if (url || args.length) {
+      return downloadCommand({
+        sock,
+        msg,
+        args,
+        ctx,
+        url,
+        audioOnly: true,
+        fallback: usage('.tomp3', '.tomp3 (respondendo a um vídeo ou áudio)')
+      });
+    }
+
+    return reply(
+      usage(
+        '.tomp3',
+        null,
+        'Envie ou responda a um vídeo, áudio ou documento para converter em MP3 (ou envie `.ytmp3 <link/busca>`).'
+      )
+    );
+  }
+
+  if (targetType === 'voice') {
+    const media = await extractAnyMediaSource(sock, msg, {
+      onProgress: reply,
+      allowViewOnce: inOwnerPrivate
+    }).catch(() => null);
+
+    if (media?.buffer) {
+      await reply(wait('Convertendo em nota de voz…'));
+      let voiceBuf = media.buffer;
+      if (hasFfmpeg()) {
+        try {
+          voiceBuf = await toVoiceOpus(media.buffer);
+        } catch (e) {
+          log.warn('toVoiceOpus falhou', { error: e.message });
+        }
+      }
+      await sock.sendMessage(
+        jid,
+        {
+          audio: voiceBuf,
+          mimetype: 'audio/ogg; codecs=opus',
+          ptt: true
+        },
+        { quoted: msg }
+      );
+      return reply(ok('Nota de voz enviada'));
+    }
+
+    return reply(
+      usage(
+        '.toptt',
+        null,
+        'Envie ou responda a um áudio ou vídeo para transformar em nota de voz do WhatsApp.'
+      )
+    );
+  }
+
+  if (targetType === 'image') {
+    const media = await extractAnyMediaSource(sock, msg, {
+      onProgress: reply,
+      allowViewOnce: inOwnerPrivate
+    }).catch(() => null);
+
+    if (media?.buffer) {
+      await reply(wait('Convertendo figurinha em foto…'));
+      let imgBuf = media.buffer;
+      if (hasFfmpeg()) {
+        try {
+          const res = await decodeWebpToPng(media.buffer);
+          if (res?.buffer) imgBuf = res.buffer;
+        } catch (e) {
+          log.warn('decodeWebpToPng falhou', { error: e.message });
+        }
+      }
+      await sock.sendMessage(
+        jid,
+        {
+          image: imgBuf,
+          caption: `${SYM.ok} *Foto extraída da figurinha*`
+        },
+        { quoted: msg }
+      );
+      return reply(ok('Foto pronta'));
+    }
+
+    return reply(
+      usage(
+        '.toimg',
+        null,
+        'Envie ou responda a uma figurinha para transformar em foto.'
+      )
+    );
+  }
+
+  if (targetType === 'video') {
+    const media = await extractAnyMediaSource(sock, msg, {
+      onProgress: reply,
+      allowViewOnce: inOwnerPrivate
+    }).catch(() => null);
+
+    if (media?.buffer) {
+      await reply(wait('Convertendo em vídeo MP4…'));
+      let vidBuf = media.buffer;
+      if (hasFfmpeg()) {
+        try {
+          vidBuf = await toVideoMp4(media.buffer);
+        } catch (e) {
+          log.warn('toVideoMp4 falhou', { error: e.message });
+        }
+      }
+      await sock.sendMessage(
+        jid,
+        {
+          video: vidBuf,
+          mimetype: 'video/mp4',
+          caption: `${SYM.ok} *Vídeo convertido*`
+        },
+        { quoted: msg }
+      );
+      return reply(ok('Vídeo pronto'));
+    }
+
+    if (url || args.length) {
+      return downloadCommand({
+        sock,
+        msg,
+        args,
+        ctx,
+        url,
+        audioOnly: false,
+        fallback: usage('.tovideo', null, 'Envie ou responda a uma figurinha/GIF ou envie um link.')
+      });
+    }
+
+    return reply(
+      usage(
+        '.tovideo',
+        null,
+        'Envie ou responda a uma figurinha animada ou GIF para transformar em vídeo MP4.'
+      )
+    );
+  }
+
+  if (targetType === 'gif') {
+    const media = await extractAnyMediaSource(sock, msg, {
+      onProgress: reply,
+      allowViewOnce: inOwnerPrivate
+    }).catch(() => null);
+
+    if (media?.buffer) {
+      await reply(wait('Convertendo em GIF…'));
+      let vidBuf = media.buffer;
+      if (hasFfmpeg()) {
+        try {
+          vidBuf = await toVideoMp4(media.buffer);
+        } catch {}
+      }
+      await sock.sendMessage(
+        jid,
+        {
+          video: vidBuf,
+          mimetype: 'video/mp4',
+          gifPlayback: true,
+          caption: `${SYM.ok} *GIF pronto*`
+        },
+        { quoted: msg }
+      );
+      return reply(ok('GIF pronto'));
+    }
+
+    return reply(
+      usage(
+        '.togif',
+        null,
+        'Envie ou responda a uma figurinha animada ou vídeo curto para transformar em GIF.'
+      )
+    );
+  }
+}
+
+/**
  * Handler único de download: resolve a URL, baixa e envia tudo em cascata
- * (extrator da rede → Cobalt → yt-dlp → scraping), editando a mesma mensagem
+ * (extrator da rede → Invidious/Cobalt → yt-dlp → scraping), editando a mesma mensagem
  * de progresso em vez de disparar várias.
  */
 async function downloadCommand({ sock, msg, args, ctx, url, audioOnly = false, fallback }) {
   const { reply } = ctx;
-  if (!url) return reply(fallback);
+  let targetUrl = url;
+
+  if (!targetUrl && args.length) {
+    const query = args.join(' ').trim();
+    if (query && !query.startsWith('-')) {
+      await reply(wait(`Pesquisando "${query}" no YouTube…`));
+      const found = await searchYouTube(query).catch(() => null);
+      if (found?.url) {
+        targetUrl = found.url;
+      }
+    }
+  }
+
+  if (!targetUrl) return reply(fallback);
   const { quality } = parseQuality(args, cfg.get().qualidadePadrao);
   const jid = msg.key.remoteJid;
   try {
-    const result = await resolveDownload(url, quality, { audioOnly, onProgress: reply });
-    return await sendDownload(sock, jid, result, { quality, url, onProgress: reply, quoted: msg });
+    const result = await resolveDownload(targetUrl, quality, { audioOnly, onProgress: reply });
+    return await sendDownload(sock, jid, result, { quality, url: targetUrl, onProgress: reply, quoted: msg });
   } catch (error) {
-    log.warn(`download falhou (${shortUrl(url)})`, { name: error?.name, status: error?.status, code: error?.code });
+    log.warn(`download falhou (${shortUrl(targetUrl)})`, { name: error?.name, status: error?.status, code: error?.code });
     const detail = String(error.message || error).slice(0, 260);
     return reply(
       fail('Não consegui baixar este link', detail) +

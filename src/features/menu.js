@@ -16,14 +16,19 @@ const STICKER_ITEMS = [
   ['.s inteira', 'mantém a imagem inteira, sem esticar'],
   ['.s cortar', 'preenche o quadrado sem esticar'],
   ['.sfundo', 'figurinha sem fundo (IA) — funciona com link também'],
-  ['.fundo', 'remove o fundo e envia em PNG']
+  ['.fundo', 'remove o fundo e envia em PNG'],
+  ['.toimg', 'transforma figurinha em foto'],
+  ['.tovideo', 'transforma figurinha animada em vídeo'],
+  ['.tomp3', 'transforma vídeo/áudio em MP3'],
+  ['.toptt', 'transforma áudio/vídeo em nota de voz']
 ];
 
 const DOWNLOAD_ITEMS = [
   ['.dl <link>', 'qualquer rede social'],
+  ['.play <nome>', 'pesquisa e baixa música do YouTube'],
+  ['.yt <link>', 'YouTube  ·  `.ytmp3` só o áudio'],
   ['.tiktok <link>', 'vídeo do TikTok  ·  `.ttmp3` só o áudio'],
   ['.insta <link>', 'Instagram  ·  `.pin` Pinterest'],
-  ['.yt <link>', 'YouTube  ·  `.ytmp3` só o áudio'],
   ['.tw <link>', 'X/Twitter  ·  `.face` Facebook']
 ];
 

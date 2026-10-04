@@ -197,6 +197,10 @@ export async function downloadVimeo(url) {
 
 /* ──────────────── Genérico: og:video / og:image do próprio link ───────── */
 export async function downloadByPageScrape(url) {
+  const u = String(url || '');
+  if (/youtube\.com|youtu\.be|tiktok\.com|instagram\.com/i.test(u)) {
+    return null;
+  }
   const res = await httpGet(url, {
     headers: { 'user-agent': BROWSER_UA, accept: 'text/html,application/xhtml+xml' },
     timeoutMs: 20_000
@@ -204,14 +208,15 @@ export async function downloadByPageScrape(url) {
   if (!res.ok || !res.text) return null;
   const html = res.text;
 
-  const video = metaContent(html, 'og:video') || metaContent(html, 'og:video:url');
-  if (video && kindByExtension(video) !== 'image') {
+  const rawVideo = metaContent(html, 'og:video') || metaContent(html, 'og:video:url') || metaContent(html, 'og:video:secure_url');
+  const isEmbedPlayer = /(embed|\.html?|\/player|iframe|watch\?|video_player)/i.test(rawVideo || '') && !/\.(mp4|webm|mkv|mov)(\?|$)/i.test(rawVideo || '');
+  if (rawVideo && !isEmbedPlayer && (kindByExtension(rawVideo) === 'video' || /\.(mp4|webm|mkv|mov|m4v)(\?|$)/i.test(rawVideo))) {
     return base('Web', {
       kind: 'video',
       title: metaContent(html, 'og:title') || '',
       author: metaContent(html, 'og:site_name') || '',
       thumbnail: metaContent(html, 'og:image'),
-      media: [{ type: 'video', url: video, label: 'og:video' }]
+      media: [{ type: 'video', url: rawVideo, label: 'og:video' }]
     });
   }
   const image = metaContent(html, 'og:image');

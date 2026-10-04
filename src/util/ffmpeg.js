@@ -388,7 +388,7 @@ export async function analyzeImageDetail(input, { size = 32, ext = '.jpg' } = {}
   }
 }
 
-/** Decodifica o 1º frame de um WebP para PNG (usado em .sfundo sobre figurinha). */
+/** Decodifica o 1º frame de um WebP para PNG (usado em .sfundo sobre figurinha ou .toimg). */
 export async function decodeWebpToPng(webpBuffer) {
   const inFile = tmpFile('.webp');
   const outFile = tmpFile('.png');
@@ -397,6 +397,66 @@ export async function decodeWebpToPng(webpBuffer) {
     await runFfmpeg(['-y', '-i', inFile, '-frames:v', '1', outFile], { timeoutMs: 60_000 });
     if (!fs.existsSync(outFile)) throw new Error('falha ao decodificar webp');
     return { buffer: fs.readFileSync(outFile) };
+  } finally {
+    fs.rmSync(inFile, { force: true });
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
+/** Converte qualquer áudio ou vídeo para MP3 (.tomp3). */
+export async function toAudioMp3(input, { bitrate = '192k', timeoutMs = 120_000 } = {}) {
+  if (!hasFfmpeg()) {
+    return input;
+  }
+  const realExt = detectMediaExt(input, '.bin');
+  const inFile = tmpFile(realExt);
+  const outFile = tmpFile('.mp3');
+  fs.writeFileSync(inFile, input);
+  try {
+    await runFfmpeg([
+      '-y', '-hide_banner', '-loglevel', 'error',
+      '-i', inFile,
+      '-vn',
+      '-c:a', 'libmp3lame',
+      '-b:a', bitrate,
+      '-ar', '44100',
+      '-ac', '2',
+      outFile
+    ], { timeoutMs });
+    if (!fs.existsSync(outFile)) throw new Error('ffmpeg não gerou saída de áudio');
+    const buf = fs.readFileSync(outFile);
+    if (!buf.length) throw new Error('áudio convertido está vazio');
+    return buf;
+  } finally {
+    fs.rmSync(inFile, { force: true });
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
+/** Converte figurinha animada (WebP), GIF ou vídeo em MP4 compatível (.tovideo). */
+export async function toVideoMp4(input, { timeoutMs = 120_000 } = {}) {
+  if (!hasFfmpeg()) {
+    throw new Error('FFmpeg é necessário para converter em vídeo. Instale no Termux com: pkg install ffmpeg');
+  }
+  const realExt = detectMediaExt(input, '.webp');
+  const inFile = tmpFile(realExt);
+  const outFile = tmpFile('.mp4');
+  fs.writeFileSync(inFile, input);
+  try {
+    await runFfmpeg([
+      '-y', '-hide_banner', '-loglevel', 'error',
+      '-i', inFile,
+      '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-movflags', '+faststart',
+      '-preset', 'fast',
+      outFile
+    ], { timeoutMs });
+    if (!fs.existsSync(outFile)) throw new Error('ffmpeg não gerou saída de vídeo');
+    const buf = fs.readFileSync(outFile);
+    if (!buf.length) throw new Error('vídeo convertido está vazio');
+    return buf;
   } finally {
     fs.rmSync(inFile, { force: true });
     fs.rmSync(outFile, { force: true });

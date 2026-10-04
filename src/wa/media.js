@@ -1,7 +1,14 @@
-import { downloadContentFromMessage } from '@whiskeysockets/baileys';
 import { collectLimited } from '../util/stream.js';
 
 export const MAX_WHATSAPP_MEDIA_BYTES = 64 * 1024 * 1024;
+
+let baileysPromise = null;
+async function getBaileys() {
+  if (!baileysPromise) {
+    baileysPromise = import('@whiskeysockets/baileys');
+  }
+  return baileysPromise;
+}
 
 function declaredLength(node) {
   const value = node?.fileLength;
@@ -21,6 +28,7 @@ export async function downloadWhatsAppMedia(node, mediaType, { maxBytes = MAX_WH
     : MAX_WHATSAPP_MEDIA_BYTES;
   const length = declaredLength(node);
   if (length > limit) throw new Error(`mídia excede o limite de ${Math.floor(limit / 1024 / 1024)} MB`);
+  const { downloadContentFromMessage } = await getBaileys();
   const stream = await downloadContentFromMessage(node, mediaType);
   const buffer = await collectLimited(stream, limit);
   if (!buffer.length) throw new Error('mídia vazia');

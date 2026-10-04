@@ -59,14 +59,19 @@ export function isKnownSocialUrl(url) {
   return !!detectPlatform(url);
 }
 
-/** Baixa uma URL de mídia aplicando o Referer que o CDN costuma exigir. */
-async function downloadMedia(url, onProgress, maxBytes = 200 * 1024 * 1024) {
-  const referer = mediaReferer(url);
+/** Baixa uma URL de mídia aplicando os cabeçalhos esperados (Referer, User-Agent específico etc.). */
+async function downloadMedia(itemOrUrl, onProgress, maxBytes = 200 * 1024 * 1024) {
+  const url = typeof itemOrUrl === 'string' ? itemOrUrl : itemOrUrl?.url;
+  const customHeaders = typeof itemOrUrl === 'object' && itemOrUrl?.headers ? itemOrUrl.headers : {};
+  const referer = customHeaders.referer || customHeaders.Referer || mediaReferer(url);
   log.dl(`baixando ${shortUrl(url)}…`);
   return fetchBuffer(url, {
     timeoutMs: 180_000,
     maxBytes,
-    headers: referer ? { Referer: referer, referer: referer } : {}
+    headers: {
+      ...(referer ? { Referer: referer, referer } : {}),
+      ...customHeaders
+    }
   });
 }
 
@@ -97,19 +102,25 @@ async function byPlatform(url, platform, quality, audioOnly, maxBytes) {
  */
 async function downloadItemWithAlternates(item, alternates, onProgress, maxBytes) {
   try {
-    return await downloadMedia(item.url, onProgress, maxBytes);
+    return await downloadMedia(item, onProgress, maxBytes);
   } catch (error) {
     for (const alt of alternates || []) {
-      if (!alt?.url) continue;
+      if (!alt?.url && typeof alt !== 'string') continue;
       try {
         await onProgress?.(wait('Essa versão não está mais no ar — tentando outra'));
-        return await downloadMedia(alt.url, onProgress, maxBytes);
+        return await downloadMedia(alt, onProgress, maxBytes);
       } catch {
         /* tenta a próxima */
       }
     }
     throw error;
   }
+}
+
+function isCorruptedHtmlBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;
+  const head = buffer.subarray(0, 50).toString('utf8').trim().toLowerCase();
+  return head.startsWith('<!doctype') || head.startsWith('<html') || head.startsWith('<?xml') || head.startsWith('{"error"');
 }
 
 /** Baixa os buffers de resultados que vieram só com URLs. */
@@ -130,7 +141,10 @@ async function withBuffers(result, onProgress, maxBytes) {
     const limit = Math.min(perFileLimit, remaining);
     const buffer = i === 0
       ? await downloadItemWithAlternates(items[i], result.alternates, onProgress, limit)
-      : await downloadMedia(items[i].url, onProgress, limit);
+      : await downloadMedia(items[i], onProgress, limit);
+    if (isCorruptedHtmlBuffer(buffer)) {
+      throw new Error('arquivo baixado é inválido (resposta HTML em vez de mídia)');
+    }
     total += buffer.length;
     buffers.push(buffer);
   }
@@ -164,6 +178,9 @@ function validateResultBufferLimits(result, maxBytes) {
   const totalLimit = Math.min(HARD_DOWNLOAD_LIMIT, perFileLimit * 2);
   let total = 0;
   for (const buffer of buffers) {
+    if (isCorruptedHtmlBuffer(buffer)) {
+      throw new Error('arquivo baixado é inválido (resposta HTML em vez de mídia)');
+    }
     total += buffer?.length || 0;
     if ((buffer?.length || 0) > perFileLimit) throw new Error(`arquivo excede o limite de ${formatBytes(perFileLimit)}`);
   }
@@ -373,14 +390,18 @@ export async function sendDownload(sock, jid, result, { quality, url, onProgress
 }
 
 function detectVideo(buffer) {
-  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return false;
-  // assinatura mp4: "ftyp" no offset 4
-  if (buffer.toString('ascii', 4, 8) !== 'ftyp') return false;
-  const brand = buffer.toString('ascii', 8, 12).toLowerCase();
-  if (brand.startsWith('m4a') || brand.startsWith('m4b') || brand.startsWith('f4a')) {
-    return false;
+  if (!Buffer.isBuffer(buffer) || buffer.length < 8) return false;
+  // WebM / MKV
+  if (buffer.length > 4 && buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) return true;
+  // MP4
+  if (buffer.length >= 12 && buffer.toString('ascii', 4, 8) === 'ftyp') {
+    const brand = buffer.toString('ascii', 8, 12).toLowerCase();
+    if (brand.startsWith('m4a') || brand.startsWith('m4b') || brand.startsWith('f4a')) {
+      return false;
+    }
+    return true;
   }
-  return true;
+  return false;
 }
 
 /** Auto-download de links soltos: funciona no privado do dono e nos chats ativados. */

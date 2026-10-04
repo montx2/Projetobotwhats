@@ -278,11 +278,13 @@ export async function fetchWithTimeout(url, {
 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('timeout')), Math.max(1, timeoutMs));
+  const customHeaders = lowerKeys(headers);
+  const ua = customHeaders['user-agent'] || randomUA();
   try {
     const { response, url: finalUrl } = await fetchRedirectChain(url, {
       ...rest,
       method: rest.method || 'GET',
-      headers: { 'user-agent': randomUA(), accept: '*/*', 'accept-language': 'pt-BR,pt;q=0.9,en;q=0.8', ...lowerKeys(headers) },
+      headers: { 'user-agent': ua, accept: '*/*', 'accept-language': 'pt-BR,pt;q=0.9,en;q=0.8', ...customHeaders },
       body: rest.body,
       signal: controller.signal
     }, { redirect, maxRedirects, allowPrivate });
@@ -479,7 +481,7 @@ export function mediaReferer(url) {
   if (u.includes('tiktokcdn') || u.includes('tiktok')) return 'https://www.tiktok.com/';
   if (u.includes('pinimg.com')) return 'https://www.pinterest.com/';
   if (u.includes('cdninstagram') || u.includes('fbcdn.net')) return 'https://www.instagram.com/';
-  if (u.includes('googlevideo.com') || u.includes('ytimg.com')) return 'https://www.youtube.com/';
+  if (u.includes('ytimg.com')) return 'https://www.youtube.com/';
   if (u.includes('twimg.com')) return 'https://x.com/';
   if (u.includes('fbcdn') || u.includes('facebook')) return 'https://www.facebook.com/';
   if (u.includes('redd.it')) return 'https://www.reddit.com/';

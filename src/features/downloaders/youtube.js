@@ -1,5 +1,5 @@
 // ▶️ YouTube — extração pela Innertube (a API privada do player do próprio
-// YouTube), o método que os bots reais usam hoje.
+// YouTube), com reservas em Invidious, Cobalt e yt-dlp.
 //
 // Por que Innertube e não só Cobalt:
 //   • É UM POST JSON. Não precisa de yt-dlp, Python nem ffmpeg.
@@ -13,9 +13,9 @@
 // Teto honesto: 360p para vídeo (o YouTube só publica um stream muxado).
 // Áudio sai em qualidade cheia, porque stream só de áudio não precisa muxar.
 //
-// Reservas: Cobalt (túnel) → e, se houver binário, yt-dlp.
+// Reservas: Invidious API → Cobalt (túnel) → e, se houver binário, yt-dlp.
 
-import { postJson, fetchJson } from '../../core/http.js';
+import { postJson, fetchJson, httpGet, randomUA } from '../../core/http.js';
 import { log } from '../../core/logger.js';
 import { cobaltDownload } from './cobalt.js';
 
@@ -52,6 +52,14 @@ const CLIENTS = [
     },
     userAgent: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)'
   }
+];
+
+const INVIDIOUS_INSTANCES = [
+  'https://inv.nadeko.net',
+  'https://invidious.nerdvpn.de',
+  'https://invidious.private.coffee',
+  'https://vid.priv.au',
+  'https://invidious.drgns.space'
 ];
 
 export function isYouTubeUrl(url) {
@@ -153,6 +161,19 @@ async function askClient(client, videoId) {
   return data;
 }
 
+/** Invidious fallback extractor */
+async function askInvidious(videoId) {
+  for (const inst of INVIDIOUS_INSTANCES) {
+    try {
+      const data = await fetchJson(`${inst}/api/v1/videos/${videoId}`, { timeoutMs: 12_000 });
+      if (data && (data.formatStreams?.length || data.adaptiveFormats?.length)) {
+        return { inst, data };
+      }
+    } catch {}
+  }
+  return null;
+}
+
 /** Metadados públicos (título/autor/capa) para enriquecer respostas pobres. */
 async function oembedMeta(canonical, videoId) {
   try {
@@ -168,6 +189,81 @@ async function oembedMeta(canonical, videoId) {
   } catch {
     return { thumbnail: videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : '' };
   }
+}
+
+/** Pesquisa vídeo ou música no YouTube e devolve o vídeo correspondente */
+export async function searchYouTube(query) {
+  const q = String(query || '').trim();
+  if (!q) return null;
+  const existingId = parseYouTubeId(q);
+  if (existingId) return { videoId: existingId, title: q, url: `https://www.youtube.com/watch?v=${existingId}` };
+
+  for (const inst of INVIDIOUS_INSTANCES) {
+    try {
+      const results = await fetchJson(`${inst}/api/v1/search?q=${encodeURIComponent(q)}&type=video`, { timeoutMs: 10_000 });
+      if (Array.isArray(results) && results.length) {
+        const first = results.find((r) => r.type === 'video' || r.videoId) || results[0];
+        if (first?.videoId) {
+          return {
+            videoId: first.videoId,
+            title: first.title || q,
+            author: first.author || '',
+            duration: Number(first.lengthSeconds) || 0,
+            url: `https://www.youtube.com/watch?v=${first.videoId}`
+          };
+        }
+      }
+    } catch {}
+  }
+
+  try {
+    const data = await postJson('https://www.youtube.com/youtubei/v1/search', {
+      query: q,
+      context: {
+        client: {
+          clientName: 'WEB',
+          clientVersion: '2.20240101.00.00',
+          hl: 'pt-BR',
+          gl: 'BR'
+        }
+      }
+    }, { timeoutMs: 12_000 });
+    const contents =
+      data?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents?.[0]
+        ?.itemSectionRenderer?.contents || [];
+    for (const item of contents) {
+      const renderer = item?.videoRenderer;
+      if (renderer?.videoId) {
+        const title = renderer.title?.runs?.[0]?.text || renderer.title?.simpleText || q;
+        const author = renderer.ownerText?.runs?.[0]?.text || '';
+        return {
+          videoId: renderer.videoId,
+          title,
+          author,
+          url: `https://www.youtube.com/watch?v=${renderer.videoId}`
+        };
+      }
+    }
+  } catch {}
+
+  try {
+    const res = await httpGet(`https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`, {
+      headers: { 'user-agent': randomUA(), accept: 'text/html' },
+      timeoutMs: 12_000
+    });
+    if (res.ok && res.text) {
+      const match = res.text.match(/"videoId":"([\w-]{11})"/);
+      if (match?.[1]) {
+        return {
+          videoId: match[1],
+          title: q,
+          url: `https://www.youtube.com/watch?v=${match[1]}`
+        };
+      }
+    }
+  } catch {}
+
+  return null;
 }
 
 /**
@@ -201,7 +297,11 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
         const audio = pickAudio(data);
 
         if (audioOnly && audio?.url) {
-          return baseResult({ ...base, kind: 'audio', media: [{ type: 'audio', url: audio.url, label: 'áudio' }] });
+          return baseResult({
+            ...base,
+            kind: 'audio',
+            media: [{ type: 'audio', url: audio.url, label: 'áudio', headers: { 'user-agent': client.userAgent } }]
+          });
         }
 
         const progressive = pickProgressive(data);
@@ -209,14 +309,21 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
           return baseResult({
             ...base,
             kind: 'video',
-            media: [{ type: 'video', url: progressive.url, label: progressive.qualityLabel || 'vídeo' }],
-            audioOnly: audio ? { type: 'audio', url: audio.url, label: 'áudio' } : null
+            media: [
+              {
+                type: 'video',
+                url: progressive.url,
+                label: progressive.qualityLabel || 'vídeo',
+                headers: { 'user-agent': client.userAgent }
+              }
+            ],
+            audioOnly: audio ? { type: 'audio', url: audio.url, label: 'áudio', headers: { 'user-agent': client.userAgent } } : null
           });
         }
 
         // Sem muxado: guarda a faixa de áudio como reserva se Cobalt não tiver vídeo
         if (audio?.url && !innertubeAudio) {
-          innertubeAudio = audio;
+          innertubeAudio = { ...audio, headers: { 'user-agent': client.userAgent } };
           innertubeBase = base;
         }
         errors.push(`${client.name}: sem stream muxado`);
@@ -226,7 +333,50 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
     }
   }
 
-  // 2) Cobalt (túnel comunitário — faz remux de vídeo/áudio ou baixa MP3)
+  // 2) Invidious API
+  if (videoId) {
+    try {
+      const inv = await askInvidious(videoId);
+      if (inv) {
+        const { inst, data } = inv;
+        const base = {
+          title: data.title || '',
+          author: data.author || '',
+          duration: Number(data.lengthSeconds) || 0,
+          thumbnail: data.videoThumbnails?.[0]?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
+        };
+        const audios = (data.adaptiveFormats || []).filter((f) => String(f.type || '').startsWith('audio/'));
+        const bestAudio = audios.sort(byBitrateDesc)[0];
+        const progressive = (data.formatStreams || []).sort(byBitrateDesc)[0];
+
+        const resolveUrl = (streamUrl) => (streamUrl.startsWith('http') ? streamUrl : `${inst}${streamUrl}`);
+
+        if (audioOnly && bestAudio?.url) {
+          return baseResult({
+            ...base,
+            kind: 'audio',
+            media: [{ type: 'audio', url: resolveUrl(bestAudio.url), label: 'áudio' }]
+          });
+        }
+        if (progressive?.url) {
+          return baseResult({
+            ...base,
+            kind: 'video',
+            media: [{ type: 'video', url: resolveUrl(progressive.url), label: progressive.qualityLabel || 'vídeo' }],
+            audioOnly: bestAudio ? { type: 'audio', url: resolveUrl(bestAudio.url), label: 'áudio' } : null
+          });
+        }
+        if (bestAudio?.url && !innertubeAudio) {
+          innertubeAudio = { url: resolveUrl(bestAudio.url) };
+          innertubeBase = base;
+        }
+      }
+    } catch (error) {
+      errors.push(`invidious: ${String(error.message).slice(0, 60)}`);
+    }
+  }
+
+  // 3) Cobalt (túnel comunitário — faz remux de vídeo/áudio ou baixa MP3)
   log.dl('youtube: tentando via cobalt…');
   try {
     const { buffers, audioBuffer, ...rest } = await cobaltDownload(canonical, quality, { audioOnly, maxBytes });
@@ -252,13 +402,13 @@ export async function downloadYouTube(url, quality = 'melhor', { audioOnly = fal
     errors.push(`cobalt: ${String(error.message).slice(0, 60)}`);
   }
 
-  // 3) Se o usuário pediu vídeo e o Cobalt falhou, mas temos a faixa de áudio do Innertube, entrega áudio
+  // 4) Se o usuário pediu vídeo e o Cobalt falhou, mas temos a faixa de áudio do Innertube, entrega áudio
   if (innertubeAudio?.url) {
     log.dl('youtube: sem stream muxado — entregando a faixa de áudio');
     return baseResult({
       ...innertubeBase,
       kind: 'audio',
-      media: [{ type: 'audio', url: innertubeAudio.url, label: 'áudio' }]
+      media: [{ type: 'audio', url: innertubeAudio.url, label: 'áudio', headers: innertubeAudio.headers }]
     });
   }
 

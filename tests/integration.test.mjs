@@ -808,3 +808,20 @@ test('SEGURANÇA: em chat ativado, responder uma VIEW ONCE com .s NÃO republica
 
   cfg.get().autorizados = [];
 });
+
+test('transformação: comandos .tomp3, .toptt, .toimg, .tovideo respondem ajuda quando enviados sem mídia', async () => {
+  const sock = makeSock();
+  const deps = makeDeps(sock);
+
+  await handleMessage(sock, textMsg(OWNER_JID, '.tomp3'), deps);
+  assert.ok(sock.sent.some((s) => /tomp3/i.test(s.content?.text || '')));
+
+  await handleMessage(sock, textMsg(OWNER_JID, '.toptt'), deps);
+  assert.ok(sock.sent.some((s) => /toptt/i.test(s.content?.text || '')));
+
+  await handleMessage(sock, textMsg(OWNER_JID, '.toimg'), deps);
+  assert.ok(sock.sent.some((s) => /toimg/i.test(s.content?.text || '')));
+
+  await handleMessage(sock, textMsg(OWNER_JID, '.tovideo'), deps);
+  assert.ok(sock.sent.some((s) => /tovideo/i.test(s.content?.text || '')));
+});
