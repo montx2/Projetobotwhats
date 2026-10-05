@@ -390,7 +390,7 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
   if (!bin) return null;
 
   const analysisStart = Date.now();
-  await onProgress?.(`🧠 Analisando o vídeo (movimento, assunto e loop)…`);
+  await onProgress?.(`🧠 Analisando a mídia (movimento, assunto e fundo)…`);
   const analysis = await analyzeSource(inFile, { ffmpegBin: bin });
   if (!analysis) return null;
   const analysisMs = Date.now() - analysisStart;
@@ -430,6 +430,7 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
     crop: plan.crop ? `${plan.crop.w}x${plan.crop.h}+${plan.crop.x}+${plan.crop.y}` : null,
     cut: plan.cut ? `fundo liso 0x${cutHex(plan.cut)} · ${Math.round(plan.cut.coverage * 100)}% do quadro` : null,
     qualityFloor: plan.qualityFloor,
+    cutState: plan.cutState ?? (plan.cut ? 'flat' : 'off'),
     activity: plan.activity
       ? {
           x: Number((plan.activity.cx - plan.activity.w / 2).toFixed(2)),
@@ -597,6 +598,68 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
 }
 
 /**
+ * Extrai um quadro do vídeo como PNG — é o que vai para a remoção de fundo por
+ * IA. Reduz para no máximo 1200 px no lado maior: sobra resolução para a
+ * figurinha 512 e a chamada de rede fica leve.
+ *
+ * @returns {Promise<Buffer|null>}
+ */
+export async function stillFramePng(input, { seconds = 0, ext = '.mp4' } = {}) {
+  const bin = findFfmpeg();
+  if (!bin) return null;
+  const inFile = tmpFile(detectMediaExt(input, ext));
+  const outFile = tmpFile('.png');
+  fs.writeFileSync(inFile, input);
+  const args = ['-y', '-hide_banner', '-loglevel', 'error'];
+  if (seconds > 0) args.push('-ss', seconds.toFixed(2));
+  args.push(
+    '-i', inFile,
+    '-frames:v', '1',
+    '-vf', "scale='min(1200,iw)':'min(1200,ih)':force_original_aspect_ratio=decrease",
+    outFile
+  );
+  try {
+    await runFfmpeg(args, { timeoutMs: 60_000 });
+  } catch {
+    return null;
+  }
+  return fs.existsSync(outFile) ? fs.readFileSync(outFile) : null;
+}
+
+/**
+ * Fração de pixels visíveis (alfa > 40) de uma imagem, medida em 64×64.
+ * Serve para checar o que a IA devolveu: recorte vazio (0) ou fundo intacto (1)
+ * são resultados inúteis — melhor ficar com a figurinha original.
+ *
+ * @returns {Promise<number|null>} 0..1
+ */
+export async function alphaCoverage(input, { ext = '.png' } = {}) {
+  const bin = findFfmpeg();
+  if (!bin) return null;
+  const inFile = tmpFile(detectMediaExt(input, ext));
+  fs.writeFileSync(inFile, input);
+  let raw;
+  try {
+    raw = await runFfmpegCapture([
+      '-v', 'error',
+      '-i', inFile,
+      '-frames:v', '1',
+      '-vf', 'scale=64:64:force_original_aspect_ratio=disable:flags=area,format=rgba',
+      '-pix_fmt', 'rgba',
+      '-f', 'rawvideo',
+      '-'
+    ]);
+  } catch {
+    return null;
+  }
+  const pixels = Math.floor(raw.length / 4);
+  if (!pixels) return null;
+  let visible = 0;
+  for (let i = 0; i < pixels; i++) if (raw[i * 4 + 3] > 40) visible++;
+  return visible / pixels;
+}
+
+/**
  * Padroniza a duração da figurinha animada dentro do limite do WhatsApp.
  * Aceita 1 s…10 s; valor ausente/inválido vira o teto (10 s).
  */
@@ -663,7 +726,10 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = STIC
     // Motor inteligente: analisa, escolhe o trecho, fecha o loop, enquadra o
     // assunto e gasta o orçamento com previsão. Se qualquer coisa falhar, a
     // escada clássica logo abaixo assume — o usuário nunca fica sem figurinha.
-    if (animated && smart) {
+    // O motor roda para vídeo E para foto: em foto ele decide o quadro parado e
+    // recorta o fundo liso (de graça). Fundo complexo fica marcado no relatório
+    // (`cutState`) para o chamador decidir se vale a IA.
+    if (smart) {
       try {
         const result = await smartStickerWebp(inFile, outFile, { fit, maxSeconds: wanted, onProgress });
         if (result?.buffer?.length) return result;

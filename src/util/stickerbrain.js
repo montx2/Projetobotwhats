@@ -97,7 +97,7 @@ export function parseSourceMeta(stderr) {
 export function analyzeFrames(raw, { width = 0, height = 0, durationMs = 0, sampleFps = SAMPLE_FPS } = {}) {
   const cell = GRID * GRID;
   const frameCount = Math.floor(raw.length / (cell * 4));
-  if (frameCount < 2) return null;
+  if (frameCount < 1) return null; // 1 quadro = foto: plano estático
 
   const deltas = new Float32Array(frameCount);
   const brightness = new Float32Array(frameCount);
@@ -622,7 +622,34 @@ export function bestStillFrame(analysis, start, end) {
  * @returns {object|null} plano pronto para o FFmpeg (ou null quando não deu)
  */
 export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 1024, minFrames = 8, qStart = 45, autoCrop = true, autoCut = true } = {}) {
-  if (!analysis || analysis.frameCount < 2) return null;
+  if (!analysis) return null;
+  // Foto: um quadro só. Vira figurinha parada — e o fundo liso ainda é recortado.
+  if (analysis.frameCount === 1) {
+    const { state, cut } = autoCut ? backgroundVerdict(analysis) : { state: 'off', cut: null };
+    return {
+      analysis,
+      start: 0,
+      end: 0,
+      startMs: 0,
+      durationMs: 0,
+      fps: analysis.sampleFps,
+      frames: 1,
+      motion: 0,
+      budgetBytes,
+      minFrames,
+      qStart,
+      qualityFloor: qualityFloorFor(0),
+      cut,
+      cutState: state,
+      mode: 'static',
+      stillIndex: 0,
+      stillMs: 0,
+      targetFps: 1,
+      schedule: [0],
+      crop: null,
+      reason: 'é uma foto — figurinha parada em alta qualidade'
+    };
+  }
   const loop = chooseLoop(analysis, { maxSeconds });
   if (!loop) return null;
 
@@ -633,7 +660,8 @@ export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 102
   const motion = windowMotion(analysis, start, end);
   // Fundo liso → recorte automático sem IA (chave de cor). Vale para figurinha
   // parada e animada: fundo chapado em volta do sujeito fica transparente.
-  const cut = autoCut ? backgroundCut(analysis, { start, end }) : null;
+  const verdict = autoCut ? backgroundVerdict(analysis, { start, end }) : { state: 'off', cut: null };
+  const cut = verdict.cut;
   const base = {
     analysis,
     start,
@@ -647,7 +675,8 @@ export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 102
     minFrames,
     qStart,
     qualityFloor: qualityFloorFor(motion * fps),
-    cut
+    cut,
+    cutState: verdict.state
   };
 
   // Vídeo parado não vira "animação": vira figurinha estática, melhor e menor.
@@ -716,8 +745,8 @@ function cellColor(analysis, frame, cx, cy) {
  *
  * @returns {{color: {r: number, g: number, b: number}, similarity: number, coverage: number, contrast: number}|null}
  */
-export function backgroundCut(analysis, { start = 0, end = analysis.frameCount - 1 } = {}) {
-  if (!analysis?.rgba || end <= start) return null;
+export function backgroundVerdict(analysis, { start = 0, end = (analysis?.frameCount ?? 1) - 1 } = {}) {
+  if (!analysis?.rgba || end < start) return { state: 'off', cut: null };
   const frames = [];
   // Amostra até 24 quadros do trecho: fundo chapado não muda de um para o outro.
   const step = Math.max(1, Math.floor((end - start) / 24));
@@ -749,7 +778,7 @@ export function backgroundCut(analysis, { start = 0, end = analysis.frameCount -
   // Já veio transparente (figurinha repassada, PNG/GIF com alfa): não há fundo
   // liso para tirar, e chavear cor no preto das áreas vazias estragaria o desenho.
   ringAlpha.sort((a, b) => a - b);
-  if (ringAlpha[Math.floor(ringAlpha.length / 2)] < 20) return null;
+  if (ringAlpha[Math.floor(ringAlpha.length / 2)] < 20) return { state: 'transparent', cut: null };
   const channelMedian = (k) => {
     const values = samples.map((s) => s[k]).sort((a, b) => a - b);
     return values[Math.floor(values.length / 2)];
@@ -758,7 +787,7 @@ export function backgroundCut(analysis, { start = 0, end = analysis.frameCount -
   const distances = samples.map((s) => Math.hypot(s[0] - mean[0], s[1] - mean[1], s[2] - mean[2])).sort((a, b) => a - b);
   const d50 = distances[Math.floor(distances.length / 2)];
   // Metade do anel precisa estar a menos de ~9% da cor dominante (senão é cenário).
-  if (d50 > 0.09 * 441.67) return null;
+  if (d50 > 0.09 * 441.67) return { state: 'complex', cut: null };
 
   const color = { r: Math.round(mean[0]), g: Math.round(mean[1]), b: Math.round(mean[2]) };
   // Cores do mesmo fundo ficam dentro de 3σ (a compressão do vídeo mexe um pouco).
@@ -783,7 +812,7 @@ export function backgroundCut(analysis, { start = 0, end = analysis.frameCount -
     }
     if (hits / ringCells.length >= 0.55) ringOk++;
   }
-  if (ringOk / frames.length < 0.75) return null;
+  if (ringOk / frames.length < 0.75) return { state: 'complex', cut: null };
 
   // 2) O fundo precisa ocupar boa parte do quadro e o miolo destoar dele
   //    (senão é um cenário, não um sujeito sobre fundo liso).
@@ -813,16 +842,33 @@ export function backgroundCut(analysis, { start = 0, end = analysis.frameCount -
   }
   const coverage = background / totalCells;
   const contrast = centerCells ? centerDiff / centerCells : 0;
-  if (coverage < CUT_MIN_COVERAGE || contrast < CUT_MIN_CONTRAST) return null;
+  if (coverage < CUT_MIN_COVERAGE || contrast < CUT_MIN_CONTRAST) return { state: 'lowcontrast', cut: null };
 
   // Tolerância do colorkey: cobre o ruído medido com folga, sem comer o sujeito.
   const similarity = Math.max(0.07, Math.min(0.3, 0.05 + (sigma / 255) * 3));
   return {
-    color,
-    similarity: Number(similarity.toFixed(3)),
-    coverage: Number(coverage.toFixed(2)),
-    contrast: Number(contrast.toFixed(2))
+    state: 'flat',
+    cut: {
+      color,
+      similarity: Number(similarity.toFixed(3)),
+      coverage: Number(coverage.toFixed(2)),
+      contrast: Number(contrast.toFixed(2))
+    }
   };
+}
+
+/** Recorta o fundo liso (ou `null` quando não é o caso). Atalho de `backgroundVerdict`. */
+export function backgroundCut(analysis, opts) {
+  return backgroundVerdict(analysis, opts).cut;
+}
+
+/**
+ * Vale chamar a IA (remove.bg/rembg)? Sim quando o fundo não é liso mas existe
+ * sujeito para separar. Fundo já transparente ou foto sem contraste não pagam
+ * uma chamada de rede.
+ */
+export function aiCutCouldHelp(state) {
+  return state === 'complex' || state === 'lowcontrast';
 }
 
 /**
@@ -832,8 +878,8 @@ export function backgroundCut(analysis, { start = 0, end = analysis.frameCount -
  *
  * @returns {{cx: number, cy: number, w: number, h: number}|null}
  */
-export function subjectBox(analysis, cut, { start = 0, end = analysis.frameCount - 1, pad = 0.15 } = {}) {
-  if (!analysis?.rgba || !cut || end <= start) return null;
+export function subjectBox(analysis, cut, { start = 0, end = (analysis?.frameCount ?? 1) - 1, pad = 0.15 } = {}) {
+  if (!analysis?.rgba || !cut || end < start) return null;
   const frames = [];
   const step = Math.max(1, Math.floor((end - start) / 24));
   for (let f = start; f <= end; f += step) frames.push(f);

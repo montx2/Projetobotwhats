@@ -219,6 +219,26 @@ export function warnIfBgUnconfigured() {
 }
 
 /** Status dos pools para .info */
+/**
+ * Existe algum jeito de remover fundo configurado? (chave remove.bg, endpoint
+ * próprio ou `rembg` local)
+ */
+export function bgAvailable() {
+  return Boolean(keyPool.size || urlPool.size || ENV.localRembg);
+}
+
+/**
+ * A remoção de fundo pode rodar SOZINHA na figurinha (sem o usuário pedir)?
+ *
+ * - `rembg` local roda offline e de graça, então vale por si;
+ * - remove.bg/endpoint gastam créditos ou rede do operador: só com
+ *   `STICKER_AI_CUT=1` explícito no .env.
+ */
+export function bgAutoAllowed() {
+  if (!bgAvailable()) return false;
+  return Boolean(ENV.localRembg || ENV.stickerAiCut);
+}
+
 export function bgStatus() {
   const parts = [];
   parts.push(keyPool.size ? `remove.bg: ${keyPool.available}/${keyPool.size} chaves ativas` : 'remove.bg: sem chaves no .env');

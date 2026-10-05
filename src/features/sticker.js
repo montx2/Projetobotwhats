@@ -8,7 +8,16 @@
 import { cfg } from '../core/config.js';
 import { log } from '../core/logger.js';
 import { SYM } from '../core/ui.js';
-import { toStickerWebp, decodeWebpToPng, detectMediaExt, hasFfmpeg, STICKER_MAX_SECONDS, STICKER_ANIMATED_SPEC_BYTES } from '../util/ffmpeg.js';
+import {
+  toStickerWebp,
+  decodeWebpToPng,
+  detectMediaExt,
+  hasFfmpeg,
+  stillFramePng,
+  alphaCoverage,
+  STICKER_MAX_SECONDS,
+  STICKER_ANIMATED_SPEC_BYTES
+} from '../util/ffmpeg.js';
 import {
   isWebp,
   isAnimatedWebp,
@@ -18,7 +27,8 @@ import {
   trimAnimatedWebp,
   webpDurationMs
 } from '../util/webp.js';
-import { removeBackground } from './bgremoval.js';
+import { aiCutCouldHelp } from '../util/stickerbrain.js';
+import { removeBackground, bgAutoAllowed } from './bgremoval.js';
 import { formatBytes } from '../core/http.js';
 import { messageCache } from '../wa/cache.js';
 import { downloadWhatsAppMedia, MAX_WHATSAPP_MEDIA_BYTES } from '../wa/media.js';
@@ -332,6 +342,49 @@ export async function extractStickerSource(sock, msg, { onProgress, allowViewOnc
 }
 
 /**
+ * Fundo complexo em foto (ou vídeo que virou figurinha parada): a chave de cor
+ * não resolve, mas a IA sim. Roda sozinha só quando o operador permite
+ * (`rembg` local, ou `STICKER_AI_CUT=1` com remove.bg/endpoint configurado).
+ *
+ * Um quadro só é enviado — nunca a animação inteira: gastaria créditos (ou
+ * minutos de CPU) sem garantia de máscara consistente entre quadros. O
+ * resultado é validado: recorte vazio é descartado e a figurinha original fica.
+ *
+ * @returns {Promise<Buffer|null>} webp recortado, ou null para seguir sem IA
+ */
+async function tryAiCut({ smart, buffer, ext, isVideo, onProgress }) {
+  if (!smart || smart.mode !== 'static' || smart.cut) return null;
+  if (!aiCutCouldHelp(smart.cutState) || !bgAutoAllowed()) return null;
+
+  await onProgress?.(`${SYM.wait} Fundo complexo — removendo com IA… (pode levar alguns segundos)`);
+  let frame = buffer;
+  if (isVideo) {
+    frame = await stillFramePng(buffer, { seconds: smart.stillSeconds || 0, ext });
+    if (!frame) return null;
+  }
+
+  let cut;
+  let via;
+  try {
+    ({ buffer: cut, via } = await removeBackground(frame));
+  } catch (error) {
+    log.warn(`recorte automático por IA falhou (${String(error?.message || error).slice(0, 120)})`);
+    return null;
+  }
+
+  const visible = await alphaCoverage(cut);
+  if (visible !== null && visible < 0.02) {
+    log.warn(`recorte por IA devolveu imagem vazia (${via}) — mantendo a figurinha original`);
+    return null;
+  }
+
+  const { buffer: webp } = await toStickerWebp(cut, { animated: false, ext: '.png', fit: 'contain', onProgress });
+  log.ok(`fundo removido automaticamente via ${via} (${formatBytes(webp.length)})`);
+  await onProgress?.(`${SYM.wait} Fundo removido por IA (${via}) · gravando dados da figurinha…`);
+  return webp;
+}
+
+/**
  * Cria figurinha a partir da mídia.
  * @returns {Promise<Buffer>} webp pronto para enviar (com VP8X + EXIF válidos)
  */
@@ -455,6 +508,10 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
       );
     }
   }
+  // Fundo complexo em foto/vídeo parado: tenta a IA (opt-in) antes de fechar.
+  const aiCut = await tryAiCut({ smart, buffer, ext, isVideo, onProgress });
+  if (aiCut) return tagSticker(aiCut, { pack, author, emojis });
+
   await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
   return tagSticker(webp, { pack, author, emojis });
 }
