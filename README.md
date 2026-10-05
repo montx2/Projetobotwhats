@@ -158,6 +158,39 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .info                            → status do bot (exclusivo do dono)
 ```
 
+### Figurinhas: limite de duração e motor inteligente
+
+O WhatsApp aceita WebP de exatamente **512×512**: até **100 KB** na figurinha parada e até **500 KB e 10 segundos** de animação na animada.
+
+**A duração é a última coisa a cair.** Ao converter um vídeo/GIF de até 10 s, a qualidade e o FPS caem antes da duração — os 10 segundos só são encurtados (8 s, 6 s, 5 s, 4 s, 3 s) se nem a compressão mínima couber em 500 KB. Vídeo maior que 10 s é cortado nos 10 s, e uma figurinha animada recebida pronta e com mais de 10 s perde apenas os quadros finais, sem reencode (o bot corta os quadros no próprio contêiner WebP, porque o FFmpeg não decodifica WebP animado). Para regerar uma animação acima de 500 KB, reenvie o vídeo/imagem original — aí o bot reencoda dentro do limite.
+
+**Antes de encodar, o bot analisa a mídia** (quadros minúsculos de 32×32 com cor, ~0,1 s de FFmpeg) e decide o que fazer com ela — como os grandes apps de figurinha:
+
+- **Escolhe o melhor trecho de até 10 s** — o de mais movimento e com emenda de loop mais suave; não é sempre o começo do vídeo (um vídeo de 40 s, por exemplo, pode render o trecho dos 12 s aos 22 s). Em vídeos longos o trecho sai dos primeiros 60 s.
+- **Fecha o loop** — encurta o fim em até 0,4 s para o último quadro parecer o primeiro e a animação não "pular" ao repetir.
+- **Enquadra o assunto** — recorta um quadrado ao redor do que se mexe (nunca menos de 55% do lado menor), então o sujeito aparece grande em vez de perdido no quadro. Vídeo em que a ação já ocupa quase tudo não é recortado.
+- **Chama a IA só quando o fundo é complexo** — fundo que a chave de cor não resolve (cenário, foto de perfil, parede colorida) pode ser recortado com a IA que o bot já usa no `.sfundo`, numa chamada por figurinha (foto, ou o quadro escolhido de um vídeo parado). Fica **desligado por padrão** para não gastar créditos: ligue com `STICKER_AI_CUT=1` no `.env` (com `REMOVE_BG_KEYS`/`REMOVE_BG_URLS`) — ou use `LOCAL_REMBG=true`, que roda offline e de graça e já vale sozinho. Recorte vazio devolvido pela IA é descartado e a figurinha original fica.
+- **Recorta o fundo liso sozinho** — fundo de uma cor só (parede, chroma key, céu limpo) vira transparência automática: a cor é medida no anel externo do quadro, sem IA e sem chave manual. Sujeito encostando na borda não atrapalha (o resto do anel continua mostrando o fundo); cenário, câmera andando e figurinha que já veio com transparência ficam intactos. Com o fundo recortado, o sujeito também é enquadrado — desde que o recorte não estique a imagem.
+- **Equilibra fluidez e nitidez** — vídeo com muita ação prefere fluidez (mais quadros, qualidade um pouco menor); vídeo calmo prefere nitidez (menos quadros, cada um mais nítido). Numa figurinha pequena, movimento travado incomoda mais que detalhe fino.
+- **Entende vídeo de celular em pé** — quando o arquivo é gravado deitado e marcado com rotação (matriz de exibição 90°/270°), o bot analisa na orientação em que o vídeo é exibido, então o enquadramento sai no lugar certo. Se por qualquer motivo o recorte não couber no quadro, ele refaz a conversão sem recorte em vez de perder o motor.
+- **Ignora abertura preta** — fade ou tela preta no começo é podado (no máximo 40% do vídeo); o resto da duração é preservado. Trecho claro e parado não é podado, porque pode ser conteúdo (uma pose segurada, por exemplo).
+- **Distribui quadros por movimento** — o WebP animado aceita quadros com durações diferentes: trecho parado fica com menos quadros (cada um durando até ~0,25 s) e ação com até 15 fps. A figurinha fica fluida onde importa e leve onde não importa.
+- **Gasta os 500 KB com previsão** — o tamanho da figurinha é medido em uma ou duas tentativas e o modelo (tamanho por quadro × qualidade) calcula quantos quadros cabem e qual qualidade fecha o orçamento, em vez de testar uma escada fixa de qualidade.
+- **Aproveita o limite inteiro — é o máximo que o WhatsApp permite** — depois que a figurinha já cabe, o que sobrou do orçamento vira fidelidade: a qualidade sobe até 100, os quadros que o orçamento tinha cortado voltam (numa figurinha pequena, movimento suave vale mais que detalhe fino) e, se ainda sobrar espaço de verdade, o bot tenta a codificação **sem perdas** — o teto absoluto do WebP. Em cena chapada ou recortada o sem perdas costuma sair até **menor** e pixel-perfect, então ele vence sempre que cabe. Nada acima do limite é aceito, e o log diz quanto foi usado (`usa 97% do limite`, ou `sem perdas: teto de qualidade`). Número baixo não é desperdício: quer dizer que o conteúdo não rende mais bytes sem perder nitidez.
+- **Vídeo sem movimento vira figurinha parada** — em alta qualidade, menor e sem o "pisca" de uma animação que não anima nada.
+
+**Você pode mandar no resultado** (opcional — sem nada disso o motor decide sozinho):
+
+| Comando | O que muda |
+| --- | --- |
+| `.s` | automático: o motor equilibra duração, fluidez e nitidez pelo movimento do vídeo |
+| `.s liso` | prioriza fluidez (até 15 fps), aceitando qualidade um pouco menor por quadro |
+| `.s hd` | prioriza nitidez (menos quadros, piso de qualidade alto) |
+| `.s curto` | até 5 s — o orçamento de 500 KB compra mais qualidade por segundo |
+| `.s 6s` | duração exata, de 2 a 10 s (`.s 8,5s` também vale) |
+
+Cada conversão registra a decisão no log (`trecho 12.4s–22.4s · 96 quadros (15 fps) · enquadrado em 500x500+110+640 · fundo liso 0x1e8c3c · 68% do quadro · q=48`), e o resultado continua sendo um WebP padrão com pack/autor/emojis. Se a análise falhar por qualquer motivo, a conversão cai automaticamente na escada clássica — ninguém fica sem figurinha. **E há uma trava final de conformidade:** se o conteúdo for incompressível (ruído de TV, areia, chuva, Mandelbrot) e nem o piso de qualidade couber no orçamento, o bot aperta mais — compressão máxima, menos quadros, qualidade menor — e só no fim encurta a duração. Acima de 500 KB (animada) ou 100 KB (parada) nada sai: o teto interno fica 4 KB abaixo (496 KB / 98 KB) porque o VP8X + o EXIF do pack entram depois, e é o arquivo **final** que o WhatsApp mede.
+
 ### Jogos & arcade
 
 Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.jogos` para ver o catálogo; há uma partida de tabuleiro ativa por chat. Se alguém tentar abrir outro jogo com uma partida em curso, o bot explica qual partida está rolando, qual o progresso, como continuar e que `.encerrar` (ou `.jogos cancelar`) encerra a rodada atual. Os palpites aceitos podem ser enviados com o comando ou diretamente, sem prefixo. As dicas (`.termo dica`, `.forca dica`, `.quiz dica`, `.anagrama dica`, `.adivinhe dica`, `.minado dica`) são informadas uma única vez: depois de usadas, o jogo passa a exibir a informação revelada — a categoria na forca, a primeira letra no termo, casas e minas restantes no campo minado — e o rodapé para de repetir o comando.
@@ -507,6 +540,8 @@ npm run doctor
 ```
 
 A suíte executa os arquivos de teste em processos sequenciais, cada um com `NEXUS_DATA_DIR` temporário próprio (removido ao final), incluindo testes offline de jogos e alinhamento de tabuleiros, limites, cache, roteamento, migração, SSRF, redirecionamentos e streams.
+
+`node scripts/sticker-battery.mjs [filtro]` é a auditoria da conversão de figurinhas: gera 20 entradas sintéticas (celular com rotação, 16:9, vertical, quadrado, GIF, WebM/VP9, 10 fps, 60 fps, sem movimento, abertura preta, 90 s, 0,4 s, cena escura/clara, fundo liso, ruído incompressível, detalhe extremo, já 512×512, foto) e confere **cada saída** contra o que o WhatsApp aceita: exatamente 512×512, ≤100 KB parada, ≤500 KB animada, ≤10 s, nenhum quadro abaixo de 8 ms, duração preservada e vídeo com movimento que não vira figurinha parada. O tamanho medido é o do arquivo **com o EXIF do pack**, igual ao que sai para o WhatsApp, e a tabela mostra quanto do limite cada caso aproveitou (`97%`, `sem perdas`, `(trava)`). Sai com código 1 (e diz o motivo) se qualquer caso violar a spec.
 
 ## Estrutura
 

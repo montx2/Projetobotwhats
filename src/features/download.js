@@ -224,7 +224,7 @@ async function viaYtdlp(url, platform, { audioOnly, maxBytes, onProgress }) {
  * @param {'melhor'|'alta'|'media'|'baixa'} quality
  * @param {{audioOnly?: boolean, onProgress?: Function, maxBytes?: number}} [opts]
  *   `maxBytes` limita o tamanho de cada arquivo baixado (o `.s <link>` usa um
- *   teto menor: não faz sentido baixar 200 MB para uma figurinha de 7 s).
+ *   teto menor: não faz sentido baixar 200 MB para uma figurinha de 10 s).
  * @returns {Promise<{platform,title,author,duration,kind,buffers,audioBuffer,media}>}
  */
 export async function resolveDownload(url, quality = 'melhor', { audioOnly = false, onProgress, maxBytes } = {}) {

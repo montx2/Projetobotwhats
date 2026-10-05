@@ -16,7 +16,7 @@
 //   2) TIPO REAL PELO CONTEÚDO: extrator que falha costuma devolver a CAPA
 //      (um JPEG) no lugar do vídeo. Aqui os primeiros bytes mandam — vira
 //      figurinha estática em vez de um "vídeo" que o WhatsApp recusa.
-//   3) TETO DE TAMANHO: ninguém precisa baixar 200 MB para uma figurinha de 7 s.
+//   3) TETO DE TAMANHO: ninguém precisa baixar 200 MB para uma figurinha de 10 s.
 
 import { fetchBuffer, formatBytes, mediaReferer, shortUrl } from '../core/http.js';
 import { wait } from '../core/ui.js';
@@ -30,7 +30,7 @@ import { kindByExtension } from './downloaders/media.js';
 import { resolveDownload } from './download.js';
 import { extractStickerSource, makeSticker } from './sticker.js';
 
-/** Teto do download quando o destino é figurinha (7 s de WebP nunca precisa mais). */
+/** Teto do download quando o destino é figurinha (10 s de WebP nunca precisa mais). */
 export const MAX_STICKER_BYTES = 64 * 1024 * 1024;
 
 /** Quantos links um único comando aceita (`.s link1 link2 link3`). */
@@ -307,7 +307,7 @@ function rewordDownloadError(error, maxBytes) {
   const message = String(error?.message || error);
   if (!/grande demais|maxBytes/i.test(message)) return error;
   return new Error(
-    `o arquivo desse link passa de ${formatBytes(maxBytes)} — grande demais para uma figurinha de 7 s. ` +
+    `o arquivo desse link passa de ${formatBytes(maxBytes)} — grande demais para uma figurinha de 10 s. ` +
       'Use um link de vídeo curto (TikTok, Reels, Pin) ou baixe tudo com `.dl <link>`.'
   );
 }

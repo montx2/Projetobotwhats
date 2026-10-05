@@ -257,6 +257,9 @@ const ENV_SCHEMA = {
   removeBgKeys: () => envList('REMOVE_BG_KEYS'),
   removeBgUrls: () => envList('REMOVE_BG_URLS'),
   localRembg: () => envBool('LOCAL_REMBG', false),
+  // Recorte automático de fundo complexo em figurinha (foto/vídeo parado).
+  // Sem isto, a IA só roda quando o usuário pede (.sfundo).
+  stickerAiCut: () => envBool('STICKER_AI_CUT', false),
   geminiKeys: () => envList('GEMINI_KEYS'),
   geminiModels: () => envList('GEMINI_MODELS'),
   openaiKeys: () => envList('OPENAI_KEYS'),

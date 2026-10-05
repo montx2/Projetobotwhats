@@ -8,9 +8,27 @@
 import { cfg } from '../core/config.js';
 import { log } from '../core/logger.js';
 import { SYM } from '../core/ui.js';
-import { toStickerWebp, decodeWebpToPng, detectMediaExt, hasFfmpeg } from '../util/ffmpeg.js';
-import { isWebp, isAnimatedWebp, parseWebp, readStickerExif, tagSticker } from '../util/webp.js';
-import { removeBackground } from './bgremoval.js';
+import {
+  toStickerWebp,
+  decodeWebpToPng,
+  detectMediaExt,
+  hasFfmpeg,
+  stillFramePng,
+  alphaCoverage,
+  STICKER_MAX_SECONDS,
+  STICKER_ANIMATED_SPEC_BYTES
+} from '../util/ffmpeg.js';
+import {
+  isWebp,
+  isAnimatedWebp,
+  parseWebp,
+  readStickerExif,
+  tagSticker,
+  trimAnimatedWebp,
+  webpDurationMs
+} from '../util/webp.js';
+import { aiCutCouldHelp } from '../util/stickerbrain.js';
+import { removeBackground, bgAutoAllowed } from './bgremoval.js';
 import { formatBytes } from '../core/http.js';
 import { messageCache } from '../wa/cache.js';
 import { downloadWhatsAppMedia, MAX_WHATSAPP_MEDIA_BYTES } from '../wa/media.js';
@@ -324,11 +342,55 @@ export async function extractStickerSource(sock, msg, { onProgress, allowViewOnc
 }
 
 /**
+ * Fundo complexo em foto (ou vídeo que virou figurinha parada): a chave de cor
+ * não resolve, mas a IA sim. Roda sozinha só quando o operador permite
+ * (`rembg` local, ou `STICKER_AI_CUT=1` com remove.bg/endpoint configurado).
+ *
+ * Um quadro só é enviado — nunca a animação inteira: gastaria créditos (ou
+ * minutos de CPU) sem garantia de máscara consistente entre quadros. O
+ * resultado é validado: recorte vazio é descartado e a figurinha original fica.
+ *
+ * @returns {Promise<Buffer|null>} webp recortado, ou null para seguir sem IA
+ */
+async function tryAiCut({ smart, buffer, ext, isVideo, onProgress }) {
+  if (!smart || smart.mode !== 'static' || smart.cut) return null;
+  if (!aiCutCouldHelp(smart.cutState) || !bgAutoAllowed()) return null;
+
+  await onProgress?.(`${SYM.wait} Fundo complexo — removendo com IA… (pode levar alguns segundos)`);
+  let frame = buffer;
+  if (isVideo) {
+    frame = await stillFramePng(buffer, { seconds: smart.stillSeconds || 0, ext });
+    if (!frame) return null;
+  }
+
+  let cut;
+  let via;
+  try {
+    ({ buffer: cut, via } = await removeBackground(frame));
+  } catch (error) {
+    log.warn(`recorte automático por IA falhou (${String(error?.message || error).slice(0, 120)})`);
+    return null;
+  }
+
+  const visible = await alphaCoverage(cut);
+  if (visible !== null && visible < 0.02) {
+    log.warn(`recorte por IA devolveu imagem vazia (${via}) — mantendo a figurinha original`);
+    return null;
+  }
+
+  const { buffer: webp } = await toStickerWebp(cut, { animated: false, ext: '.png', fit: 'contain', onProgress });
+  log.ok(`fundo removido automaticamente via ${via} (${formatBytes(webp.length)})`);
+  await onProgress?.(`${SYM.wait} Fundo removido por IA (${via}) · gravando dados da figurinha…`);
+  return webp;
+}
+
+/**
  * Cria figurinha a partir da mídia.
  * @returns {Promise<Buffer>} webp pronto para enviar (com VP8X + EXIF válidos)
  */
-export async function makeSticker(source, { removeBg = false, pack, author, emojis, fit = 'fill', onProgress } = {}) {
-  const { buffer, type, node } = source;
+export async function makeSticker(source, { removeBg = false, pack, author, emojis, fit = 'fill', prefer = 'auto', seconds = 0, onProgress } = {}) {
+  let { buffer } = source;
+  const { type, node } = source;
   const mime = String(node?.mimetype || '').toLowerCase();
   const magicExt = detectMediaExt(buffer, '');
   const isStickerInput = type === 'sticker' || type === 'stickerMessage' || mime.includes('webp') || isWebp(buffer);
@@ -352,6 +414,34 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
     const info = parseWebp(buffer);
     const oldExif = readStickerExif(buffer);
     const finalEmojis = emojis?.length ? emojis : oldExif?.emojis;
+
+    // Figurinha animada vinda de fora: o WhatsApp aceita no máximo 10 s. O
+    // FFmpeg não decodifica WebP animado, então o corte é feito no contêiner
+    // (quadros ANMF finais fora) — sem reencode, sem perder qualidade.
+    if (info.animated) {
+      const durationMs = webpDurationMs(buffer);
+      if (durationMs > STICKER_MAX_SECONDS * 1000) {
+        const trim = trimAnimatedWebp(buffer, STICKER_MAX_SECONDS * 1000);
+        if (trim.dropped > 0) {
+          log.info(
+            `figurinha animada de ${(durationMs / 1000).toFixed(1)} s cortada para ` +
+              `${(trim.durationMs / 1000).toFixed(1)} s (${trim.dropped} quadro(s) fora do limite)`
+          );
+          await onProgress?.(
+            `${SYM.wait} Cortando a figurinha em ${STICKER_MAX_SECONDS} s (limite do WhatsApp)…`
+          );
+          buffer = trim.buffer;
+        }
+      }
+      if (buffer.length > STICKER_ANIMATED_SPEC_BYTES) {
+        log.warn(
+          `figurinha animada de ${formatBytes(buffer.length)} acima dos 500 KB do WhatsApp; ` +
+            'reenvie como imagem/vídeo para o bot reencodar dentro do limite'
+        );
+      }
+      await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
+      return tagSticker(buffer, { pack, author, emojis: finalEmojis });
+    }
 
     // Se for um WebP estático fora do padrão 512x512 e tivermos FFmpeg, padroniza em 512x512
     if (!info.animated && (info.width !== 512 || info.height !== 512) && hasFfmpeg()) {
@@ -393,11 +483,94 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
     return tagSticker(webp, { pack, author, emojis });
   }
 
-  await onProgress?.(`${SYM.wait} ${isVideo ? 'Convertendo vídeo/GIF em figurinha animada…' : 'Convertendo imagem em figurinha 512×512…'}`);
+  await onProgress?.(
+    `${SYM.wait} ${
+      isVideo
+        ? `Convertendo vídeo/GIF em figurinha animada (até ${STICKER_MAX_SECONDS} s)…`
+        : 'Convertendo imagem em figurinha 512×512…'
+    }`
+  );
   const ext = magicExt || (isGif ? '.gif' : isVideo ? '.mp4' : mime.includes('png') ? '.png' : '.jpg');
-  const { buffer: webp } = await toStickerWebp(buffer, { animated: isVideo, ext, fit, onProgress });
+  const { buffer: webp, smart } = await toStickerWebp(buffer, {
+    animated: isVideo,
+    ext,
+    fit,
+    prefer,
+    maxSeconds: seconds || STICKER_MAX_SECONDS,
+    onProgress
+  });
+  // O motor inteligente explica o que decidiu (trecho, quadros, crop, qualidade).
+  if (smart) {
+    const cut = smart.cut ? ` · ${smart.cut}` : '';
+    const modo = PREF_LABEL[smart.prefer] ? ` · modo ${PREF_LABEL[smart.prefer]}` : '';
+    // Quanto do limite do WhatsApp a figurinha aproveitou: o motor enche o
+    // orçamento com qualidade (e sem perdas quando cabe), então isso mostra se
+    // ainda sobrou espaço que o conteúdo não conseguiu usar.
+    const uso = smart.fill ? formatFillUse(smart.fill) : '';
+    if (smart.mode === 'static') {
+      log.info(
+        `motivo: ${smart.reason} · quadro em ${smart.stillSeconds}s${cut} · q=${smart.q} · ${formatBytes(smart.bytes)}${uso}`
+      );
+    } else {
+      const end = (smart.startSeconds + smart.durationSeconds).toFixed(2);
+      log.info(
+        `trecho ${smart.startSeconds}s–${end}s · ${smart.framesKept ?? smart.frames} quadros (${smart.targetFps} fps)${modo}` +
+          `${smart.crop ? ` · enquadrado em ${smart.crop}` : ''}${cut} · q=${smart.q} · ${formatBytes(smart.bytes)}` +
+          ` · ${smart.probes} medição(ões)${uso}`
+      );
+    }
+  }
+  // Fundo complexo em foto/vídeo parado: tenta a IA (opt-in) antes de fechar.
+  const aiCut = await tryAiCut({ smart, buffer, ext, isVideo, onProgress });
+  if (aiCut) return tagSticker(aiCut, { pack, author, emojis });
+
   await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
   return tagSticker(webp, { pack, author, emojis });
+}
+
+/**
+ * Palavras do usuário para o trade-off da animação (`.s liso`, `.s hd`,
+ * `.s curto`, `.s 6s`):
+ *  - liso/fluido  → fluidez máxima (15 fps), qualidade menor por quadro;
+ *  - nítido/hd    → imagem mais limpa, menos quadros;
+ *  - curto        → até 5 s (o orçamento de 500 KB compra mais qualidade);
+ *  - `6s`/`8s`    → duração exata (2 a 10 s).
+ * Sem nada disso, o motor decide pelo movimento (automático).
+ */
+const PREF_WORDS = {
+  smooth: ['liso', 'lisa', 'fluido', 'fluida', 'fluidez', 'smooth', 'movimento'],
+  sharp: ['nitido', 'nítido', 'nitidez', 'hd', 'qualidade', 'quality', 'sharp', 'cristalino', 'cristalina']
+};
+const SHORT_WORDS = ['curto', 'curta', 'curtinha', 'rapido', 'rápido', 'resumido', 'shorter'];
+
+export function parseStickerPrefs(args = []) {
+  const words = args.map((a) => String(a).toLowerCase().replace(/^[-–—]+/, '').replace(/^#/, ''));
+  let prefer = 'auto';
+  let seconds = 0;
+  for (const word of words) {
+    if (PREF_WORDS.smooth.includes(word)) prefer = 'smooth';
+    else if (PREF_WORDS.sharp.includes(word)) prefer = 'sharp';
+    else if (SHORT_WORDS.includes(word)) seconds = 5;
+    const match = /^(\d{1,2}(?:[.,]\d)?)s$/.exec(word);
+    if (match) seconds = Number(match[1].replace(',', '.'));
+  }
+  const clamped = seconds ? Math.min(STICKER_MAX_SECONDS, Math.max(2, seconds)) : 0;
+  return { prefer, seconds: clamped };
+}
+
+const PREF_LABEL = { smooth: 'liso (fluidez)', sharp: 'nítido (imagem)' };
+
+/**
+ * Explica no log quanto do limite do WhatsApp a figurinha aproveitou. O motor
+ * gasta o orçamento inteiro em fidelidade, então um número baixo quer dizer que
+ * o conteúdo não rende mais bytes — não que falhou coisa.
+ */
+function formatFillUse(fill) {
+  const pct = Math.round((fill.ratio ?? 0) * 100);
+  if (fill.emergency) return ` · usa ${pct}% do limite (conteúdo pesado, travado na spec)`;
+  if (fill.lossless) return ` · usa ${pct}% do limite (sem perdas: teto de qualidade)`;
+  if (pct >= 90) return ` · usa ${pct}% do limite`;
+  return ` · usa ${pct}% do limite (o codificador não gasta mais sem perder nitidez)`;
 }
 
 const FIT_WORDS = {

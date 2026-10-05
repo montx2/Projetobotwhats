@@ -289,10 +289,13 @@ test('asset liso/gradiente de página genérica NÃO vira figurinha', { skip: !h
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stickerlink-flat-'));
   const assetPath = path.join(dir, 'asset.jpg');
   const base = ['-loglevel', 'error', '-y', '-f', 'lavfi'];
-  const gradiente =
-    spawnSync('ffmpeg', [...base, '-i', 'gradients=s=600x600:c0=0xff00ff:c1=0xffd400', '-frames:v', '1', assetPath]).status === 0 ||
-    spawnSync('ffmpeg', [...base, '-i', 'color=c=0xff00ff:size=600x600', '-frames:v', '1', assetPath]).status === 0;
-  if (!gradiente) {
+  // Asset CHAPADO (determinístico): é o placeholder clássico que as redes servem
+  // quando escondem o post. O caso do gradiente liso é coberto no unit.test.mjs
+  // pela própria `gradeImageSamples` — aqui interessa o caminho completo, e o
+  // filtro `gradients` do FFmpeg sorteia cores (às vezes com detalhe suficiente
+  // para passar como imagem real, o que tornava este teste instável).
+  const chapado = spawnSync('ffmpeg', [...base, '-i', 'color=c=0xff00ff:size=600x600', '-frames:v', '1', assetPath]).status === 0;
+  if (!chapado) {
     fs.rmSync(dir, { recursive: true, force: true });
     return;
   }

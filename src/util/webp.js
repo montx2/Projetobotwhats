@@ -150,6 +150,73 @@ export function isAnimatedWebp(buf) {
   }
 }
 
+/**
+ * Duração total de uma figurinha animada WebP, em milissegundos.
+ *
+ * Cada quadro vive num chunk ANMF com 16 bytes de cabeçalho — 3 de posição X,
+ * 3 de Y, 3 de largura-1, 3 de altura-1, 3 de duração (ms) e 1 de flags — e a
+ * soma das durações é o tempo total da animação. WebP estático devolve 0.
+ *
+ * @param {Buffer} buf arquivo WebP
+ * @returns {number} duração em ms (0 quando não é animada ou não dá para ler)
+ */
+export function webpDurationMs(buf) {
+  try {
+    if (!isWebp(buf)) return 0;
+    let total = 0;
+    for (const c of parseWebp(buf).chunks) {
+      if (c.type !== 'ANMF' || c.data.length < 16) continue;
+      total += c.data.readUIntLE(12, 3);
+    }
+    return total;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Corta uma figurinha animada no teto de duração sem reencodar nada.
+ *
+ * O FFmpeg (e portanto o conversor do bot) não decodifica WebP animado — só
+ * imagem parada. Como os quadros vivem em chunks ANMF independentes, dá para
+ * respeitar o limite de 10 s do WhatsApp descartando os quadros FINAIS e
+ * remontando o RIFF: nenhum pixel é reencodado e o resultado continua um WebP
+ * animado válido (VP8X/ANIM/ALPH intactos).
+ *
+ * @param {Buffer} buf WebP animado
+ * @param {number} maxMs teto de duração em ms
+ * @returns {{buffer: Buffer, durationMs: number, frames: number, dropped: number}}
+ */
+export function trimAnimatedWebp(buf, maxMs = Infinity) {
+  const parsed = parseWebp(buf);
+  if (!parsed.animated) return { buffer: buf, durationMs: 0, frames: 0, dropped: 0 };
+
+  const chunks = [];
+  let total = 0;
+  let frames = 0;
+  let dropped = 0;
+  let full = false;
+  for (const c of parsed.chunks) {
+    if (c.type !== 'ANMF') {
+      // VP8X/ANIM/ALPH e chunks do fim (EXIF/XMP) passam direto.
+      chunks.push(c);
+      continue;
+    }
+    const dur = c.data.length >= 16 ? c.data.readUIntLE(12, 3) : 0;
+    // Sempre fica pelo menos um quadro; o resto corta no primeiro que estourar.
+    if (full || (frames > 0 && total + dur > maxMs)) {
+      dropped++;
+      full = true;
+      continue;
+    }
+    total += dur;
+    frames++;
+    chunks.push(c);
+  }
+  if (!dropped) return { buffer: buf, durationMs: total, frames, dropped: 0 };
+  return { buffer: buildRiff(chunks), durationMs: total, frames, dropped };
+}
+
 export function packId(pack = '', author = '') {
   return crypto.createHash('sha1').update(`${pack}\u0000${author}`).digest('hex').slice(0, 32);
 }
