@@ -158,14 +158,39 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .info                            → status do bot (exclusivo do dono)
 ```
 
-### Figurinhas: limite de duração e motor inteligente
+### Figurinhas: `.s` simples e `.figurinha` com ajustes
 
-O WhatsApp aceita WebP de exatamente **512×512**: até **100 KB** na figurinha parada e até **500 KB e 10 segundos** de animação na animada.
+O WhatsApp aceita WebP de exatamente **512×512**: até **100 KB** na figurinha parada e até **500 KB e 10 segundos** de animação na animada. Nenhuma figurinha sai do bot fora disso — vale para os dois comandos abaixo.
 
-**A duração é a última coisa a cair.** Ao converter um vídeo/GIF de até 10 s, a qualidade e o FPS caem antes da duração — os 10 segundos só são encurtados (8 s, 6 s, 5 s, 4 s, 3 s) se nem a compressão mínima couber em 500 KB. Vídeo maior que 10 s é cortado nos 10 s, e uma figurinha animada recebida pronta e com mais de 10 s perde apenas os quadros finais, sem reencode (o bot corta os quadros no próprio contêiner WebP, porque o FFmpeg não decodifica WebP animado). Para regerar uma animação acima de 500 KB, reenvie o vídeo/imagem original — aí o bot reencoda dentro do limite.
+**`.s` é a figurinha simples de sempre** (apelidos `.fig` e `.figu`). Foto, vídeo, GIF, link, mídia citada ou view once (só no privado do dono) viram uma figurinha 512×512 **esticada** para preencher o quadrado todo — esse é o padrão, sem análise e sem surpresa (figurinha recebida ganha o pack/autor do bot):
 
-**Antes de encodar, o bot analisa a mídia** (quadros minúsculos de 32×32 com cor, ~0,1 s de FFmpeg) e decide o que fazer com ela — como os grandes apps de figurinha:
+| Comando | O que faz |
+| --- | --- |
+| `.s` | estica para 512×512, ignorando a proporção (`.s preencher` é o mesmo) |
+| `.s inteira` | imagem completa, sem esticar, com faixas transparentes |
+| `.s cortar` | preenche o quadrado sem esticar, cortando as bordas |
 
+Vídeo e GIF viram animação a partir do começo, com até **7 s**: se não couber no limite, o bot baixa FPS, qualidade e duração juntos (7 → 6 → 5 → 4 → 3 s) até caber. Foto desce a qualidade até caber em 100 KB. O `.s` não escolhe trecho, não fecha loop, não enquadra assunto, não recorta fundo e não chama IA — palavras como `liso`, `hd`, `curto` ou `6s` são ignoradas nele. Isso tudo é do `.figurinha`.
+
+Figurinha animada recebida pronta com mais de 10 s perde apenas os quadros finais, sem reencode (o bot corta os quadros no próprio contêiner WebP, porque o FFmpeg não decodifica WebP animado). Para regerar uma animação acima de 500 KB, reenvie o vídeo/imagem original — aí o bot reencoda dentro do limite.
+
+#### `.figurinha` — ajustes finos (comando fora do menu)
+
+`.figurinha` (ou `.sticker`/`.stiker`) é o pedido de figurinha com o **motor inteligente** e todos os ajustes numa linha só. Ele **não aparece em menu nenhum**, de propósito: quem manda `.figurinha` sozinho (sem mídia e sem link) recebe este guia curto.
+
+| Responda uma mídia (ou mande um link) com | O que faz |
+| --- | --- |
+| `.figurinha` | automático: melhor trecho, loop fechado e assunto enquadrado (até 10 s) |
+| `.figurinha fundo` | remove o fundo (IA — o mesmo provedor do `.sfundo`) |
+| `.figurinha hd` · `.figurinha liso` | mais nitidez · mais fluidez |
+| `.figurinha curto` · `.figurinha 6s` | 5 s · duração exata, de 2 a 10 s (`8,5s` também vale) |
+| `.figurinha inteira` · `.figurinha cortar` | imagem completa, sem esticar · preenche cortando as bordas |
+
+As palavras combinam em qualquer ordem (`.figurinha fundo hd 6s`, `.figurinha 8s cortar`) e palavra desconhecida é ignorada. Sinônimos aceitos: `semfundo`, `sfundo`, `rmbg`, `removefundo`, `removebg`, `bg` (fundo); `fluido`, `fluidez`, `movimento` (liso); `nitido`, `nitidez`, `qualidade` (hd); `curta`, `rapido`, `resumido` (curto); `original`, `proporcao` (inteira); `corte`, `crop`, `centro` (cortar); `preencher`, `esticar` (o padrão). Sem provedor de remoção de fundo configurado, o `fundo` responde com o mesmo aviso do `.sfundo`.
+
+**O que o motor do `.figurinha` faz.** Antes de encodar, o bot analisa a mídia (quadros minúsculos de 32×32 com cor, ~0,1 s de FFmpeg) e decide o que fazer com ela — como os grandes apps de figurinha:
+
+- **A duração é a última coisa a cair** — num vídeo/GIF de até 10 s, a qualidade e o FPS caem antes da duração; os 10 segundos só são encurtados (8 s, 6 s, 5 s, 4 s, 3 s) se nem a compressão mínima couber em 500 KB.
 - **Escolhe o melhor trecho de até 10 s** — o de mais movimento e com emenda de loop mais suave; não é sempre o começo do vídeo (um vídeo de 40 s, por exemplo, pode render o trecho dos 12 s aos 22 s). Em vídeos longos o trecho sai dos primeiros 60 s.
 - **Fecha o loop** — encurta o fim em até 0,4 s para o último quadro parecer o primeiro e a animação não "pular" ao repetir.
 - **Enquadra o assunto** — recorta um quadrado ao redor do que se mexe (nunca menos de 55% do lado menor), então o sujeito aparece grande em vez de perdido no quadro. Vídeo em que a ação já ocupa quase tudo não é recortado.
@@ -179,17 +204,9 @@ O WhatsApp aceita WebP de exatamente **512×512**: até **100 KB** na figurinha 
 - **Aproveita o limite inteiro — é o máximo que o WhatsApp permite** — depois que a figurinha já cabe, o que sobrou do orçamento vira fidelidade: a qualidade sobe até 100, os quadros que o orçamento tinha cortado voltam (numa figurinha pequena, movimento suave vale mais que detalhe fino) e, se ainda sobrar espaço de verdade, o bot tenta a codificação **sem perdas** — o teto absoluto do WebP. Em cena chapada ou recortada o sem perdas costuma sair até **menor** e pixel-perfect, então ele vence sempre que cabe. Nada acima do limite é aceito, e o log diz quanto foi usado (`usa 97% do limite`, ou `sem perdas: teto de qualidade`). Número baixo não é desperdício: quer dizer que o conteúdo não rende mais bytes sem perder nitidez.
 - **Vídeo sem movimento vira figurinha parada** — em alta qualidade, menor e sem o "pisca" de uma animação que não anima nada.
 
-**Você pode mandar no resultado** (opcional — sem nada disso o motor decide sozinho):
+Cada conversão do `.figurinha` registra a decisão no log (`trecho 12.4s–22.4s · 96 quadros (15 fps) · enquadrado em 500x500+110+640 · fundo liso 0x1e8c3c · 68% do quadro · q=48`), e o resultado continua sendo um WebP padrão com pack/autor/emojis. Se a análise falhar por qualquer motivo, a conversão cai automaticamente numa escada de reserva (que também preserva os 10 s) — ninguém fica sem figurinha.
 
-| Comando | O que muda |
-| --- | --- |
-| `.s` | automático: o motor equilibra duração, fluidez e nitidez pelo movimento do vídeo |
-| `.s liso` | prioriza fluidez (até 15 fps), aceitando qualidade um pouco menor por quadro |
-| `.s hd` | prioriza nitidez (menos quadros, piso de qualidade alto) |
-| `.s curto` | até 5 s — o orçamento de 500 KB compra mais qualidade por segundo |
-| `.s 6s` | duração exata, de 2 a 10 s (`.s 8,5s` também vale) |
-
-Cada conversão registra a decisão no log (`trecho 12.4s–22.4s · 96 quadros (15 fps) · enquadrado em 500x500+110+640 · fundo liso 0x1e8c3c · 68% do quadro · q=48`), e o resultado continua sendo um WebP padrão com pack/autor/emojis. Se a análise falhar por qualquer motivo, a conversão cai automaticamente na escada clássica — ninguém fica sem figurinha. **E há uma trava final de conformidade:** se o conteúdo for incompressível (ruído de TV, areia, chuva, Mandelbrot) e nem o piso de qualidade couber no orçamento, o bot aperta mais — compressão máxima, menos quadros, qualidade menor — e só no fim encurta a duração. Acima de 500 KB (animada) ou 100 KB (parada) nada sai: o teto interno fica 4 KB abaixo (496 KB / 98 KB) porque o VP8X + o EXIF do pack entram depois, e é o arquivo **final** que o WhatsApp mede.
+**Trava final de conformidade (nos dois comandos):** se o conteúdo for incompressível (ruído de TV, areia, chuva, Mandelbrot) e nem o último degrau couber no orçamento, o bot aperta mais — compressão máxima, menos quadros, qualidade menor — e só no fim encurta a duração. Acima de 500 KB (animada) ou 100 KB (parada) nada sai: o teto interno fica abaixo do limite (496 KB / 98 KB no `.figurinha`, 480 KB / 98 KB no `.s`) porque o VP8X + o EXIF do pack entram depois, e é o arquivo **final** que o WhatsApp mede.
 
 ### Jogos & arcade
 
@@ -541,7 +558,7 @@ npm run doctor
 
 A suíte executa os arquivos de teste em processos sequenciais, cada um com `NEXUS_DATA_DIR` temporário próprio (removido ao final), incluindo testes offline de jogos e alinhamento de tabuleiros, limites, cache, roteamento, migração, SSRF, redirecionamentos e streams.
 
-`node scripts/sticker-battery.mjs [filtro]` é a auditoria da conversão de figurinhas: gera 20 entradas sintéticas (celular com rotação, 16:9, vertical, quadrado, GIF, WebM/VP9, 10 fps, 60 fps, sem movimento, abertura preta, 90 s, 0,4 s, cena escura/clara, fundo liso, ruído incompressível, detalhe extremo, já 512×512, foto) e confere **cada saída** contra o que o WhatsApp aceita: exatamente 512×512, ≤100 KB parada, ≤500 KB animada, ≤10 s, nenhum quadro abaixo de 8 ms, duração preservada e vídeo com movimento que não vira figurinha parada. O tamanho medido é o do arquivo **com o EXIF do pack**, igual ao que sai para o WhatsApp, e a tabela mostra quanto do limite cada caso aproveitou (`97%`, `sem perdas`, `(trava)`). Sai com código 1 (e diz o motivo) se qualquer caso violar a spec.
+`node scripts/sticker-battery.mjs [filtro]` é a auditoria da conversão de figurinhas do motor inteligente (o do `.figurinha`): gera 20 entradas sintéticas (celular com rotação, 16:9, vertical, quadrado, GIF, WebM/VP9, 10 fps, 60 fps, sem movimento, abertura preta, 90 s, 0,4 s, cena escura/clara, fundo liso, ruído incompressível, detalhe extremo, já 512×512, foto) e confere **cada saída** contra o que o WhatsApp aceita: exatamente 512×512, ≤100 KB parada, ≤500 KB animada, ≤10 s, nenhum quadro abaixo de 8 ms, duração preservada e vídeo com movimento que não vira figurinha parada. O tamanho medido é o do arquivo **com o EXIF do pack**, igual ao que sai para o WhatsApp, e a tabela mostra quanto do limite cada caso aproveitou (`97%`, `sem perdas`, `(trava)`). Sai com código 1 (e diz o motivo) se qualquer caso violar a spec.
 
 ## Estrutura
 
