@@ -244,5 +244,7 @@ export function bgStatus() {
   parts.push(keyPool.size ? `remove.bg: ${keyPool.available}/${keyPool.size} chaves ativas` : 'remove.bg: sem chaves no .env');
   parts.push(urlPool.size ? `endpoints: ${urlPool.available}/${urlPool.size}` : 'endpoints: nenhum');
   parts.push(ENV.localRembg ? 'rembg local: ativo' : 'rembg local: off');
+  const auto = ENV.localRembg ? 'on (rembg local)' : ENV.stickerAiCut ? 'on (API)' : 'off';
+  parts.push(`recorte automático de fundo complexo: ${auto}`);
   return parts;
 }
