@@ -15,6 +15,7 @@ import {
   chooseLoop,
   chooseWindows,
   cropPixels,
+  deadLeadFrames,
   framesForQualityFloor,
   isStaticWindow,
   parseSourceMeta,
@@ -51,9 +52,49 @@ test('parseSourceMeta lê tamanho e duração do stderr do FFmpeg', () => {
   const meta = parseSourceMeta(stderr);
   assert.equal(meta.width, 720);
   assert.equal(meta.height, 1280);
+  assert.equal(meta.rotation, 0);
   assert.equal(meta.durationMs, 14_030);
   assert.equal(meta.durationKnown, true);
-  assert.deepEqual(parseSourceMeta('nada'), { width: 0, height: 0, durationMs: 0, durationKnown: false });
+  assert.deepEqual(parseSourceMeta('nada'), {
+    width: 0,
+    height: 0,
+    rotation: 0,
+    durationMs: 0,
+    durationKnown: false
+  });
+});
+
+test('parseSourceMeta troca as dimensões em vídeo rotacionado (celular em pé)', () => {
+  // stderr real do FFmpeg 7 com um MP4 de celular: codificado 1280x720 com
+  // matriz de exibição -90°, e o FFmpeg autorrota para 720x1280 na decodificação.
+  const rotated = `Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'VID_20260101.mp4':
+  Duration: 00:00:08.00, start: 0.000000, bitrate: 1500 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 1280x720 [SAR 1:1 DAR 16:9], 30 fps
+    Side data:
+      displaymatrix: rotation of -90.00 degrees
+        displaymatrix: rotation of -0.00 degrees
+`;
+  const meta = parseSourceMeta(rotated);
+  assert.equal(meta.rotation, -90);
+  assert.equal(meta.width, 720, 'o quadro decodificado é 720 de largura');
+  assert.equal(meta.height, 1280);
+
+  // Metadados antigos ('rotate: 90') também contam.
+  const legacy = '  Duration: 00:00:05.00, start: 0.0\n  Stream #0:0: Video: h264, yuv420p, 1920x1080, 25 fps\n    rotate          : 90\n';
+  const legacyMeta = parseSourceMeta(legacy);
+  assert.equal(legacyMeta.rotation, 90);
+  assert.equal(legacyMeta.width, 1080);
+  assert.equal(legacyMeta.height, 1920);
+
+  // E o crop calculado com essas dimensões precisa caber no quadro de verdade.
+  const analysis = analyzeFrames(synthVideo({ frames: 60, place: (f) => ({ x: 2 + (f % 6), y: 24 }) }), {
+    sampleFps: 15,
+    width: meta.width,
+    height: meta.height
+  });
+  const crop = cropPixels(activityBox(analysis, { start: 0, end: 59 }), meta.width, meta.height);
+  assert.ok(crop, 'deve enquadrar o assunto');
+  assert.ok(crop.x + crop.w <= 720 && crop.y + crop.h <= 1280, 'crop dentro do quadro rotacionado');
 });
 
 test('analyzeFrames mede movimento e brilho quadro a quadro', () => {
@@ -101,6 +142,33 @@ test('chooseLoop fecha o loop num ponto em que o quadro final parece o inicial',
   let diff = 0;
   for (let i = 0; i < 64; i++) diff += Math.abs(seam[first + i] - seam[last + i]);
   assert.ok(diff / 64 / 255 < 0.02, `emenda suave (${diff / 64 / 255})`);
+});
+
+test('deadLeadFrames poda abertura preta e respeita o teto de 40%', () => {
+  // 30 quadros pretos + 60 quadros de bloco em movimento.
+  const frames = 90;
+  const raw = Buffer.alloc(frames * GRID * GRID, 0);
+  for (let f = 30; f < frames; f++) {
+    const base = f * GRID * GRID;
+    for (let i = 0; i < GRID * GRID; i++) raw[base + i] = 40;
+    const x = 2 + ((f - 30) % 12);
+    for (let y = 12; y < 20; y++) for (let px = x; px < x + 8; px++) raw[base + y * GRID + px] = 220;
+  }
+  const analysis = analyzeFrames(raw, { sampleFps: 15, width: 720, height: 1280 });
+  assert.equal(deadLeadFrames(analysis, { start: 0, end: 89 }), 30);
+
+  // Vídeo curto com abertura morta: a janela escolhida pula o preto.
+  const windows = chooseWindows(analysis, { maxSeconds: 10, limit: 3 });
+  assert.ok(windows[0].start >= 28, `começou em ${windows[0].start} (o preto foi deixado de fora)`);
+  assert.equal(windows[0].end, 89, 'o resto da duração é preservado');
+
+  // Sem abertura morta, nada é podado.
+  const clean = analyzeFrames(synthVideo({ frames: 60, place: (f) => ({ x: 2 + (f % 8), y: 12 }) }), {
+    sampleFps: 15,
+    width: 720,
+    height: 1280
+  });
+  assert.equal(deadLeadFrames(clean, { start: 0, end: 59 }), 0);
 });
 
 test('planSchedule guarda mais quadros onde há movimento', () => {

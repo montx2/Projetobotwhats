@@ -385,12 +385,21 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
   if (!analysis) return null;
   const analysisMs = Date.now() - analysisStart;
 
-  const plan = planSticker(analysis, {
+  let plan = planSticker(analysis, {
     maxSeconds,
     budgetBytes: STICKER_ANIMATED_MAX_BYTES,
     autoCrop
   });
   if (!plan) return null;
+  // Rede de segurança: se o recorte não couber no quadro real (rotação/SAR
+  // exóticos, metadados mentirosos), refaz o plano sem ele em vez de perder o
+  // motor inteiro. O importantíssimo é entregar a figurinha.
+  const withoutCrop = () => {
+    if (!plan.crop) return null;
+    plan = planSticker(analysis, { maxSeconds, budgetBytes: STICKER_ANIMATED_MAX_BYTES, autoCrop: false });
+    if (plan) plan.crop = null;
+    return plan;
+  };
 
   const report = {
     mode: plan.mode,
@@ -420,8 +429,20 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
     report.stillSeconds = Number((plan.stillMs / 1000).toFixed(2));
     await onProgress?.(`🧠 ${plan.reason} — montando a melhor foto…`);
     let best = null;
+    let first = true;
     for (const step of [{ q: 82 }, { q: 68 }, { q: 52 }, { q: 36 }, { q: 22 }]) {
-      const buf = await encodePlanned(inFile, outFile, { plan, q: step.q, keep: null, fit, animated: false });
+      let buf;
+      try {
+        buf = await encodePlanned(inFile, outFile, { plan, q: step.q, keep: null, fit, animated: false });
+      } catch (error) {
+        if (first && withoutCrop()) {
+          report.cropDropped = true;
+          buf = await encodePlanned(inFile, outFile, { plan, q: step.q, keep: null, fit, animated: false });
+        } else {
+          throw error;
+        }
+      }
+      first = false;
       report.probes++;
       if (!best || buf.length < best.length) best = { buf, q: step.q };
       if (buf.length <= STICKER_STATIC_MAX_BYTES) {
@@ -472,7 +493,15 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
 
   let keep = plan.schedule;
   let q = startQ;
-  let buf = await probe(q, keep);
+  let buf;
+  try {
+    buf = await probe(q, keep);
+  } catch (error) {
+    if (!withoutCrop()) throw error;
+    report.cropDropped = true;
+    keep = plan.schedule;
+    buf = await probe(q, keep);
+  }
 
   if (buf.length > budget) {
     // Quantos quadros o orçamento compra no piso de qualidade?

@@ -48,25 +48,41 @@ export const CROP_SKIP_RATIO = 0.9;
 // ── Análise ────────────────────────────────────────────────────────────────
 
 /**
- * Lê largura/altura/duração do stderr do FFmpeg (funciona sem ffprobe).
+ * Lê largura/altura/duração/rotação do stderr do FFmpeg (funciona sem ffprobe).
+ *
+ * ATENÇÃO À ROTAÇÃO: vídeo de celular em pé costuma ser gravado deitado e
+ * marcado com uma matriz de exibição (displaymatrix). O FFmpeg autorrota na
+ * decodificação, então o filtro recebe as dimensões TROCADAS em relação ao
+ * cabeçalho do stream. Sem corrigir isso, o enquadramento automático seria
+ * calculado para um quadro que não existe — e o crop sairia errado ou fora dos
+ * limites (derrubando a conversão inteligente inteira).
+ *
  * @param {string} stderr saída de erro do `ffmpeg -i`
+ * @returns {{width: number, height: number, rotation: number, durationMs: number, durationKnown: boolean}}
  */
 export function parseSourceMeta(stderr) {
   const text = String(stderr || '');
   const size = /Video:[^\n]*?\b(\d{2,5})x(\d{2,5})\b/.exec(text);
   const duration = /Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(text);
+  // A primeira matriz do dump é a do stream de entrada (as seguintes são da saída).
+  const matrix = /displaymatrix:\s*rotation of (-?\d+(?:\.\d+)?) degrees/.exec(text);
+  const legacy = /rotate\s*:\s*(-?\d+(?:\.\d+)?)/.exec(text);
+  const rotation = Number(matrix?.[1] ?? legacy?.[1] ?? 0) || 0;
+
+  let width = size ? Number(size[1]) : 0;
+  let height = size ? Number(size[2]) : 0;
+  // Rotação de 90°/270° significa que o quadro decodificado está deitado/de pé
+  // ao contrário: as dimensões usadas nos cálculos precisam ser trocadas.
+  const swapped = Math.abs(Math.round(rotation)) % 180 === 90;
+  if (swapped) [width, height] = [height, width];
+
   let durationMs = 0;
   if (duration) {
     durationMs = Math.round(
       (Number(duration[1]) * 3600 + Number(duration[2]) * 60 + Number(duration[3])) * 1000
     );
   }
-  return {
-    width: size ? Number(size[1]) : 0,
-    height: size ? Number(size[2]) : 0,
-    durationMs,
-    durationKnown: Boolean(duration) && durationMs > 0
-  };
+  return { width, height, rotation, durationMs, durationKnown: Boolean(duration) && durationMs > 0 };
 }
 
 /**
@@ -195,11 +211,37 @@ function scoreWindow(analysis, start, end) {
   // Primeiro quadro escuro (abertura em preto) estraga a prévia da figurinha.
   const windowBrightness = [];
   for (let i = start; i <= end; i++) windowBrightness.push(analysis.brightness[i]);
-  const midBrightness = median(windowBrightness) || 0.5;
-  const darkFactor = analysis.brightness[start] < midBrightness * 0.5 ? 0.7 : 1;
+  const midBrightness = median(windowBrightness) || 0;
+  const darkThreshold = Math.max(0.06, midBrightness * 0.5);
+  const darkFactor = analysis.brightness[start] < darkThreshold ? 0.7 : 1;
 
   const startSeconds = start / analysis.sampleFps;
   return motionScore * seamFactor * darkFactor - 0.0004 * startSeconds;
+}
+
+/**
+ * Quantos quadros do começo são "nada para ver": fade de abertura, tela preta,
+ * cartela escura. Só conta quadros ESCUROS de propósito — trecho claro e parado
+ * pode ser conteúdo (a pessoa segurando uma pose) e não é podado.
+ *
+ * @returns {number} quadros a pular no início (0 quando não há o que podar)
+ */
+export function deadLeadFrames(analysis, { start = 0, end = analysis.frameCount - 1, maxSeconds = 4 } = {}) {
+  const windowBrightness = [];
+  for (let i = start; i <= end; i++) windowBrightness.push(analysis.brightness[i]);
+  // Vídeo quase todo escuro (fade longo, cena noturna) tem mediana ~0: o
+  // limiar fixo abaixo ainda enxerga o que é "nada" no começo, e o teto de
+  // 40% impede que a poda coma o vídeo inteiro.
+  const mid = median(windowBrightness) || 0;
+  const limit = Math.max(1, Math.round(maxSeconds * analysis.sampleFps));
+  const maxTrim = Math.floor((end - start + 1) * 0.4); // nunca come 40% da figurinha
+  const threshold = Math.max(0.06, mid * 0.4);
+  let n = 0;
+  while (n < Math.min(limit, maxTrim) && start + n < end - 1) {
+    if (analysis.brightness[start + n] >= threshold) break;
+    n++;
+  }
+  return n;
 }
 
 /**
@@ -207,13 +249,31 @@ function scoreWindow(analysis, start, end) {
  * "história", não um plano parado), emenda de loop, brilho inicial e uma leve
  * preferência pelo começo do vídeo.
  *
+ * Vídeo curto (cabe inteiro) tem uma escolha a mais: onde COMEÇAR. É assim que
+ * uma abertura preta/fade sai da figurinha — o resto da duração é preservado,
+ * só o "nada acontecendo" da frente é que fica de fora.
+ *
  * @returns {Array<{start: number, end: number, score: number}>} melhor primeiro
  */
 export function chooseWindows(analysis, { maxSeconds = 10, limit = 3 } = {}) {
   const fps = analysis.sampleFps;
   const last = analysis.frameCount - 1;
   const span = Math.min(analysis.frameCount, Math.max(2, Math.round(maxSeconds * fps)));
-  if (span >= analysis.frameCount) return [{ start: 0, end: last, score: 1 }];
+
+  if (span >= analysis.frameCount) {
+    const deadLead = deadLeadFrames(analysis, { start: 0, end: last });
+    const candidates = [0];
+    if (deadLead > 1) {
+      candidates.push(deadLead);
+      // Um pouco antes do fim do trecho morto: evita abrir em cima do 1º quadro
+      // "de verdade", que ainda costuma estar no meio do fade.
+      candidates.push(Math.max(0, deadLead - 2));
+    }
+    return candidates
+      .map((start) => ({ start, end: last, score: scoreWindow(analysis, start, last) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(1, limit));
+  }
 
   const step = Math.max(1, Math.round(fps / 2)); // candidatos a cada 0,5 s
   const windows = [];
@@ -239,25 +299,33 @@ export function chooseWindows(analysis, { maxSeconds = 10, limit = 3 } = {}) {
 export function chooseLoop(analysis, { maxSeconds = 10, candidates } = {}) {
   const span = Math.min(analysis.frameCount, Math.max(2, Math.round(maxSeconds * analysis.sampleFps)));
   const last = analysis.frameCount - 1;
-  // Vídeo curto: cabe inteiro, não há o que cortar.
-  if (span >= analysis.frameCount) {
-    return { start: 0, end: last, score: -signatureDistance(analysis, 0, last), seam: 0, lost: 0 };
-  }
-
   const options = candidates?.length ? candidates : chooseWindows(analysis, { maxSeconds, limit: 3 });
-  let best = null;
-  for (const win of options) {
-    const maxEnd = Math.min(last, win.start + span - 1);
-    for (const back of [0, 2, 4, 6]) {
-      const end = maxEnd - back;
-      if (end - win.start < 4) continue;
-      const seam = signatureDistance(analysis, win.start, end);
-      const lost = (maxEnd - end) / analysis.sampleFps;
-      const score = -seam - 0.02 * lost;
-      if (!best || score > best.score) best = { start: win.start, end, score, seam, lost };
+  if (!options.length) return null;
+
+  // 1) A janela é escolhida pela pontuação dela (movimento, variação, brilho do
+  //    primeiro quadro) — é isso que mantém a poda de abertura preta valendo.
+  const chosen = [...options].sort((a, b) => b.score - a.score)[0];
+  const maxEnd = Math.min(last, chosen.start + span - 1);
+
+  // 2) Só então fecha o loop: encurtar o fim só compensa se a emenda melhorar
+  //    bastante (senão o trecho maior vale mais que a emenda perfeita).
+  const seamAtMax = signatureDistance(analysis, chosen.start, maxEnd);
+  let end = maxEnd;
+  let seam = seamAtMax;
+  for (const back of [2, 4, 6]) {
+    const candidate = maxEnd - back;
+    if (candidate - chosen.start < 4) continue;
+    const candidateSeam = signatureDistance(analysis, chosen.start, candidate);
+    if (candidateSeam < seam) {
+      end = candidate;
+      seam = candidateSeam;
     }
   }
-  return best;
+  if (seam > seamAtMax * 0.7) {
+    end = maxEnd;
+    seam = seamAtMax;
+  }
+  return { start: chosen.start, end, score: chosen.score, seam, lost: (maxEnd - end) / analysis.sampleFps };
 }
 
 // ── Quadros e enquadramento ────────────────────────────────────────────────
