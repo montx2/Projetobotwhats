@@ -50,6 +50,26 @@ test('DNS misto com endereço privado é rejeitado antes da requisição', async
   }
 });
 
+test('DNS64 de rede móvel valida o IPv4 embutido sem abrir acesso a destinos privados', async () => {
+  try {
+    // 64:ff9b::/96 é o prefixo NAT64 padrão: este AAAA representa 8.8.8.8.
+    setDnsLookupForTests(async () => [{ address: '64:ff9b::808:808', family: 6 }]);
+    assert.equal(
+      await assertPublicHttpUrl('https://pin.it/abc123'),
+      'https://pin.it/abc123'
+    );
+
+    // O mesmo mecanismo não pode transformar um IPv4 privado em destino válido.
+    setDnsLookupForTests(async () => [{ address: '64:ff9b::a00:1', family: 6 }]);
+    await assert.rejects(
+      assertPublicHttpUrl('https://nat64-private.example/resource'),
+      /local\/privado/i
+    );
+  } finally {
+    setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
+  }
+});
+
 test('cada salto de redirecionamento é validado antes de acessar destino local', async (t) => {
   const originalFetch = globalThis.fetch;
   let calls = 0;

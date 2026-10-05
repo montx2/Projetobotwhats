@@ -87,11 +87,16 @@ function publicIpv6(address) {
   if (value === null) return false;
   if (value === 0n || value === 1n) return false; // unspecified / loopback
   const prefix = (bits) => value >> BigInt(128 - bits);
-  if (prefix(96) === 0xffffn) {
+  const embeddedIpv4 = () => {
     const mapped = Number(value & 0xffffffffn);
-    const ip4 = `${mapped >>> 24}.${(mapped >>> 16) & 255}.${(mapped >>> 8) & 255}.${mapped & 255}`;
-    return publicIpv4(ip4);
-  }
+    return `${mapped >>> 24}.${(mapped >>> 16) & 255}.${(mapped >>> 8) & 255}.${mapped & 255}`;
+  };
+  if (prefix(96) === 0xffffn) return publicIpv4(embeddedIpv4()); // IPv4-mapped IPv6
+  // Android and other IPv6-only networks synthesize AAAA records using the
+  // well-known NAT64 prefix. Validate the embedded IPv4 instead of rejecting
+  // every such address: public sites remain reachable, while private targets
+  // (for example 64:ff9b::7f00:1 => 127.0.0.1) stay blocked.
+  if (prefix(96) === 0x64ff9b0000000000000000n) return publicIpv4(embeddedIpv4());
   // Only global-unicast space is routable for external downloads; reject
   // reserved, transition, documentation and special-purpose allocations.
   if (prefix(3) !== 0x1n) return false; // 2000::/3
