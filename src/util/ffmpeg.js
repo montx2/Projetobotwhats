@@ -462,11 +462,13 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
 
   const startQ = Math.max(8, Math.min(82, Math.round(plan.qStart ?? 45)));
   const maxFrames = plan.schedule.length;
-  const measure = (q) => predictQuality(samples, (budget * 0.95) / keep.length, {
-    minQ: QUALITY_FLOOR,
-    maxQ: 82,
-    sizeKey: 'bytesPerFrame'
-  });
+  // Qualidade que faria `keep.length` quadros chegarem perto do orçamento.
+  const measure = () =>
+    predictQuality(samples, (budget * 0.95) / keep.length, {
+      minQ: QUALITY_FLOOR,
+      maxQ: 82,
+      sizeKey: 'bytesPerFrame'
+    });
 
   let keep = plan.schedule;
   let q = startQ;
@@ -482,7 +484,7 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
       minFrames
     });
     if (fits < keep.length) keep = shrinkSchedule(plan, fits);
-    const predicted = Math.max(QUALITY_FLOOR, measure(q));
+    const predicted = Math.max(QUALITY_FLOOR, measure());
     if (predicted !== q) {
       q = predicted;
       buf = await probe(q, keep);
