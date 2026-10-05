@@ -11,7 +11,7 @@
 import { isStale, alreadySeen } from '../core/freshness.js';
 import { cfg, envSummary } from '../core/config.js';
 import { shortUrl } from '../core/http.js';
-import { log } from '../core/logger.js';
+import { errInfo, log } from '../core/logger.js';
 import { messageCache, isBotSent, markBotSent, containsViewOnce } from '../wa/cache.js';
 import { extractAnyText, isIgnored, normalizeIgnoreTarget, handleDelete, statusText } from './antidelete.js';
 import { SYM, header, section, card, footer, ok, fail, warn, wait, usage, kv, toggle } from '../core/ui.js';
@@ -421,11 +421,15 @@ async function stickerSourcesOrReply({ sock, msg, args, allowViewOnce, reply }) 
   try {
     return await stickerSourcesForCommand({ sock, msg, args, allowViewOnce, onProgress: reply });
   } catch (error) {
-    log.warn('figurinha por link falhou', { name: error?.name, status: error?.status, code: error?.code });
+    log.warn('figurinha por link falhou', errInfo(error));
+    // `hint` aparece quando o motivo tem conserto conhecido (DNS do aparelho
+    // filtrando o site, arquivo grande demais…) e vale mais que o "veja se abre".
+    const hint = error?.hint ? `${String(error.hint).slice(0, 300)}\n` : '';
     await reply(
       fail(
         'Não consegui criar a figurinha',
         `${String(error.message || error).slice(0, 260)}\n` +
+          `${hint}` +
           `${SYM.item} Confira se o link abre no navegador  ${SYM.detail}  ou baixe antes com \`.dl <link>\``
       )
     );
@@ -585,7 +589,7 @@ export async function handleMessage(sock, msg, deps) {
         sendOwner
       });
     } catch (error) {
-      log.error(`comando .${command.name} falhou`, { name: error?.name, status: error?.status, code: error?.code });
+      log.error(`comando .${command.name} falhou`, errInfo(error));
       // 600 em vez de 220: as mensagens de diagnóstico (ex.: remoção de fundo sem
       // chave, com o caminho do .env) precisam chegar inteiras ao usuário.
       await reply(fail('Não foi possível concluir', String(error.message || error).slice(0, 600))).catch(() => {});
@@ -1838,7 +1842,7 @@ async function downloadCommand({ sock, msg, args, ctx, url, audioOnly = false, f
     const result = await resolveDownload(targetUrl, quality, { audioOnly, onProgress: reply });
     return await sendDownload(sock, jid, result, { quality, url: targetUrl, onProgress: reply, quoted: msg });
   } catch (error) {
-    log.warn(`download falhou (${shortUrl(targetUrl)})`, { name: error?.name, status: error?.status, code: error?.code });
+    log.warn(`download falhou (${shortUrl(targetUrl)})`, errInfo(error));
     const detail = String(error.message || error).slice(0, 260);
     // `hint` só existe quando o motivo tem conserto conhecido (ex.: o YouTube
     // pediu verificação). Mostrar isso evita o "tente de novo" que nunca passa.

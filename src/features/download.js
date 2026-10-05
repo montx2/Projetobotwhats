@@ -13,7 +13,7 @@
 
 import { SYM, ok, warn, fail, wait } from '../core/ui.js';
 import { cfg } from '../core/config.js';
-import { log } from '../core/logger.js';
+import { errInfo, log } from '../core/logger.js';
 import { assertPublicHttpUrl, fetchBuffer, formatBytes, mediaReferer, shortUrl } from '../core/http.js';
 import { truncate } from '../util/text.js';
 import { parseQuality, qualityLabel } from './downloaders/quality.js';
@@ -177,7 +177,7 @@ async function firstOf(strategies) {
       errors.push(`${label}: sem mídia`);
     } catch (error) {
       errors.push(`${label}: ${String(error.message || error).slice(0, 110)}`);
-      log.warn(`${label} falhou`, { name: error?.name, status: error?.status, code: error?.code });
+      log.warn(`${label} falhou`, errInfo(error));
     }
   }
   const err = new Error(errors.join(' | ') || 'nenhum extrator disponível');
@@ -271,7 +271,7 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
   // e responder "download falhou".
   let dedicatedCobaltTried = false;
   const dedicated = await byPlatform(url, platform, quality, audioOnly, maxBytes).catch((error) => {
-    log.warn(`${platform} (dedicado) falhou`, { name: error?.name, status: error?.status, code: error?.code });
+    log.warn(`${platform} (dedicado) falhou`, errInfo(error));
     dedicatedCobaltTried = error?.cobaltTried === true;
     if (error?.hint) failureHint ||= error.hint;
     return null;
@@ -279,7 +279,7 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
   if (dedicated?.media?.length || dedicated?.buffers?.length) {
     const enriched = dedicated;
     const out = await withBuffers(enriched, onProgress, maxBytes).catch(async (error) => {
-      log.warn('download de buffers falhou; tentando reservas', { name: error?.name, status: error?.status, code: error?.code });
+      log.warn('download de buffers falhou; tentando reservas', errInfo(error));
       preErrors.push(`${platform}: ${String(error?.message || error).slice(0, 110)}`);
       return null;
     });
@@ -482,7 +482,7 @@ export async function autoDownload(sock, msg, urls, { reply }) {
       const result = await resolveDownload(url, quality, { onProgress: reply });
       await sendDownload(sock, msg.key.remoteJid, result, { quality, url, onProgress: reply, quoted: msg });
     } catch (error) {
-      log.warn('auto-download falhou', { name: error?.name, status: error?.status, code: error?.code });
+      log.warn('auto-download falhou', errInfo(error));
       await reply(fail(`Não consegui baixar (${platform})`, String(error.message).slice(0, 160))).catch(
         () => {}
       );

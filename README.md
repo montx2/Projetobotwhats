@@ -200,6 +200,14 @@ Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Fa�
 - URLs fornecidas por usuários precisam ser HTTP/HTTPS e o destino inicial não pode ser local/privado. O cliente HTTP do bot valida cada redirecionamento e limita o corpo das respostas.
 - O `yt-dlp` local é usado automaticamente **só para links do YouTube** (o bot monta a URL canônica a partir do ID, sem redirecionamento controlado pelo usuário) e é o extrator mais forte para `.yt`/`.ytmp3`: `pip install -U yt-dlp` e `pkg install ffmpeg` no Termux. Para os demais sites ele fica **desligado por padrão**, porque o binário segue redirecionamentos próprios que não passam pela validação por salto do bot; só habilite com `NEXUS_ENABLE_YTDLP=true` se confiar nos links e puder controlar a rede de saída. `NEXUS_DISABLE_YTDLP=true` desliga tudo.
 
+### “Não consegui baixar este link — host resolve para endereço local/privado”
+
+Esse aviso **não é o link**: é o DNS do aparelho devolvendo um endereço que o validador do bot considera interno (roteador, localhost, metadata de nuvem). O bot valida cada destino antes de baixar justamente para um link malicioso não apontar para a sua rede.
+
+- **Rede móvel 4G/5G (Vivo/Claro/TIM).** Em IPv6-only com 464XLAT, o DNS64 do operador sintetiza um IPv6 a partir do IPv4 do site — `pin.it` vira `64:ff9b::9765:54`. O bot reconhece os prefixos `64:ff9b::/96` e `64:ff9b:1::/48` e libera quando o IPv4 embutido é público (e continua bloqueando quando ele é `127.0.0.1`, `192.168.x.x`, CGNAT etc.). Operadora com prefixo próprio: `NEXUS_NAT64_PREFIX=<rede>/96` no `.env`.
+- **DNS privado / AdGuard / filtro do roteador.** Se a resolução volta como endereço local para um site em que você confia: `NEXUS_ALLOW_LOCAL_HOSTS=pinterest.com,pin.it` (aceita sufixo e `*.dominio`). Vazio por padrão — nada é liberado sem você pedir.
+- **Diagnóstico.** `npm run doctor` imprime, para cada site de download, exatamente o que o DNS devolveu, o que foi bloqueado e a tradução NAT64 — usando o mesmo validador do bot. O erro no chat também nomeia o endereço devolvido.
+
 ### YouTube: “Sign in to confirm you’re not a bot” e os 403 do `.ytmp3`
 
 O `.ytmp3`/`.yt` tenta, nesta ordem: **yt-dlp → Innertube → Invidious → Cobalt**. Se uma etapa cai, a próxima assume — nenhuma delas é obrigatória.

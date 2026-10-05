@@ -20,7 +20,7 @@
 
 import { fetchBuffer, formatBytes, mediaReferer, shortUrl } from '../core/http.js';
 import { wait } from '../core/ui.js';
-import { log } from '../core/logger.js';
+import { errInfo, log } from '../core/logger.js';
 import { analyzeImageDetail, detectMediaExt } from '../util/ffmpeg.js';
 import { isUsableImageSize, sniffImage } from '../util/imageinfo.js';
 import { isWebp, isAnimatedWebp } from '../util/webp.js';
@@ -403,6 +403,9 @@ export async function stickerSourcesForCommand({
   const targets = links.slice(0, maxLinks);
   const sources = [];
   const failures = [];
+  // Dica com conserto conhecido (ex.: DNS do aparelho filtrando o site) — sem
+  // isso ela morria aqui e o dono só via "confira se o link abre no navegador".
+  let hint = '';
 
   for (let i = 0; i < targets.length; i++) {
     if (targets.length > 1) await onProgress?.(wait(`Baixando link ${i + 1}/${targets.length}`));
@@ -410,7 +413,8 @@ export async function stickerSourcesForCommand({
       const source = await downloadStickerSource(targets[i], { onProgress });
       sources.push({ ...source, link: targets[i] });
     } catch (error) {
-      log.warn(`figurinha do link ${shortUrl(targets[i])} falhou`, { name: error?.name, status: error?.status, code: error?.code });
+      log.warn(`figurinha do link ${shortUrl(targets[i])} falhou`, errInfo(error));
+      if (error?.hint) hint ||= String(error.hint);
       failures.push(`${shortUrl(targets[i])}: ${String(error.message || error).slice(0, 200)}`);
     }
   }
@@ -418,6 +422,7 @@ export async function stickerSourcesForCommand({
   if (!sources.length) {
     const err = new Error(failures[0] || 'não consegui baixar esse link');
     err.failures = failures;
+    if (hint) err.hint = hint;
     throw err;
   }
   return { sources, failures, skipped: Math.max(0, links.length - targets.length) };

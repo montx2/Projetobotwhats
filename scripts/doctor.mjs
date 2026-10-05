@@ -140,6 +140,55 @@ if (!envLoad.loaded) {
   }
 }
 
+// DNS/rede — a causa nº 1 do "não baixa nada": o DNS do aparelho devolve um
+// endereço local/privado (DNS64 de rede móvel, DNS privado/AdGuard, filtro do
+// operador) e o validador do bot recusa o download antes mesmo de tentar.
+// Aqui é o MESMO validador do bot (src/core/http.js), não um `ping` qualquer.
+{
+  const { dnsReport } = await import('../src/core/http.js');
+  const hosts = [
+    'pin.it', 'www.pinterest.com', 'i.pinimg.com',
+    'www.tiktok.com', 'www.instagram.com', 'www.youtube.com', 's.whatsapp.net'
+  ];
+  console.log('\nℹ️ DNS dos sites de download (o que o validador do bot vê):');
+  const blockedHosts = [];
+  const deadHosts = [];
+  for (const host of hosts) {
+    const report = await dnsReport(host);
+    if (report.error) {
+      bad(`DNS ${host}: resolução falhou (${report.error}) — o DNS do aparelho não devolveu endereço`);
+      deadHosts.push(host);
+      continue;
+    }
+    if (report.allowed) {
+      const nat64 = report.nat64.length ? ` · NAT64 ${report.nat64[0].address} → ${report.nat64[0].ipv4} (ok)` : '';
+      ok(`DNS ${host}: ${report.answers.map((a) => a.address).slice(0, 3).join(', ')}${nat64}`);
+      continue;
+    }
+    blockedHosts.push(host);
+    bad(`DNS ${host}: endereço local/privado (${report.blocked.join(', ')}) — download desse site vai falhar`);
+  }
+  // Dois problemas diferentes, dois conselhos: quem não resolveu não tem nada a
+  // ver com o validador de endereço privado (liberar o host não resolveria).
+  if (blockedHosts.length) {
+    warn(
+      `DNS devolvendo endereço local/privado para: ${blockedHosts.join(', ')}. É a REDE, não o link:\n` +
+        '   1) Android: Configurações → Rede e internet → DNS privado → "Desativado" (ou troque para 1.1.1.1 / 8.8.8.8)\n' +
+        '   2) Teste em outra rede (Wi-Fi ↔ dados móveis) para confirmar\n' +
+        '   3) Operadora com prefixo DNS64 próprio: NEXUS_NAT64_PREFIX=<prefixo>/96 no .env\n' +
+        `   4) Confiando no site, libere no .env: NEXUS_ALLOW_LOCAL_HOSTS=${blockedHosts.join(',')}`
+    );
+  }
+  if (deadHosts.length) {
+    warn(
+      `DNS sem resposta para: ${deadHosts.join(', ')}. Verifique a conexão do aparelho, ` +
+        'o DNS privado do Android e se há proxy/VPN ativo (ou bloqueio de saída no firewall).'
+    );
+  }
+  if (process.env.NEXUS_ALLOW_LOCAL_HOSTS) ok(`NEXUS_ALLOW_LOCAL_HOSTS ativo: ${process.env.NEXUS_ALLOW_LOCAL_HOSTS}`);
+  if (process.env.NEXUS_NAT64_PREFIX) ok(`NEXUS_NAT64_PREFIX ativo: ${process.env.NEXUS_NAT64_PREFIX}`);
+}
+
 // Sessão
 const authDir = path.join(ROOT, 'data', 'auth');
 if (fs.existsSync(path.join(authDir, 'creds.json'))) ok('Sessão WhatsApp salva (já pareado)');

@@ -17,6 +17,7 @@ const USER_AGENTS = [
 const DNS_CACHE_MS = 30_000;
 const dnsCache = new Map();
 let testDnsLookup = null;
+let testDnsProbe = null;
 const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
 const DEFAULT_TEXT_LIMIT = 5 * 1024 * 1024;
 
@@ -32,6 +33,13 @@ export function setDnsLookupForTests(lookup) {
   dnsCache.clear();
 }
 
+/** Test-only injection for the public-DNS cross-check used in block hints. */
+export function setDnsProbeForTests(probe) {
+  if (process.env.NEXUS_TEST_MODE !== '1') throw new Error('probe de DNS só pode ser alterado na suíte de testes');
+  if (probe !== null && typeof probe !== 'function') throw new TypeError('probe deve ser uma função ou null');
+  testDnsProbe = probe;
+}
+
 export class HttpError extends Error {
   constructor(message, { status, url, retryAfterMs } = {}) {
     super(message);
@@ -44,6 +52,58 @@ export class HttpError extends Error {
 
 function stripIpv6Brackets(host) {
   return String(host || '').replace(/^\[|\]$/g, '').split('%')[0].toLowerCase();
+}
+
+/**
+ * 🔧 BUG REAL CORRIGIDO AQUI (o bot "não baixava nada" no 4G/5G):
+ * em rede móvel IPv6-only com 464XLAT — padrão em Vivo/Claro/TIM no Brasil —
+ * o DNS64 do operador SINTETIZA um AAAA a partir do A de todo host que não tem
+ * IPv6 próprio. `pin.it` (151.101.0.84) vira `64:ff9b::9765:54`, e a regra
+ * "só 2000::/3 é público" recusava o endereço com
+ * `host resolve para endereço local/privado` — para TODOS os downloads, mesmo
+ * com a internet do aparelho funcionando normalmente.
+ *
+ * Recusar o prefixo NAT64 "no escuro" também não é certo: ele pode embutir um
+ * IPv4 privado (`64:ff9b::7f00:1` = 127.0.0.1). A regra correta é DESEMPACOTAR
+ * os 32 bits finais e validar o IPv4 embutido — público libera, privado bloqueia.
+ */
+const NAT64_DEFAULT_PREFIXES = [
+  { address: '64:ff9b::', bits: 96, label: '64:ff9b::/96 (RFC 6052)' },
+  { address: '64:ff9b:1::', bits: 48, label: '64:ff9b:1::/48 (RFC 8215)' }
+];
+
+let nat64Cache = { raw: undefined, prefixes: null };
+
+/** Prefixos NAT64 conhecidos + o opcional `NEXUS_NAT64_PREFIX=<rede>/<bits>`. */
+function nat64Prefixes() {
+  const raw = process.env.NEXUS_NAT64_PREFIX;
+  if (nat64Cache.raw === raw && nat64Cache.prefixes) return nat64Cache.prefixes;
+  // Montado pelo próprio parser de IPv6: literal hex escrito à mão aqui já saiu
+  // com um nibble a mais e comparava o prefixo errado.
+  const prefixes = [];
+  for (const entry of [...NAT64_DEFAULT_PREFIXES, ...String(raw || '').split(/[,\s]+/).filter(Boolean).map((item) => {
+    const [address, bits] = item.split('/');
+    return { address, bits: Number(bits || 96), label: item };
+  })]) {
+    const value = ipv6AsBigInt(entry.address);
+    if (value === null || !Number.isInteger(entry.bits) || entry.bits < 32 || entry.bits > 96) continue;
+    prefixes.push({ value, bits: entry.bits, label: entry.label });
+  }
+  nat64Cache = { raw, prefixes };
+  return prefixes;
+}
+
+/** IPv4 embutido quando o endereço está dentro de um prefixo NAT64. */
+export function nat64EmbeddedIpv4(address) {
+  const value = typeof address === 'bigint' ? address : ipv6AsBigInt(stripIpv6Brackets(address));
+  if (value === null) return null;
+  for (const { value: prefix, bits } of nat64Prefixes()) {
+    const shift = BigInt(128 - bits);
+    if (value >> shift !== prefix >> shift) continue;
+    const mapped = Number(value & 0xffffffffn);
+    return `${mapped >>> 24}.${(mapped >>> 16) & 255}.${(mapped >>> 8) & 255}.${mapped & 255}`;
+  }
+  return null;
 }
 
 function publicIpv4(ip) {
@@ -92,6 +152,10 @@ function publicIpv6(address) {
     const ip4 = `${mapped >>> 24}.${(mapped >>> 16) & 255}.${(mapped >>> 8) & 255}.${mapped & 255}`;
     return publicIpv4(ip4);
   }
+  // Rede móvel com DNS64/NAT64: o AAAA sintetizado carrega o IPv4 real nos 32
+  // bits finais. Vale o julgamento do IPv4 embutido, não o do prefixo.
+  const nat64 = nat64EmbeddedIpv4(value);
+  if (nat64) return publicIpv4(nat64);
   // Only global-unicast space is routable for external downloads; reject
   // reserved, transition, documentation and special-purpose allocations.
   if (prefix(3) !== 0x1n) return false; // 2000::/3
@@ -120,6 +184,93 @@ function parseHttpUrl(value) {
   return url;
 }
 
+/**
+ * Hosts que o dono confia explicitamente e podem ser acessados mesmo quando o
+ * DNS do aparelho devolve endereço local/privado (DNS do operador filtrando o
+ * site, DNS privado/AdGuard etc.). Vazio por padrão: nada muda sem opt-in.
+ *   NEXUS_ALLOW_LOCAL_HOSTS=pinterest.com,pin.it
+ */
+function allowLocalHost(host) {
+  const raw = String(process.env.NEXUS_ALLOW_LOCAL_HOSTS || '').trim();
+  if (!raw) return false;
+  const needle = stripIpv6Brackets(host);
+  return raw.split(/[,\s]+/).filter(Boolean).some((entry) => {
+    const rule = stripIpv6Brackets(entry.replace(/^\*\./, '.').toLowerCase());
+    return needle === rule.replace(/^\./, '') || needle.endsWith(rule.startsWith('.') ? rule : `.${rule}`);
+  });
+}
+
+/**
+ * Consulta um resolvedor público (DoH) para explicar o bloqueio. Serve SÓ de
+ * diagnóstico: nunca libera o acesso — a conexão continuaria indo para o
+ * endereço que o DNS do aparelho devolveu, então decidir por aqui abriria um
+ * buraco de SSRF.
+ */
+const dnsProbeCache = new Map();
+
+async function publicDnsProbe(host, { timeoutMs = 4000 } = {}) {
+  if (testDnsProbe) return testDnsProbe(host) || null;
+  // DNS injetado (suíte de testes) ⇒ sem chamada de rede aqui.
+  if (testDnsLookup) return null;
+  const cached = dnsProbeCache.get(host);
+  if (cached && cached.expiresAt > Date.now()) return cached.answer;
+  const answer = await dohLookup(host, timeoutMs);
+  dnsProbeCache.set(host, { answer, expiresAt: Date.now() + 60_000 });
+  while (dnsProbeCache.size > 256) dnsProbeCache.delete(dnsProbeCache.keys().next().value);
+  return answer;
+}
+
+async function dohLookup(host, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=A`, {
+      headers: { accept: 'application/dns-json' },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      await response.body?.cancel?.().catch(() => {});
+      return null;
+    }
+    const data = await response.json().catch(() => null);
+    const answers = (data?.Answer || [])
+      .filter((item) => item?.type === 1 && isIP(String(item.data || '')) === 4)
+      .map((item) => String(item.data));
+    return answers.length ? answers : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Bloqueio de DNS com o endereço que o aparelho devolveu e uma dica acionável. */
+async function dnsBlockError(host, answers) {
+  const seen = [...new Set(answers.map((answer) => answer.address || answer))];
+  const listed = seen.length ? ` (${seen.slice(0, 4).join(', ')})` : '';
+  const error = new HttpError(
+    seen.length
+      ? `host resolve para endereço local/privado${listed}`
+      : `o DNS do aparelho não devolveu nenhum endereço para ${host}`
+  );
+  error.host = host;
+  error.addresses = seen;
+  const expected = await publicDnsProbe(host).catch(() => null);
+  if (expected) {
+    error.expected = expected;
+    error.hint =
+      `O DNS do seu aparelho devolve ${host} como ${listed || 'nada'}, mas um DNS público responde ${expected.slice(0, 2).join(', ')}. ` +
+      'Ou seja: é a rede que está filtrando/quebrando a resolução, não o link. ' +
+      'Troque o DNS (Android: Configurar → Rede → DNS privado → "desativado", ou use 1.1.1.1/8.8.8.8) ou teste em outra rede/Wi-Fi. ' +
+      `Se confiar nesse site, libere com NEXUS_ALLOW_LOCAL_HOSTS=${host}`;
+  } else {
+    error.hint =
+      `Não consegui validar ${host} pelo DNS do aparelho. Teste outra rede (Wi-Fi ↔ dados móveis), ` +
+      'desative o DNS privado do Android ou rode `npm run doctor` para ver a resolução completa.';
+  }
+  return error;
+}
+
 /** Reject local/private destinations and hostnames that resolve to non-public IPs. */
 export async function assertPublicHttpUrl(value, { allowPrivate = false } = {}) {
   const url = parseHttpUrl(value);
@@ -136,6 +287,7 @@ export async function assertPublicHttpUrl(value, { allowPrivate = false } = {}) 
     if (!publicAddress(host)) throw new HttpError('destino IP local/privado bloqueado');
     return url.toString();
   }
+  if (allowLocalHost(host)) return url.toString();
 
   let cached = dnsCache.get(host);
   if (!cached || cached.expiresAt <= Date.now()) {
@@ -145,16 +297,41 @@ export async function assertPublicHttpUrl(value, { allowPrivate = false } = {}) 
     } catch {
       throw new HttpError(`não foi possível validar o host ${host}`);
     }
-    if (!answers.length || answers.some((answer) => !publicAddress(answer.address))) {
-      throw new HttpError('host resolve para endereço local/privado');
-    }
+    if (!answers.length) throw await dnsBlockError(host, []);
+    // Qualquer endereço local/privado na resposta ainda bloqueia: sem "pinning"
+    // da conexão, o fetch poderia justamente escolher esse endereço.
+    const blocked = answers.filter((answer) => !publicAddress(answer.address));
+    if (blocked.length) throw await dnsBlockError(host, blocked);
     cached = { answers, expiresAt: Date.now() + DNS_CACHE_MS };
     dnsCache.delete(host);
     dnsCache.set(host, cached);
     while (dnsCache.size > 2_048) dnsCache.delete(dnsCache.keys().next().value);
   }
-  if (cached.answers.some((answer) => !publicAddress(answer.address))) throw new HttpError('host resolve para endereço local/privado');
+  const blocked = cached.answers.filter((answer) => !publicAddress(answer.address));
+  if (blocked.length) throw await dnsBlockError(host, blocked);
   return url.toString();
+}
+
+/**
+ * Foto da resolução de um host pelo MESMO validador do bot — usado pelo
+ * `npm run doctor` e pelos testes para explicar um bloqueio de DNS.
+ */
+export async function dnsReport(host) {
+  const clean = stripIpv6Brackets(host);
+  const report = { host: clean, answers: [], nat64: [], blocked: [], allowed: false, error: '' };
+  try {
+    report.answers = await (testDnsLookup || dnsLookup)(clean, { all: true, verbatim: true });
+  } catch (error) {
+    report.error = String(error?.code || error?.message || error);
+    return report;
+  }
+  for (const answer of report.answers) {
+    const embedded = answer.family === 6 ? nat64EmbeddedIpv4(answer.address) : null;
+    if (embedded) report.nat64.push({ address: answer.address, ipv4: embedded });
+    if (!publicAddress(answer.address)) report.blocked.push(answer.address);
+  }
+  report.allowed = report.answers.length > 0 && report.blocked.length === 0;
+  return report;
 }
 
 function lowerKeys(obj) {
@@ -469,7 +646,11 @@ export async function resolveRedirect(url, { hops = 6, headers = {}, timeoutMs =
     response?.body?.cancel?.().catch(() => {});
     if (!location) break;
     try { current = await assertPublicHttpUrl(new URL(location, current).toString(), { allowPrivate }); }
-    catch (error) { throw new HttpError(`redirecionamento bloqueado: ${error.message}`, { url: current }); }
+    catch (error) {
+      const blocked = new HttpError(`redirecionamento bloqueado: ${error.message}`, { url: current });
+      if (error?.hint) blocked.hint = error.hint; // a dica de DNS não pode morrer no salto
+      throw blocked;
+    }
   }
   return current;
 }

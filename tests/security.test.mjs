@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
-import { assertPublicHttpUrl, fetchBuffer, fetchText, fetchWithTimeout, postJson, resolveRedirect, setDnsLookupForTests } from '../src/core/http.js';
+import { assertPublicHttpUrl, dnsReport, fetchBuffer, fetchText, fetchWithTimeout, nat64EmbeddedIpv4, postJson, resolveRedirect, setDnsLookupForTests, setDnsProbeForTests } from '../src/core/http.js';
 import { MessageCache } from '../src/wa/cache.js';
 import { cfg } from '../src/core/config.js';
 import { flushStore, readJson, writeJsonNow } from '../src/core/store.js';
@@ -45,6 +45,100 @@ test('DNS misto com endereço privado é rejeitado antes da requisição', async
   ]);
   try {
     await assert.rejects(assertPublicHttpUrl('https://mixed-dns.example/resource'), /local\/privado/i);
+  } finally {
+    setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
+  }
+});
+
+// 🔧 REGRESSÃO do "bot não baixa nada no 4G/5G": em rede móvel IPv6-only com
+// 464XLAT, o DNS64 do operador sintetiza AAAA a partir do A (pin.it vira
+// 64:ff9b::9765:54). O validador recusava esse endereço e TODO download morria
+// com "host resolve para endereço local/privado" — com a internet funcionando.
+test('DNS64/NAT64 de rede móvel libera o host quando o IPv4 embutido é público', async () => {
+  setDnsLookupForTests(async () => [{ address: '64:ff9b::9765:54', family: 6 }]); // 151.101.0.84
+  try {
+    assert.equal(await assertPublicHttpUrl('https://pin.it/abc123'), 'https://pin.it/abc123');
+    assert.equal(nat64EmbeddedIpv4('64:ff9b::9765:54'), '151.101.0.84');
+  } finally {
+    setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
+  }
+});
+
+test('NAT64 continua bloqueando quando o IPv4 embutido é local/privado', async () => {
+  for (const address of ['64:ff9b::7f00:1', '64:ff9b::c0a8:1', '64:ff9b::6440:1']) {
+    setDnsLookupForTests(async () => [{ address, family: 6 }]);
+    try {
+      await assert.rejects(assertPublicHttpUrl('https://pin.it/abc123'), /local\/privado/i);
+    } finally {
+      setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
+    }
+  }
+  assert.equal(nat64EmbeddedIpv4('2a04:4e42:200::84'), null, 'IPv6 global não é NAT64');
+});
+
+test('NEXUS_NAT64_PREFIX aceita o prefixo DNS64 do operador', async () => {
+  process.env.NEXUS_NAT64_PREFIX = '2001:db8:64::/96';
+  setDnsLookupForTests(async () => [{ address: '2001:db8:64::9765:54', family: 6 }]);
+  try {
+    assert.equal(await assertPublicHttpUrl('https://pin.it/abc123'), 'https://pin.it/abc123');
+    setDnsLookupForTests(async () => [{ address: '2001:db8:64::a9fe:1', family: 6 }]); // 169.254.0.1
+    await assert.rejects(assertPublicHttpUrl('https://pin.it/abc123'), /local\/privado/i);
+  } finally {
+    delete process.env.NEXUS_NAT64_PREFIX;
+    setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
+  }
+});
+
+test('NEXUS_ALLOW_LOCAL_HOSTS libera só o host autorizado pelo dono', async () => {
+  process.env.NEXUS_ALLOW_LOCAL_HOSTS = 'pin.it,*.pinterest.com';
+  setDnsLookupForTests(async () => [{ address: '127.0.0.1', family: 4 }]);
+  try {
+    assert.equal(await assertPublicHttpUrl('https://pin.it/abc123'), 'https://pin.it/abc123');
+    assert.equal(await assertPublicHttpUrl('https://br.pinterest.com/pin/1/'), 'https://br.pinterest.com/pin/1/');
+    await assert.rejects(assertPublicHttpUrl('https://outro-exemplo.com/x'), /local\/privado/i);
+    // Regras duras continuam valendo mesmo com a liberação por host.
+    await assert.rejects(assertPublicHttpUrl('file://pin.it/etc/passwd'), /HTTP\/HTTPS/i);
+    await assert.rejects(assertPublicHttpUrl('https://dono:senha@pin.it/x'), /credenciais/i);
+    // A lista não abre a porta dos bloqueios absolutos (host local e IP literal).
+    process.env.NEXUS_ALLOW_LOCAL_HOSTS = 'localhost,127.0.0.1,metadata,.internal';
+    await assert.rejects(assertPublicHttpUrl('http://localhost:8080/'), /local\/privado/i);
+    await assert.rejects(assertPublicHttpUrl('http://127.0.0.1:8080/'), /local\/privado/i);
+    await assert.rejects(assertPublicHttpUrl('http://metadata.google.internal/'), /metadata|privado/i);
+    await assert.rejects(assertPublicHttpUrl('http://impressora.internal/'), /local\/privado/i);
+    process.env.NEXUS_ALLOW_LOCAL_HOSTS = 'pin.it,*.pinterest.com';
+  } finally {
+    delete process.env.NEXUS_ALLOW_LOCAL_HOSTS;
+    setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
+  }
+});
+
+test('bloqueio de DNS nomeia o endereço devolvido e traz dica acionável', async () => {
+  setDnsLookupForTests(async () => [{ address: '127.0.0.1', family: 4 }]);
+  setDnsProbeForTests(async () => ['151.101.0.84']);
+  try {
+    await assert.rejects(assertPublicHttpUrl('https://pin.it/abc123'), (error) => {
+      assert.match(error.message, /local\/privado \(127\.0\.0\.1\)/);
+      assert.match(String(error.hint), /DNS público responde 151\.101\.0\.84/);
+      assert.match(String(error.hint), /NEXUS_ALLOW_LOCAL_HOSTS=pin\.it/);
+      return true;
+    });
+  } finally {
+    setDnsProbeForTests(null);
+    setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
+  }
+});
+
+test('dnsReport mostra a resolução e o que foi bloqueado (usado pelo doctor)', async () => {
+  setDnsLookupForTests(async () => [
+    { address: '64:ff9b::9765:54', family: 6 },
+    { address: '10.0.0.12', family: 4 }
+  ]);
+  try {
+    const report = await dnsReport('pin.it');
+    assert.equal(report.host, 'pin.it');
+    assert.equal(report.allowed, false);
+    assert.deepEqual(report.blocked, ['10.0.0.12']);
+    assert.deepEqual(report.nat64, [{ address: '64:ff9b::9765:54', ipv4: '151.101.0.84' }]);
   } finally {
     setDnsLookupForTests(async () => [{ address: '8.8.8.8', family: 4 }]);
   }

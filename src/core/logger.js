@@ -54,6 +54,21 @@ export const log = {
   raw: (msg) => console.log(redact(msg))
 };
 
+/**
+ * Resumo de erro para log. Antes os avisos de download levavam só
+ * `{ name, status, code }` e o terminal mostrava `{"name":"HttpError"}` —
+ * sem o motivo, o dono ficava sem saber por que nada baixava. A mensagem vai
+ * junto (cortada) e continua passando pelo redator de segredos.
+ */
+export function errInfo(error, limit = 160) {
+  const info = { name: error?.name };
+  if (error?.status !== undefined) info.status = error.status;
+  if (error?.code) info.code = error.code;
+  const message = String(error?.message || '').trim();
+  if (message) info.message = message.length > limit ? `${message.slice(0, limit)}…` : message;
+  return info;
+}
+
 export function banner(lines) {
   // Só borda esquerda: sem borda direita nada desalinha quando há símbolos largos.
   const rule = '─'.repeat(44);
