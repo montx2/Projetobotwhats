@@ -438,7 +438,22 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
     }`
   );
   const ext = magicExt || (isGif ? '.gif' : isVideo ? '.mp4' : mime.includes('png') ? '.png' : '.jpg');
-  const { buffer: webp } = await toStickerWebp(buffer, { animated: isVideo, ext, fit, onProgress });
+  const { buffer: webp, smart } = await toStickerWebp(buffer, { animated: isVideo, ext, fit, onProgress });
+  // O motor inteligente explica o que decidiu (trecho, quadros, crop, qualidade).
+  if (smart) {
+    if (smart.mode === 'static') {
+      log.info(
+        `motivo: ${smart.reason} · quadro em ${smart.stillSeconds}s · q=${smart.q} · ${formatBytes(smart.bytes)}`
+      );
+    } else {
+      const end = (smart.startSeconds + smart.durationSeconds).toFixed(2);
+      log.info(
+        `trecho ${smart.startSeconds}s–${end}s · ${smart.framesKept ?? smart.frames} quadros (${smart.targetFps} fps)` +
+          `${smart.crop ? ` · enquadrado em ${smart.crop}` : ''} · q=${smart.q} · ${formatBytes(smart.bytes)}` +
+          ` · ${smart.probes} medição(ões)`
+      );
+    }
+  }
   await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
   return tagSticker(webp, { pack, author, emojis });
 }

@@ -8,6 +8,15 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { isWebp, isAnimatedWebp } from './webp.js';
 import { gradeImageSamples } from './imageinfo.js';
+import {
+  analyzeSource,
+  framesForQualityFloor,
+  planSticker,
+  predictQuality,
+  shrinkSchedule,
+  GOOD_FIT_RATIO,
+  QUALITY_FLOOR
+} from './stickerbrain.js';
 
 let ffmpegPath = null;
 
@@ -246,10 +255,14 @@ export const STICKER_ANIMATED_SPEC_BYTES = 500 * 1024;
 export const STICKER_STATIC_MAX_BYTES = 100 * 1024;
 export const STICKER_ANIMATED_MAX_BYTES = 480 * 1024;
 
-export function buildStickerFilter({ animated, fps = 15, simple = false, fit = 'fill' }) {
+export function buildStickerFilter({ animated, fps = 15, simple = false, fit = 'fill', crop = null, select = null }) {
   const flags = simple ? '' : `:flags=${animated ? 'bicubic' : 'lanczos'}`;
   const parts = [];
   if (animated) parts.push(`fps=${fps}`);
+  if (select) parts.push(`select=${select}`);
+  // O crop inteligente entra ANTES da escala: ele enquadra o assunto no
+  // material original, então a escala 512×512 não distorce nada.
+  if (crop) parts.push(`crop=${crop.w}:${crop.h}:${crop.x}:${crop.y}`);
   parts.push('format=rgba');
   if (fit === 'contain') {
     parts.push(`scale=512:512:force_original_aspect_ratio=decrease${flags}`);
@@ -262,6 +275,29 @@ export function buildStickerFilter({ animated, fps = 15, simple = false, fit = '
   }
   parts.push('setsar=1');
   return parts.join(',');
+}
+
+/**
+ * Expressão `select` do FFmpeg para manter um conjunto de quadros.
+ *
+ * Os índices são relativos ao começo do trecho recortado; quadros consecutivos
+ * viram uma faixa (`between`) para a expressão ficar curta mesmo guardando 150
+ * quadros. Vírgulas vão escapadas porque separam filtros dentro do filtergraph.
+ *
+ * @param {number[]} indexes índices a manter (0 = primeiro quadro do trecho)
+ * @returns {string} ex.: "between(n\,0\,9)+eq(n\,20)"
+ */
+export function selectExpression(indexes) {
+  const sorted = [...new Set((indexes || []).map((n) => Math.max(0, Math.round(n))))].sort((a, b) => a - b);
+  const ranges = [];
+  for (const n of sorted) {
+    const last = ranges[ranges.length - 1];
+    if (last && n === last[1] + 1) last[1] = n;
+    else ranges.push([n, n]);
+  }
+  return ranges
+    .map(([a, b]) => (a === b ? `eq(n\\,${a})` : `between(n\\,${a}\\,${b})`))
+    .join('+');
 }
 
 async function encodeStep(inFile, outFile, { animated, q, fps = 15, dur = STICKER_MAX_SECONDS, fit = 'fill', level = 4 }) {
@@ -302,6 +338,191 @@ async function encodeStep(inFile, outFile, { animated, q, fps = 15, dur = STICKE
   } catch {
     await runFfmpeg(buildArgs({ simpleFilter: true, omitVsync: true }));
   }
+}
+
+/**
+ * Encoda UM passo do plano inteligente: recorta o trecho escolhido, mantém só
+ * os quadros selecionados (com os timestamps originais, o que dá durações
+ * variáveis por quadro) e aplica o crop do assunto antes da escala 512×512.
+ */
+async function encodePlanned(inFile, outFile, { plan, q, keep, fit = 'fill', animated = true, level = 5 }) {
+  const select = keep?.length ? selectExpression(keep) : null;
+  const vf = buildStickerFilter({ animated, fps: plan.fps, fit, crop: plan.crop, select });
+  const args = ['-y', '-hide_banner', '-loglevel', 'error'];
+  if (animated) {
+    if (plan.startMs > 0) args.push('-ss', (plan.startMs / 1000).toFixed(3));
+    args.push('-t', (plan.durationMs / 1000).toFixed(3));
+  } else if (plan.stillMs > 0) {
+    args.push('-ss', (plan.stillMs / 1000).toFixed(3));
+  }
+  args.push('-i', inFile, '-an', '-sn', '-vf', vf, '-c:v', 'libwebp', '-lossless', '0', '-q:v', String(q),
+    '-compression_level', String(level), '-preset', 'default');
+  if (animated) args.push('-loop', '0', '-vsync', '0');
+  else args.push('-frames:v', '1');
+  args.push('-f', 'webp', outFile);
+  await runFfmpeg(args, { timeoutMs: 180_000 });
+  if (!fs.existsSync(outFile)) throw new Error('ffmpeg não gerou saída');
+  const buf = fs.readFileSync(outFile);
+  if (!buf.length || !isWebp(buf)) throw new Error('ffmpeg gerou um WebP inválido');
+  return buf;
+}
+
+/**
+ * MOTOR INTELIGENTE: analisa o vídeo em quadros minúsculos, escolhe o melhor
+ * trecho de até 10 s, fecha o loop, enquadra o assunto e só então encoda —
+ * gastando o orçamento de 500 KB em quadros e qualidade com previsão, não com
+ * uma escada fixa. Vídeo sem movimento vira figurinha parada.
+ *
+ * @returns {Promise<{buffer: Buffer, animated: boolean, smart: object}|null>} null quando não deu (aí a escada padrão assume)
+ */
+export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSeconds = STICKER_MAX_SECONDS, onProgress, autoCrop = true } = {}) {
+  const bin = findFfmpeg();
+  if (!bin) return null;
+
+  const analysisStart = Date.now();
+  await onProgress?.(`🧠 Analisando o vídeo (movimento, assunto e loop)…`);
+  const analysis = await analyzeSource(inFile, { ffmpegBin: bin });
+  if (!analysis) return null;
+  const analysisMs = Date.now() - analysisStart;
+
+  const plan = planSticker(analysis, {
+    maxSeconds,
+    budgetBytes: STICKER_ANIMATED_MAX_BYTES,
+    autoCrop
+  });
+  if (!plan) return null;
+
+  const report = {
+    mode: plan.mode,
+    startSeconds: Number((plan.startMs / 1000).toFixed(2)),
+    durationSeconds: Number((plan.durationMs / 1000).toFixed(2)),
+    targetFps: plan.targetFps,
+    frames: plan.frames,
+    crop: plan.crop ? `${plan.crop.w}x${plan.crop.h}+${plan.crop.x}+${plan.crop.y}` : null,
+    activity: plan.activity
+      ? {
+          x: Number((plan.activity.cx - plan.activity.w / 2).toFixed(2)),
+          y: Number((plan.activity.cy - plan.activity.h / 2).toFixed(2)),
+          w: Number(plan.activity.w.toFixed(2)),
+          h: Number(plan.activity.h.toFixed(2))
+        }
+      : null,
+    reason: plan.reason,
+    probes: 0,
+    tries: [],
+    q: null,
+    bytes: 0,
+    analysisMs
+  };
+
+  // ── Vídeo sem movimento: figurinha parada em alta qualidade ─────────────
+  if (plan.mode === 'static') {
+    report.stillSeconds = Number((plan.stillMs / 1000).toFixed(2));
+    await onProgress?.(`🧠 ${plan.reason} — montando a melhor foto…`);
+    let best = null;
+    for (const step of [{ q: 82 }, { q: 68 }, { q: 52 }, { q: 36 }, { q: 22 }]) {
+      const buf = await encodePlanned(inFile, outFile, { plan, q: step.q, keep: null, fit, animated: false });
+      report.probes++;
+      if (!best || buf.length < best.length) best = { buf, q: step.q };
+      if (buf.length <= STICKER_STATIC_MAX_BYTES) {
+        best = { buf, q: step.q };
+        break;
+      }
+    }
+    report.q = best.q;
+    report.bytes = best.buf.length;
+    return { buffer: best.buf, animated: false, smart: report };
+  }
+
+  // ── Animada: muitos quadros onde há ação, qualidade aceitável ───────────
+  // A figurinha é exibida pequena, então fluidez vale mais que qualidade fina.
+  // O plano já distribui os quadros por movimento (ação em 15 fps, trecho
+  // parado com quadros longos); o orçamento decide QUANTOS quadros cabem e a
+  // qualidade se ajusta em volta disso. O tamanho por quadro é praticamente o
+  // mesmo quando se cortam quadros, então uma sonda serve para prever o resto.
+  const budget = STICKER_ANIMATED_MAX_BYTES;
+  const minFrames = plan.minFrames;
+  const seconds = Math.max(0.1, plan.durationMs / 1000);
+  const samples = []; // {q, bytesPerFrame} — normalizado, vale para qualquer nº de quadros
+  let best = null;
+
+  const probe = async (qTry, keepList) => {
+    report.probes++;
+    if (report.probes > 1) {
+      await onProgress?.(
+        `🎯 Ajustando a figurinha (${keepList.length} quadros · tentativa ${report.probes})…`
+      );
+    }
+    const buf = await encodePlanned(inFile, outFile, { plan, q: qTry, keep: keepList, fit, animated: true });
+    samples.push({ q: qTry, bytesPerFrame: buf.length / keepList.length });
+    report.tries.push({ q: qTry, frames: keepList.length, kb: Math.round(buf.length / 1024) });
+    if (!best || buf.length < best.buf.length) best = { buf, q: qTry, keep: keepList };
+    return buf;
+  };
+
+  const startQ = Math.max(8, Math.min(82, Math.round(plan.qStart ?? 45)));
+  const maxFrames = plan.schedule.length;
+  const measure = (q) => predictQuality(samples, (budget * 0.95) / keep.length, {
+    minQ: QUALITY_FLOOR,
+    maxQ: 82,
+    sizeKey: 'bytesPerFrame'
+  });
+
+  let keep = plan.schedule;
+  let q = startQ;
+  let buf = await probe(q, keep);
+
+  if (buf.length > budget) {
+    // Quantos quadros o orçamento compra no piso de qualidade?
+    const fits = framesForQualityFloor({
+      frames: keep.length,
+      bytes: buf.length,
+      q,
+      budgetBytes: budget,
+      minFrames
+    });
+    if (fits < keep.length) keep = shrinkSchedule(plan, fits);
+    const predicted = Math.max(QUALITY_FLOOR, measure(q));
+    if (predicted !== q) {
+      q = predicted;
+      buf = await probe(q, keep);
+    }
+  }
+
+  if (buf.length > budget) {
+    // Ainda estourou: corta quadros na proporção do excesso, no piso, e mede.
+    const fits = Math.floor(keep.length * 0.9 * (budget / buf.length));
+    if (fits < keep.length) {
+      keep = shrinkSchedule(plan, Math.max(minFrames, fits));
+      if (QUALITY_FLOOR !== q) q = QUALITY_FLOOR;
+      buf = await probe(q, keep);
+    }
+  } else if (buf.length < budget * GOOD_FIT_RATIO && keep.length >= maxFrames) {
+    // Cabe mais qualidade: sobe o q até perto do orçamento.
+    const predicted = predictQuality(samples, (budget * 0.95) / keep.length, {
+      minQ: q + 2,
+      maxQ: 82,
+      sizeKey: 'bytesPerFrame'
+    });
+    if (predicted > q) {
+      const buf2 = await probe(predicted, keep);
+      if (buf2.length <= budget && buf2.length > buf.length) {
+        buf = buf2;
+        q = predicted;
+      }
+    }
+  }
+
+  // Se nada coube no orçamento, entrega o menor arquivo que o FFmpeg produziu.
+  const finalBuf = buf.length <= budget ? buf : best.buf;
+  const finalQ = buf.length <= budget ? q : best.q;
+  const keepCount = (buf.length <= budget ? keep : best.keep).length;
+
+  report.q = finalQ;
+  report.bytes = finalBuf.length;
+  report.framesKept = keepCount;
+  report.effectiveFps = Number((keepCount / seconds).toFixed(1));
+  return { buffer: finalBuf, animated: isAnimatedWebp(finalBuf), smart: report };
 }
 
 /**
@@ -354,7 +575,7 @@ export function animatedStickerSteps(maxSeconds = STICKER_MAX_SECONDS) {
  * @param {{animated?: boolean, maxSeconds?: number, ext?: string, fit?: string, onProgress?: (msg: string) => Promise<any>}} opts
  * @returns {Promise<{buffer: Buffer, animated: boolean}>}
  */
-export async function toStickerWebp(input, { animated = false, maxSeconds = STICKER_MAX_SECONDS, ext = '.png', fit = 'fill', onProgress } = {}) {
+export async function toStickerWebp(input, { animated = false, maxSeconds = STICKER_MAX_SECONDS, ext = '.png', fit = 'fill', onProgress, smart = true } = {}) {
   const realExt = detectMediaExt(input, ext);
   const inFile = tmpFile(realExt);
   const outFile = tmpFile('.webp');
@@ -368,6 +589,18 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = STIC
 
   let best = null;
   try {
+    // Motor inteligente: analisa, escolhe o trecho, fecha o loop, enquadra o
+    // assunto e gasta o orçamento com previsão. Se qualquer coisa falhar, a
+    // escada clássica logo abaixo assume — o usuário nunca fica sem figurinha.
+    if (animated && smart) {
+      try {
+        const result = await smartStickerWebp(inFile, outFile, { fit, maxSeconds: wanted, onProgress });
+        if (result?.buffer?.length) return result;
+      } catch (error) {
+        console.warn(`[ffmpeg] análise inteligente falhou (${String(error?.message || error).slice(0, 160)}); usando a escada padrão`);
+      }
+    }
+
     for (let i = 0; i < steps.length; ) {
       const step = steps[i];
       if (i > 0 && onProgress) {

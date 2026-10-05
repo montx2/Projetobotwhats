@@ -11,7 +11,7 @@ import { SYM, header, section, cmd, footer, card, kv } from '../core/ui.js';
 import { TONE_MAX, TONE_MIN, describeRecipe, toneOptionLines, voiceOptionLines } from './voices.js';
 
 const STICKER_ITEMS = [
-  ['.s', 'foto, vídeo ou GIF vira figurinha (animação até 10 s)'],
+  ['.s', 'foto, vídeo ou GIF vira figurinha inteligente (até 10 s)'],
   ['.s <link>', 'baixa o link e já monta a figurinha'],
   ['.s inteira', 'mantém a imagem inteira, sem esticar'],
   ['.s cortar', 'preenche o quadrado sem esticar'],

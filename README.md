@@ -158,9 +158,22 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .info                            → status do bot (exclusivo do dono)
 ```
 
-### Figurinhas e o limite de duração
+### Figurinhas: limite de duração e motor inteligente
 
-O WhatsApp aceita WebP de exatamente **512×512**: até **100 KB** na figurinha parada e até **500 KB e 10 segundos** de animação na animada. O bot trabalha dentro desses limites e **tenta preservar a animação inteira**: ao converter um vídeo/GIF de até 10 s, a qualidade e o FPS caem antes da duração — os 10 segundos só são encurtados (8 s, 6 s, 5 s, 4 s, 3 s) se nem a compressão mínima couber em 500 KB. Vídeo maior que 10 s é cortado nos 10 s, e uma figurinha animada recebida pronta e com mais de 10 s perde apenas os quadros finais, sem reencode (o bot corta os quadros no próprio contêiner WebP, porque o FFmpeg não decodifica WebP animado). Para regerar uma animação acima de 500 KB, reenvie o vídeo/imagem original — aí o bot reencoda dentro do limite.
+O WhatsApp aceita WebP de exatamente **512×512**: até **100 KB** na figurinha parada e até **500 KB e 10 segundos** de animação na animada.
+
+**A duração é a última coisa a cair.** Ao converter um vídeo/GIF de até 10 s, a qualidade e o FPS caem antes da duração — os 10 segundos só são encurtados (8 s, 6 s, 5 s, 4 s, 3 s) se nem a compressão mínima couber em 500 KB. Vídeo maior que 10 s é cortado nos 10 s, e uma figurinha animada recebida pronta e com mais de 10 s perde apenas os quadros finais, sem reencode (o bot corta os quadros no próprio contêiner WebP, porque o FFmpeg não decodifica WebP animado). Para regerar uma animação acima de 500 KB, reenvie o vídeo/imagem original — aí o bot reencoda dentro do limite.
+
+**Antes de encodar, o bot analisa a mídia** (quadros minúsculos de 32×32 em cinza, ~0,1 s de FFmpeg) e decide o que fazer com ela — como os grandes apps de figurinha:
+
+- **Escolhe o melhor trecho de até 10 s** — o de mais movimento e com emenda de loop mais suave; não é sempre o começo do vídeo (um vídeo de 40 s, por exemplo, pode render o trecho dos 12 s aos 22 s). Em vídeos longos o trecho sai dos primeiros 60 s.
+- **Fecha o loop** — encurta o fim em até 0,4 s para o último quadro parecer o primeiro e a animação não "pular" ao repetir.
+- **Enquadra o assunto** — recorta um quadrado ao redor do que se mexe (nunca menos de 55% do lado menor), então o sujeito aparece grande em vez de perdido no quadro. Vídeo em que a ação já ocupa quase tudo não é recortado.
+- **Distribui quadros por movimento** — o WebP animado aceita quadros com durações diferentes: trecho parado fica com menos quadros (cada um durando até ~0,25 s) e ação com até 15 fps. A figurinha fica fluida onde importa e leve onde não importa.
+- **Gasta os 500 KB com previsão** — o tamanho da figurinha é medido em uma ou duas tentativas e o modelo (tamanho por quadro e qualidade) calcula quantos quadros cabem e qual qualidade fecha o orçamento, em vez de testar uma escada fixa de qualidade.
+- **Vídeo sem movimento vira figurinha parada** — em alta qualidade, menor e sem o "pisca" de uma animação que não anima nada.
+
+Cada conversão registra a decisão no log (`trecho 12.4s–22.4s · 96 quadros (15 fps) · enquadrado em 500x500+110+640 · q=48`), e o resultado continua sendo um WebP padrão com pack/autor/emojis. Se a análise falhar por qualquer motivo, a conversão cai automaticamente na escada clássica — ninguém fica sem figurinha.
 
 ### Jogos & arcade
 
