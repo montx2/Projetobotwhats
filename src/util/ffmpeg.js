@@ -951,14 +951,92 @@ export function animatedStickerSteps(maxSeconds = STICKER_MAX_SECONDS) {
 }
 
 /**
+ * `.s` CLÁSSICO — a escada de conversão de antes do motor inteligente (PR #26),
+ * restaurada como era: sem análise, sem trecho escolhido, sem loop, sem crop e
+ * sem recorte de fundo. A animação sai do começo do vídeo com até 7 s a 15 fps
+ * e, se não couber, cada degrau baixa FPS, qualidade E duração juntos
+ * (7 → 6 → 5 → 4 → 3 s); a foto desce a qualidade de 82 a 22. Simples e
+ * previsível — o ajuste fino (10 s, trecho, loop, enquadramento, fundo) mora no
+ * `.figurinha`, que usa o motor.
+ *
+ * Não confundir com `animatedStickerSteps()`: aquela é a escada de RESERVA do
+ * motor inteligente (10 s preservados) e continua só com ele.
+ */
+export const STICKER_CLASSIC_SECONDS = 7;
+/** Teto de bytes da animação clássica — o mesmo de antes (sobra folga para o EXIF). */
+export const STICKER_CLASSIC_ANIMATED_MAX_BYTES = 480 * 1024;
+
+/**
+ * Degraus do `.s` clássico, idênticos aos de antes do motor.
+ * @returns {Array<{q: number, fps?: number, dur?: number}>}
+ */
+export function classicStickerSteps({ animated = false, maxSeconds = STICKER_MAX_SECONDS } = {}) {
+  if (!animated) return [{ q: 82 }, { q: 68 }, { q: 52 }, { q: 36 }, { q: 22 }];
+  const seconds = stickerSeconds(maxSeconds);
+  return [
+    { fps: 15, q: 55, dur: Math.min(seconds, STICKER_CLASSIC_SECONDS) },
+    { fps: 12, q: 42, dur: Math.min(seconds, 6) },
+    { fps: 10, q: 32, dur: Math.min(seconds, 5) },
+    { fps: 8, q: 22, dur: Math.min(seconds, 4) },
+    { fps: 6, q: 15, dur: Math.min(seconds, 3) }
+  ];
+}
+
+/**
+ * Conversão do `.s` clássico: o mesmo laço de antes — o primeiro degrau que
+ * cabe é a figurinha. Duas travas da regra de ouro (não mudam o que o usuário
+ * vê, só impedem figurinha que o WhatsApp recusaria): a foto mira 98 KB em vez
+ * de 100 KB, porque o EXIF do pack entra depois e o WhatsApp mede o arquivo
+ * FINAL; e, se nem o último degrau couber (ruído incompressível), a trava
+ * `enforceStickerLimit` aperta mais em vez de entregar acima do limite.
+ */
+async function classicStickerWebp(inFile, outFile, { animated, maxSeconds, fit, onProgress }) {
+  const maxBytes = animated ? STICKER_CLASSIC_ANIMATED_MAX_BYTES : STICKER_STATIC_MAX_BYTES;
+  const steps = classicStickerSteps({ animated, maxSeconds });
+  let best = null;
+  for (let i = 0; i < steps.length; ) {
+    const step = steps[i];
+    if (i > 0 && onProgress) {
+      await onProgress(
+        animated
+          ? `🗜️ Otimizando figurinha animada para o WhatsApp (tentativa ${i + 1}/${steps.length})…`
+          : `🗜️ Ajustando peso da figurinha (${i + 1}/${steps.length})…`
+      );
+    }
+    await encodeStep(inFile, outFile, { animated, fit, ...step });
+    if (!fs.existsSync(outFile)) throw new Error('ffmpeg não gerou saída');
+    const buf = fs.readFileSync(outFile);
+    if (!buf.length || !isWebp(buf)) throw new Error('ffmpeg gerou um WebP inválido');
+
+    if (!best || buf.length < best.length) best = buf;
+    if (buf.length <= maxBytes) return { buffer: buf, animated: isAnimatedWebp(buf) };
+    // Se ficou muito acima do limite, pula direto 2 degraus para economizar tempo
+    i += buf.length > maxBytes * 2.2 && i + 2 < steps.length ? 2 : 1;
+  }
+
+  if (!best) throw new Error('ffmpeg não gerou saída');
+  if (best.length > maxBytes) {
+    // A escada já encurtou até o último degrau; a trava só aperta o que sobrou.
+    const wanted = steps[steps.length - 1].dur || 1;
+    const shrunk = await enforceStickerLimit(inFile, outFile, { animated, fit, wanted, maxBytes, onProgress });
+    if (shrunk && (shrunk.length < best.length || shrunk.length <= maxBytes)) best = shrunk;
+  }
+  return { buffer: best, animated: isAnimatedWebp(best) };
+}
+
+/**
  * Converte imagem/vídeo/gif em WebP de figurinha (512x512, com transparência)
  * respeitando os limites do WhatsApp (<= 100 KB estática; <= 500 KB e <= 10 s
  * de animação na animada). A duração pedida em `maxSeconds` é preservada ao
  * máximo — a compressão come FPS/qualidade antes de cortar tempo.
  *
+ * `smart` (padrão `true`) liga o motor inteligente — é o que o `.figurinha`
+ * usa. Com `smart: false` sai a figurinha do `.s` clássico: a escada de antes
+ * do motor (`classicStickerSteps`), sem análise e sem plano no retorno.
+ *
  * @param {Buffer} input mídia original
- * @param {{animated?: boolean, maxSeconds?: number, ext?: string, fit?: string, onProgress?: (msg: string) => Promise<any>}} opts
- * @returns {Promise<{buffer: Buffer, animated: boolean}>}
+ * @param {{animated?: boolean, maxSeconds?: number, ext?: string, fit?: string, smart?: boolean, prefer?: string, onProgress?: (msg: string) => Promise<any>}} opts
+ * @returns {Promise<{buffer: Buffer, animated: boolean, smart?: object}>}
  */
 export async function toStickerWebp(input, { animated = false, maxSeconds = STICKER_MAX_SECONDS, ext = '.png', fit = 'fill', onProgress, smart = true, prefer = 'auto' } = {}) {
   const realExt = detectMediaExt(input, ext);
@@ -974,6 +1052,9 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = STIC
 
   let best = null;
   try {
+    // `.s` clássico: a escada de antes do motor, sem análise nenhuma.
+    if (!smart) return await classicStickerWebp(inFile, outFile, { animated, maxSeconds: wanted, fit, onProgress });
+
     // Motor inteligente: analisa, escolhe o trecho, fecha o loop, enquadra o
     // assunto e gasta o orçamento com previsão. Se qualquer coisa falhar, a
     // escada clássica logo abaixo assume — o usuário nunca fica sem figurinha.

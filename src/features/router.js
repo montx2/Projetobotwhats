@@ -14,9 +14,18 @@ import { shortUrl } from '../core/http.js';
 import { log } from '../core/logger.js';
 import { messageCache, isBotSent, markBotSent, containsViewOnce } from '../wa/cache.js';
 import { extractAnyText, isIgnored, normalizeIgnoreTarget, handleDelete, statusText } from './antidelete.js';
-import { SYM, header, section, card, footer, ok, fail, warn, wait, usage, kv, toggle } from '../core/ui.js';
+import { SYM, header, section, card, cmd as cmdLine, footer, ok, fail, warn, wait, usage, kv, toggle } from '../core/ui.js';
 import { isViewOnce, onViewOnceMessage, unwrapViewOnce } from './viewonce.js';
-import { makeSticker, packInfo, isAnimatedWebp, parseFit, parseStickerPrefs, extractAnyMediaSource } from './sticker.js';
+import {
+  makeSticker,
+  packInfo,
+  isAnimatedWebp,
+  parseFit,
+  parseStickerPrefs,
+  parseSimpleSticker,
+  parseStickerCommand,
+  extractAnyMediaSource
+} from './sticker.js';
 import { stickerSourcesForCommand } from './stickerlink.js';
 import { removeBackground, bgStatus, bgPools } from './bgremoval.js';
 import {
@@ -441,6 +450,23 @@ function stickerSourceNote(sources, failures = [], skipped = 0) {
   if (failures.length) note.push(`${SYM.warn} ${truncate(failures[0], 140)}${failures.length > 1 ? ` (+${failures.length - 1})` : ''}`);
   if (skipped > 0) note.push(`_+${skipped} link(s) ignorado(s) — envio até 3 por vez_`);
   return truncate(note.join('\n'), 300);
+}
+
+/** Guia curto do comando escondido `.figurinha` — não aparece em menu nenhum. */
+function stickerGuide() {
+  return card([
+    header('Figurinha', 'ajustes finos'),
+    [
+      'Responda uma mídia (ou mande um link) com:',
+      cmdLine('.figurinha', 'automático: melhor trecho, loop fechado e assunto enquadrado'),
+      cmdLine('.figurinha fundo', 'remove o fundo (IA)'),
+      cmdLine('.figurinha hd', 'mais nitidez  ·  `.figurinha liso` mais fluidez'),
+      cmdLine('.figurinha curto', '5 s  ·  `.figurinha 6s` duração exata (2 a 10 s)'),
+      cmdLine('.figurinha inteira', 'imagem completa, sem esticar  ·  `.figurinha cortar` preenche cortando as bordas'),
+      '  _pode combinar: `.figurinha fundo hd 6s`_'
+    ].join('\n'),
+    footer('`.s` continua a figurinha simples, esticada por padrão.')
+  ]);
 }
 
 /**
@@ -1072,29 +1098,41 @@ async function runCommand(sock, msg, cmd, ctx) {
     }
 
     // ── FIGURINHAS ──────────────────────────────────────
+    // `.s` é a figurinha simples de sempre: estica por padrão, motor clássico.
     case 's':
     case 'fig':
-    case 'figu':
-    case 'sticker':
-    case 'stiker':
-    case 'figurinha': {
+    case 'figu': {
       // Mídia anexada/citada tem prioridade; sem mídia, os links do texto viram figurinha.
       const got = await stickerSourcesOrReply({ sock, msg, args, allowViewOnce: inOwnerPrivate, reply });
       if (!got) return;
       const { sources, failures, skipped } = got;
       if (!sources.length) {
-        return reply(
-          usage(
-            '.s',
-            '.s https://br.pinterest.com/pin/123/',
-            'Envie/responda uma imagem, vídeo ou GIF — ou mande o link que eu baixo e monto a figurinha. A animação vai até os 10 s do WhatsApp.\n' +
-              'Quer mandar no resultado? `.s liso` (mais fluidez), `.s hd` (mais nitidez), `.s curto` (5 s) ou `.s 6s` (duração exata).'
-          )
-        );
+        return reply(usage('.s', '.s https://br.pinterest.com/pin/123/', 'Envie/responda uma imagem, vídeo ou GIF — ou mande o link que eu baixo e monto a figurinha.'));
       }
       let done = 0;
       for (let i = 0; i < sources.length; i++) {
-        const webp = await makeSticker(sources[i], { ...packInfo(), fit: parseFit(args), ...parseStickerPrefs(args), onProgress: reply });
+        const webp = await makeSticker(sources[i], { ...packInfo(), ...parseSimpleSticker(args), onProgress: reply });
+        await reply(wait(sources.length > 1 ? `Enviando figurinha ${i + 1}/${sources.length}` : 'Enviando figurinha'));
+        await sendStickerMessage(sock, jid, webp, msg);
+        done++;
+      }
+      return reply(
+        ok(done > 1 ? `${done} figurinhas prontas` : 'Figurinha pronta', stickerSourceNote(sources, failures, skipped))
+      );
+    }
+
+    // `.figurinha` é escondido (fora de qualquer menu): motor inteligente com
+    // todos os ajustes na mesma linha. Sem mídia nem link, ele se explica.
+    case 'figurinha':
+    case 'sticker':
+    case 'stiker': {
+      const got = await stickerSourcesOrReply({ sock, msg, args, allowViewOnce: inOwnerPrivate, reply });
+      if (!got) return;
+      const { sources, failures, skipped } = got;
+      if (!sources.length) return reply(stickerGuide());
+      let done = 0;
+      for (let i = 0; i < sources.length; i++) {
+        const webp = await makeSticker(sources[i], { ...packInfo(), ...parseStickerCommand(args), onProgress: reply });
         await reply(wait(sources.length > 1 ? `Enviando figurinha ${i + 1}/${sources.length}` : 'Enviando figurinha'));
         await sendStickerMessage(sock, jid, webp, msg);
         done++;
