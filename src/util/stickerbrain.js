@@ -86,16 +86,17 @@ export function parseSourceMeta(stderr) {
 }
 
 /**
- * Transforma os quadros crus (32×32 cinza) na análise que o plano consome:
- * movimento entre quadros, brilho, assinaturas 8×8 e os quadros originais
- * (usados para a área de atividade e para escolher o quadro da figurinha parada).
+ * Transforma os quadros crus (32×32 RGBA) na análise que o plano consome:
+ * movimento entre quadros, brilho, assinaturas 8×8, os quadros em cinza
+ * (derivados) e a cor original — que é o que permite achar o fundo liso e
+ * recortar o sujeito sem IA.
  *
- * @param {Buffer} raw GRID*GRID bytes por quadro, em cinza
+ * @param {Buffer} raw GRID*GRID*4 bytes por quadro (RGBA)
  * @param {{width?: number, height?: number, durationMs?: number, sampleFps?: number}} [meta]
  */
 export function analyzeFrames(raw, { width = 0, height = 0, durationMs = 0, sampleFps = SAMPLE_FPS } = {}) {
   const cell = GRID * GRID;
-  const frameCount = Math.floor(raw.length / cell);
+  const frameCount = Math.floor(raw.length / (cell * 4));
   if (frameCount < 2) return null;
 
   const deltas = new Float32Array(frameCount);
@@ -104,17 +105,25 @@ export function analyzeFrames(raw, { width = 0, height = 0, durationMs = 0, samp
   const signatures = new Uint8Array(frameCount * sigSize);
   const pool = GRID / SIG;
   const poolCells = pool * pool;
+  // Cinza derivado do RGB (luma Rec.601): o resto do motor continua com um byte
+  // por pixel; a cor fica guardada para o recorte de fundo.
+  const gray = new Uint8Array(frameCount * cell);
 
   for (let f = 0; f < frameCount; f++) {
-    const base = f * cell;
+    const base = f * cell * 4;
+    const grayBase = f * cell;
     let luma = 0;
-    for (let i = 0; i < cell; i++) luma += raw[base + i];
+    for (let i = 0; i < cell; i++) {
+      const p = base + i * 4;
+      const v = Math.round((raw[p] * 299 + raw[p + 1] * 587 + raw[p + 2] * 114) / 1000);
+      gray[grayBase + i] = v;
+      luma += v;
+    }
     brightness[f] = luma / cell / 255;
 
     if (f > 0) {
       let diff = 0;
-      const prev = base - cell;
-      for (let i = 0; i < cell; i++) diff += Math.abs(raw[base + i] - raw[prev + i]);
+      for (let i = 0; i < cell; i++) diff += Math.abs(gray[grayBase + i] - gray[grayBase - cell + i]);
       deltas[f] = diff / cell / 255;
     }
 
@@ -125,7 +134,7 @@ export function analyzeFrames(raw, { width = 0, height = 0, durationMs = 0, samp
         let sum = 0;
         for (let y = 0; y < pool; y++) {
           const row = (sy * pool + y) * GRID + sx * pool;
-          for (let x = 0; x < pool; x++) sum += raw[base + row + x];
+          for (let x = 0; x < pool; x++) sum += gray[grayBase + row + x];
         }
         signatures[sigBase + sy * SIG + sx] = Math.round(sum / poolCells);
       }
@@ -143,7 +152,8 @@ export function analyzeFrames(raw, { width = 0, height = 0, durationMs = 0, samp
     deltas,
     brightness,
     signatures,
-    gray: raw,
+    gray,
+    rgba: raw,
     grid: GRID,
     cell
   };
@@ -475,11 +485,11 @@ export function activityBox(analysis, { start = 0, end = analysis.frameCount - 1
  * esticar/distorcer ao escalar para 512×512). Devolve `null` quando o crop não
  * compensa — assunto já ocupando o quadro, ou caixa pequena demais.
  */
-export function cropPixels(box, width, height) {
+export function cropPixels(box, width, height, { minRatio = MIN_CROP_RATIO } = {}) {
   if (!box || !width || !height) return null;
   const minSide = Math.min(width, height);
   const wanted = Math.max(box.w * width, box.h * height) * 1.25; // margem para respirar
-  const side = Math.min(minSide, Math.max(wanted, MIN_CROP_RATIO * minSide));
+  const side = Math.min(minSide, Math.max(wanted, minRatio * minSide));
   if (side >= CROP_SKIP_RATIO * minSide) return null;
   const px = Math.max(16, Math.round(side));
   const x = Math.max(0, Math.min(width - px, Math.round(box.cx * width - px / 2)));
@@ -489,7 +499,7 @@ export function cropPixels(box, width, height) {
 
 /** FPS alvo conforme o movimento: parado fica perto de 6 fps; ação vai a 15. */
 export function targetFpsFor(motionPerSecond) {
-  const scale = Math.min(1, Math.max(0, motionPerSecond / 0.045));
+  const scale = Math.min(1, Math.max(0, (Number(motionPerSecond) || 0) / MOTION_REFERENCE));
   return Math.max(6, Math.min(SAMPLE_FPS, Math.round(6 + (SAMPLE_FPS - 6) * scale)));
 }
 
@@ -497,6 +507,20 @@ export function targetFpsFor(motionPerSecond) {
 
 /** Piso de qualidade em que uma figurinha ainda fica apresentável de perto. */
 export const QUALITY_FLOOR = 22;
+/**
+ * Equilíbrio automático entre fluidez e nitidez, medido pelo movimento:
+ *  - vídeo com muita ação: piso baixo (22) → o orçamento vira QUADROS, porque
+ *    movimento travado incomoda mais que detalhe fino numa figurinha pequena;
+ *  - vídeo com pouca ação: piso alto (50) → o orçamento vira NITIDEZ, porque
+ *    poucos quadros já contam a história e o arquivo sobra.
+ */
+export const QUALITY_FLOOR_MOTION_LOW = 50;
+export const MOTION_REFERENCE = 0.045;
+
+export function qualityFloorFor(motionPerSecond) {
+  const level = Math.min(1, Math.max(0, (Number(motionPerSecond) || 0) / MOTION_REFERENCE));
+  return Math.round(QUALITY_FLOOR_MOTION_LOW - (QUALITY_FLOOR_MOTION_LOW - QUALITY_FLOOR) * level);
+}
 
 /**
  * Quantos quadros o orçamento compra se a qualidade descer até o piso.
@@ -597,7 +621,7 @@ export function bestStillFrame(analysis, start, end) {
  * @param {{maxSeconds?: number, budgetBytes?: number, minFrames?: number, qStart?: number, autoCrop?: boolean}} [opts]
  * @returns {object|null} plano pronto para o FFmpeg (ou null quando não deu)
  */
-export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 1024, minFrames = 8, qStart = 45, autoCrop = true } = {}) {
+export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 1024, minFrames = 8, qStart = 45, autoCrop = true, autoCut = true } = {}) {
   if (!analysis || analysis.frameCount < 2) return null;
   const loop = chooseLoop(analysis, { maxSeconds });
   if (!loop) return null;
@@ -607,6 +631,9 @@ export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 102
   const frames = end - start + 1;
   const seconds = frames / fps;
   const motion = windowMotion(analysis, start, end);
+  // Fundo liso → recorte automático sem IA (chave de cor). Vale para figurinha
+  // parada e animada: fundo chapado em volta do sujeito fica transparente.
+  const cut = autoCut ? backgroundCut(analysis, { start, end }) : null;
   const base = {
     analysis,
     start,
@@ -618,7 +645,9 @@ export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 102
     motion,
     budgetBytes,
     minFrames,
-    qStart
+    qStart,
+    qualityFloor: qualityFloorFor(motion * fps),
+    cut
   };
 
   // Vídeo parado não vira "animação": vira figurinha estática, melhor e menor.
@@ -641,14 +670,210 @@ export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 102
   const kept = planSchedule(analysis, { start, end, targetFrames });
   const box = activityBox(analysis, { start, end });
 
+  // Com o fundo removido, enquadrar o sujeito é o que dá cara de figurinha de
+  // app — mas só quando o recorte não estica demais (upscale feio).
+  const subjectCrop = cut ? cropPixels(subjectBox(analysis, cut, { start, end }), analysis.width, analysis.height, { minRatio: CUT_CROP_MIN_RATIO }) : null;
+  const crop = autoCrop
+    ? (subjectCrop && subjectCrop.w >= CUT_CROP_MIN_SOURCE_PX ? subjectCrop : cropPixels(box, analysis.width, analysis.height)) ?? null
+    : null;
+
   return {
     ...base,
     mode: 'animated',
     targetFps,
     schedule: kept.map((i) => i - start),
-    crop: autoCrop ? cropPixels(box, analysis.width, analysis.height) : null,
+    crop,
     activity: box,
     reason: ''
+  };
+}
+
+// ── Fundo liso → recorte automático (sem IA) ───────────────────────────────
+
+/** Fração mínima do quadro que o fundo precisa ocupar para valer o recorte. */
+export const CUT_MIN_COVERAGE = 0.3;
+/** Diferença mínima entre o sujeito e o fundo (0..1) para o recorte valer. */
+export const CUT_MIN_CONTRAST = 0.12;
+/** Menor recorte aceitável sobre o sujeito, em fração do lado menor. */
+export const CUT_CROP_MIN_RATIO = 0.3;
+/** Abaixo disso (px na fonte) enquadrar o sujeito esticaria demais a imagem. */
+export const CUT_CROP_MIN_SOURCE_PX = 384;
+
+function cellColor(analysis, frame, cx, cy) {
+  const base = frame * analysis.cell * 4;
+  const p = base + (cy * GRID + cx) * 4;
+  return [analysis.rgba[p], analysis.rgba[p + 1], analysis.rgba[p + 2]];
+}
+
+/**
+ * Procura um fundo liso para recortar o sujeito SEM IA (chave de cor).
+ *
+ * A ideia: se os quatro cantos (blocos de 6×6 células) têm a mesma cor, essa cor
+ * se mantém estável no tempo e ela ocupa boa parte do quadro, então o fundo é
+ * liso e dá para removê-lo. Se qualquer canto destoar, está em movimento ou o
+ * fundo aparece pouco, a resposta é `null` — a figurinha sai inteira, como
+ * sempre. Melhor não recortar do que recortar errado.
+ *
+ * @returns {{color: {r: number, g: number, b: number}, similarity: number, coverage: number, contrast: number}|null}
+ */
+export function backgroundCut(analysis, { start = 0, end = analysis.frameCount - 1 } = {}) {
+  if (!analysis?.rgba || end <= start) return null;
+  const frames = [];
+  // Amostra até 24 quadros do trecho: fundo chapado não muda de um para o outro.
+  const step = Math.max(1, Math.floor((end - start) / 24));
+  for (let f = start; f <= end; f += step) frames.push(f);
+
+  // O fundo é procurado no ANEL EXTERNO (2 células de espessura), não só nos
+  // cantos: assim um sujeito que encosta numa borda ainda deixa o resto do
+  // fundo visível, como nos apps comerciais.
+  const RING = 2;
+  const ringCells = [];
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      if (x < RING || y < RING || x >= GRID - RING || y >= GRID - RING) ringCells.push(y * GRID + x);
+    }
+  }
+
+  // A cor do fundo é a MEDIANA do anel: se o sujeito cobre parte da borda em
+  // alguns quadros, a mediana continua sendo o fundo.
+  const samples = [];
+  const ringAlpha = [];
+  for (const f of frames) {
+    const base = f * analysis.cell * 4;
+    for (const c of ringCells) {
+      const p = base + c * 4;
+      samples.push([analysis.rgba[p], analysis.rgba[p + 1], analysis.rgba[p + 2]]);
+      ringAlpha.push(analysis.rgba[p + 3]);
+    }
+  }
+  // Já veio transparente (figurinha repassada, PNG/GIF com alfa): não há fundo
+  // liso para tirar, e chavear cor no preto das áreas vazias estragaria o desenho.
+  ringAlpha.sort((a, b) => a - b);
+  if (ringAlpha[Math.floor(ringAlpha.length / 2)] < 20) return null;
+  const channelMedian = (k) => {
+    const values = samples.map((s) => s[k]).sort((a, b) => a - b);
+    return values[Math.floor(values.length / 2)];
+  };
+  const mean = [channelMedian(0), channelMedian(1), channelMedian(2)];
+  const distances = samples.map((s) => Math.hypot(s[0] - mean[0], s[1] - mean[1], s[2] - mean[2])).sort((a, b) => a - b);
+  const d50 = distances[Math.floor(distances.length / 2)];
+  // Metade do anel precisa estar a menos de ~9% da cor dominante (senão é cenário).
+  if (d50 > 0.09 * 441.67) return null;
+
+  const color = { r: Math.round(mean[0]), g: Math.round(mean[1]), b: Math.round(mean[2]) };
+  // Cores do mesmo fundo ficam dentro de 3σ (a compressão do vídeo mexe um pouco).
+  const inner = samples.filter((s) => Math.hypot(s[0] - color.r, s[1] - color.g, s[2] - color.b) <= d50 * 2);
+  const variance = inner.length
+    ? inner.reduce((acc, s) => acc + (s[0] - color.r) ** 2 + (s[1] - color.g) ** 2 + (s[2] - color.b) ** 2, 0) /
+      (inner.length * 3)
+    : 0;
+  const sigma = Math.sqrt(variance);
+  const tol = Math.max(20, sigma * 3 + 6);
+  const near = (r, g, b) => Math.hypot(r - color.r, g - color.g, b - color.b) <= tol;
+
+  // 1) O anel precisa continuar sendo fundo na maior parte dos quadros
+  //    (câmera andando muda a cor da borda e derruba isto).
+  let ringOk = 0;
+  for (const f of frames) {
+    const base = f * analysis.cell * 4;
+    let hits = 0;
+    for (const c of ringCells) {
+      const p = base + c * 4;
+      if (near(analysis.rgba[p], analysis.rgba[p + 1], analysis.rgba[p + 2])) hits++;
+    }
+    if (hits / ringCells.length >= 0.55) ringOk++;
+  }
+  if (ringOk / frames.length < 0.75) return null;
+
+  // 2) O fundo precisa ocupar boa parte do quadro e o miolo destoar dele
+  //    (senão é um cenário, não um sujeito sobre fundo liso).
+  let background = 0;
+  let totalCells = 0;
+  let centerDiff = 0;
+  let centerCells = 0;
+  const c0 = GRID * 0.35;
+  const c1 = GRID * 0.65;
+  for (const f of frames) {
+    const base = f * analysis.cell * 4;
+    for (let y = 0; y < GRID; y++) {
+      for (let x = 0; x < GRID; x++) {
+        const p = base + (y * GRID + x) * 4;
+        const r = analysis.rgba[p];
+        const g = analysis.rgba[p + 1];
+        const b = analysis.rgba[p + 2];
+        const isNear = near(r, g, b);
+        totalCells++;
+        if (isNear) background++;
+        if (x >= c0 && x <= c1 && y >= c0 && y <= c1) {
+          centerCells++;
+          if (!isNear) centerDiff += Math.hypot(r - color.r, g - color.g, b - color.b) / 441.67;
+        }
+      }
+    }
+  }
+  const coverage = background / totalCells;
+  const contrast = centerCells ? centerDiff / centerCells : 0;
+  if (coverage < CUT_MIN_COVERAGE || contrast < CUT_MIN_CONTRAST) return null;
+
+  // Tolerância do colorkey: cobre o ruído medido com folga, sem comer o sujeito.
+  const similarity = Math.max(0.07, Math.min(0.3, 0.05 + (sigma / 255) * 3));
+  return {
+    color,
+    similarity: Number(similarity.toFixed(3)),
+    coverage: Number(coverage.toFixed(2)),
+    contrast: Number(contrast.toFixed(2))
+  };
+}
+
+/**
+ * Caixa quadrada do SUJEITO (o que não é a cor do fundo), normalizada 0..1.
+ * Uma célula conta como sujeito quando fica longe da cor do fundo na maior
+ * parte do trecho — assim movimento de câmera e ruído não inflam a caixa.
+ *
+ * @returns {{cx: number, cy: number, w: number, h: number}|null}
+ */
+export function subjectBox(analysis, cut, { start = 0, end = analysis.frameCount - 1, pad = 0.15 } = {}) {
+  if (!analysis?.rgba || !cut || end <= start) return null;
+  const frames = [];
+  const step = Math.max(1, Math.floor((end - start) / 24));
+  for (let f = start; f <= end; f += step) frames.push(f);
+  const tol = Math.max(24, cut.similarity * 441.67 * 0.8);
+  const hits = new Uint16Array(GRID * GRID);
+  for (const f of frames) {
+    const base = f * analysis.cell * 4;
+    for (let y = 0; y < GRID; y++) {
+      for (let x = 0; x < GRID; x++) {
+        const p = base + (y * GRID + x) * 4;
+        const d = Math.hypot(
+          analysis.rgba[p] - cut.color.r,
+          analysis.rgba[p + 1] - cut.color.g,
+          analysis.rgba[p + 2] - cut.color.b
+        );
+        if (d > tol) hits[y * GRID + x]++;
+      }
+    }
+  }
+  const need = Math.max(1, Math.round(frames.length * 0.3));
+  let minX = GRID;
+  let minY = GRID;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      if (hits[y * GRID + x] < need) continue;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < 0) return null;
+  const side = Math.min(1, ((Math.max(maxX - minX + 1, maxY - minY + 1) / GRID) * (1 + pad * 2)));
+  return {
+    cx: (minX + maxX + 1) / 2 / GRID,
+    cy: (minY + maxY + 1) / 2 / GRID,
+    w: side,
+    h: side
   };
 }
 
@@ -664,7 +889,7 @@ export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 102
  */
 export function analyzeSource(inFile, { ffmpegBin, maxSeconds = ANALYSIS_MAX_SECONDS, sampleFps = SAMPLE_FPS, timeoutMs = 90_000 } = {}) {
   if (!ffmpegBin || !inFile) return Promise.resolve(null);
-  const cell = GRID * GRID;
+  const cell = GRID * GRID * 4; // RGBA: a cor é o que permite achar o fundo liso
   const maxFrames = Math.ceil(maxSeconds * sampleFps) + 4;
   const maxBytes = maxFrames * cell;
 
@@ -675,7 +900,8 @@ export function analyzeSource(inFile, { ffmpegBin, maxSeconds = ANALYSIS_MAX_SEC
       '-v', 'info',
       '-t', String(maxSeconds),
       '-i', inFile,
-      '-vf', `fps=${sampleFps},scale=${GRID}:${GRID}:force_original_aspect_ratio=disable:flags=bilinear,format=gray`,
+      '-vf', `fps=${sampleFps},scale=${GRID}:${GRID}:force_original_aspect_ratio=disable:flags=bilinear,format=rgba`,
+      '-pix_fmt', 'rgba',
       '-f', 'rawvideo',
       '-'
     ];

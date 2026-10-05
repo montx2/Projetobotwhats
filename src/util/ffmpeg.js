@@ -255,7 +255,14 @@ export const STICKER_ANIMATED_SPEC_BYTES = 500 * 1024;
 export const STICKER_STATIC_MAX_BYTES = 100 * 1024;
 export const STICKER_ANIMATED_MAX_BYTES = 480 * 1024;
 
-export function buildStickerFilter({ animated, fps = 15, simple = false, fit = 'fill', crop = null, select = null }) {
+/** Cor do fundo detectado em `rrggbb` (formato do colorkey do FFmpeg). */
+export function cutHex(cut) {
+  return [cut.color.r, cut.color.g, cut.color.b]
+    .map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export function buildStickerFilter({ animated, fps = 15, simple = false, fit = 'fill', crop = null, select = null, cut = null }) {
   const flags = simple ? '' : `:flags=${animated ? 'bicubic' : 'lanczos'}`;
   const parts = [];
   if (animated) parts.push(`fps=${fps}`);
@@ -264,6 +271,9 @@ export function buildStickerFilter({ animated, fps = 15, simple = false, fit = '
   // material original, então a escala 512×512 não distorce nada.
   if (crop) parts.push(`crop=${crop.w}:${crop.h}:${crop.x}:${crop.y}`);
   parts.push('format=rgba');
+  // Fundo liso detectado na análise: vira transparência por chave de cor,
+  // antes da escala (o alfa é suavizado junto com a imagem).
+  if (cut) parts.push(`colorkey=0x${cutHex(cut)}:${cut.similarity}:0.1`);
   if (fit === 'contain') {
     parts.push(`scale=512:512:force_original_aspect_ratio=decrease${flags}`);
     parts.push('pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000');
@@ -347,7 +357,7 @@ async function encodeStep(inFile, outFile, { animated, q, fps = 15, dur = STICKE
  */
 async function encodePlanned(inFile, outFile, { plan, q, keep, fit = 'fill', animated = true, level = 5 }) {
   const select = keep?.length ? selectExpression(keep) : null;
-  const vf = buildStickerFilter({ animated, fps: plan.fps, fit, crop: plan.crop, select });
+  const vf = buildStickerFilter({ animated, fps: plan.fps, fit, crop: plan.crop, select, cut: plan.cut });
   const args = ['-y', '-hide_banner', '-loglevel', 'error'];
   if (animated) {
     if (plan.startMs > 0) args.push('-ss', (plan.startMs / 1000).toFixed(3));
@@ -394,9 +404,19 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
   // Rede de segurança: se o recorte não couber no quadro real (rotação/SAR
   // exóticos, metadados mentirosos), refaz o plano sem ele em vez de perder o
   // motor inteiro. O importantíssimo é entregar a figurinha.
+  const withoutCut = () => {
+    if (!plan.cut) return null;
+    plan = { ...plan, cut: null };
+    return plan;
+  };
   const withoutCrop = () => {
     if (!plan.crop) return null;
-    plan = planSticker(analysis, { maxSeconds, budgetBytes: STICKER_ANIMATED_MAX_BYTES, autoCrop: false });
+    plan = planSticker(analysis, {
+      maxSeconds,
+      budgetBytes: STICKER_ANIMATED_MAX_BYTES,
+      autoCrop: false,
+      autoCut: Boolean(plan.cut)
+    });
     if (plan) plan.crop = null;
     return plan;
   };
@@ -408,6 +428,8 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
     targetFps: plan.targetFps,
     frames: plan.frames,
     crop: plan.crop ? `${plan.crop.w}x${plan.crop.h}+${plan.crop.x}+${plan.crop.y}` : null,
+    cut: plan.cut ? `fundo liso 0x${cutHex(plan.cut)} · ${Math.round(plan.cut.coverage * 100)}% do quadro` : null,
+    qualityFloor: plan.qualityFloor,
     activity: plan.activity
       ? {
           x: Number((plan.activity.cx - plan.activity.w / 2).toFixed(2)),
@@ -424,6 +446,22 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
     analysisMs
   };
 
+  // Se o filtro falhar, degrada em ordem de importância: larga o corte de fundo
+  // (a figurinha sai inteira, com fundo) antes de largar o enquadramento.
+  const degrade = () => {
+    if (withoutCut()) {
+      report.cutDropped = true;
+      report.cut = null;
+      return plan;
+    }
+    if (withoutCrop()) {
+      report.cropDropped = true;
+      report.crop = null;
+      return plan;
+    }
+    return null;
+  };
+
   // ── Vídeo sem movimento: figurinha parada em alta qualidade ─────────────
   if (plan.mode === 'static') {
     report.stillSeconds = Number((plan.stillMs / 1000).toFixed(2));
@@ -435,8 +473,7 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
       try {
         buf = await encodePlanned(inFile, outFile, { plan, q: step.q, keep: null, fit, animated: false });
       } catch (error) {
-        if (first && withoutCrop()) {
-          report.cropDropped = true;
+        if (first && degrade()) {
           buf = await encodePlanned(inFile, outFile, { plan, q: step.q, keep: null, fit, animated: false });
         } else {
           throw error;
@@ -482,11 +519,14 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
   };
 
   const startQ = Math.max(8, Math.min(82, Math.round(plan.qStart ?? 45)));
+  // Equilíbrio automático: vídeo com muita ação aceita qualidade menor em troca
+  // de mais quadros; vídeo calmo prefere nitidez (piso alto).
+  const qualityFloor = Math.max(QUALITY_FLOOR, Math.min(82, plan.qualityFloor ?? QUALITY_FLOOR));
   const maxFrames = plan.schedule.length;
   // Qualidade que faria `keep.length` quadros chegarem perto do orçamento.
   const measure = () =>
     predictQuality(samples, (budget * 0.95) / keep.length, {
-      minQ: QUALITY_FLOOR,
+      minQ: qualityFloor,
       maxQ: 82,
       sizeKey: 'bytesPerFrame'
     });
@@ -497,8 +537,7 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
   try {
     buf = await probe(q, keep);
   } catch (error) {
-    if (!withoutCrop()) throw error;
-    report.cropDropped = true;
+    if (!degrade()) throw error;
     keep = plan.schedule;
     buf = await probe(q, keep);
   }
@@ -509,11 +548,12 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
       frames: keep.length,
       bytes: buf.length,
       q,
+      floor: qualityFloor,
       budgetBytes: budget,
       minFrames
     });
     if (fits < keep.length) keep = shrinkSchedule(plan, fits);
-    const predicted = Math.max(QUALITY_FLOOR, measure());
+    const predicted = Math.max(qualityFloor, measure());
     if (predicted !== q) {
       q = predicted;
       buf = await probe(q, keep);
@@ -525,7 +565,7 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
     const fits = Math.floor(keep.length * 0.9 * (budget / buf.length));
     if (fits < keep.length) {
       keep = shrinkSchedule(plan, Math.max(minFrames, fits));
-      if (QUALITY_FLOOR !== q) q = QUALITY_FLOOR;
+      if (qualityFloor !== q) q = qualityFloor;
       buf = await probe(q, keep);
     }
   } else if (buf.length < budget * GOOD_FIT_RATIO && keep.length >= maxFrames) {

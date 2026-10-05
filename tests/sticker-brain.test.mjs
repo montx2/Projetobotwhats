@@ -10,6 +10,7 @@ import path from 'node:path';
 import {
   GRID,
   analyzeFrames,
+  backgroundCut,
   activityBox,
   bestStillFrame,
   chooseLoop,
@@ -22,25 +23,43 @@ import {
   planSchedule,
   planSticker,
   predictQuality,
+  qualityFloorFor,
   shrinkSchedule,
+  subjectBox,
   targetFpsFor,
   windowMotion
 } from '../src/util/stickerbrain.js';
-import { selectExpression, toStickerWebp } from '../src/util/ffmpeg.js';
+import { buildStickerFilter, selectExpression, toStickerWebp } from '../src/util/ffmpeg.js';
 import { isAnimatedWebp, parseWebp, webpDurationMs } from '../src/util/webp.js';
 
 /**
- * Vídeo sintético: fundo cinza e um bloco claro de `block` pixels que se move.
+ * Vídeo sintético em RGBA: fundo de uma cor e um bloco de outra que se move.
  * `place(frame)` devolve {x, y} do bloco no quadro (índices de célula).
+ * Cores podem ser números (cinza) ou [r, g, b].
  */
+const rgb = (v) => (Array.isArray(v) ? v : [v, v, v]);
 function synthVideo({ frames, place = null, block = 8, bg = 40, fg = 220 }) {
-  const raw = Buffer.alloc(frames * GRID * GRID, bg);
+  const [br, bgc, bb] = rgb(bg);
+  const [fr, fgc, fb] = rgb(fg);
+  const raw = Buffer.alloc(frames * GRID * GRID * 4);
   for (let f = 0; f < frames; f++) {
+    const base = f * GRID * GRID * 4;
+    for (let i = 0; i < GRID * GRID; i++) {
+      raw[base + i * 4] = br;
+      raw[base + i * 4 + 1] = bgc;
+      raw[base + i * 4 + 2] = bb;
+      raw[base + i * 4 + 3] = 255;
+    }
     const pos = place?.(f);
     if (!pos) continue;
-    const base = f * GRID * GRID;
     for (let y = pos.y; y < Math.min(GRID, pos.y + block); y++) {
-      for (let x = pos.x; x < Math.min(GRID, pos.x + block); x++) raw[base + y * GRID + x] = fg;
+      for (let x = pos.x; x < Math.min(GRID, pos.x + block); x++) {
+        const p = base + (y * GRID + x) * 4;
+        raw[p] = fr;
+        raw[p + 1] = fgc;
+        raw[p + 2] = fb;
+        raw[p + 3] = 255;
+      }
     }
   }
   return raw;
@@ -147,12 +166,26 @@ test('chooseLoop fecha o loop num ponto em que o quadro final parece o inicial',
 test('deadLeadFrames poda abertura preta e respeita o teto de 40%', () => {
   // 30 quadros pretos + 60 quadros de bloco em movimento.
   const frames = 90;
-  const raw = Buffer.alloc(frames * GRID * GRID, 0);
-  for (let f = 30; f < frames; f++) {
-    const base = f * GRID * GRID;
-    for (let i = 0; i < GRID * GRID; i++) raw[base + i] = 40;
+  const raw = Buffer.alloc(frames * GRID * GRID * 4, 0);
+  for (let f = 0; f < frames; f++) {
+    const base = f * GRID * GRID * 4;
+    const level = f < 30 ? 0 : 40;
+    for (let i = 0; i < GRID * GRID; i++) {
+      raw[base + i * 4] = level;
+      raw[base + i * 4 + 1] = level;
+      raw[base + i * 4 + 2] = level;
+      raw[base + i * 4 + 3] = 255;
+    }
+    if (f < 30) continue;
     const x = 2 + ((f - 30) % 12);
-    for (let y = 12; y < 20; y++) for (let px = x; px < x + 8; px++) raw[base + y * GRID + px] = 220;
+    for (let y = 12; y < 20; y++) {
+      for (let px = x; px < x + 8; px++) {
+        const q = base + (y * GRID + px) * 4;
+        raw[q] = 220;
+        raw[q + 1] = 220;
+        raw[q + 2] = 220;
+      }
+    }
   }
   const analysis = analyzeFrames(raw, { sampleFps: 15, width: 720, height: 1280 });
   assert.equal(deadLeadFrames(analysis, { start: 0, end: 89 }), 30);
@@ -286,6 +319,120 @@ test('planSticker decide animada x parada e monta o plano', () => {
   assert.equal(stillPlan.crop, null);
   assert.match(stillPlan.reason, /não se mexe/);
   assert.equal(planSticker(null), null);
+});
+
+test('backgroundCut acha o fundo liso e recusa cenário', () => {
+  // Fundo azul chapado + sujeito que anda: o fundo é recortável.
+  const flat = analyzeFrames(
+    synthVideo({ frames: 60, place: (f) => ({ x: 4 + (f % 8), y: 10 }), bg: [30, 60, 140], fg: [235, 235, 235] }),
+    { sampleFps: 15, width: 720, height: 1280 }
+  );
+  const cut = backgroundCut(flat, { start: 0, end: 59 });
+  assert.ok(cut, 'fundo liso deve ser detectado');
+  assert.ok(Math.abs(cut.color.r - 30) <= 2 && Math.abs(cut.color.g - 60) <= 2 && Math.abs(cut.color.b - 140) <= 2);
+  assert.ok(cut.coverage > 0.8, `cobertura: ${cut.coverage}`);
+  assert.ok(cut.similarity > 0 && cut.similarity <= 0.32);
+
+  // Cenário: cada canto de uma cor → não recorta (melhor intacto que errado).
+  const busy = analyzeFrames(
+    synthVideo({ frames: 30, place: null, bg: 40, fg: 40 }),
+    { sampleFps: 15 }
+  );
+  for (let f = 0; f < 30; f++) {
+    const base = f * GRID * GRID * 4;
+    const paint = (x0, y0, c) => {
+      for (let y = y0; y < y0 + 8; y++) {
+        for (let x = x0; x < x0 + 8; x++) {
+          const p = base + (y * GRID + x) * 4;
+          busy.rgba[p] = c[0];
+          busy.rgba[p + 1] = c[1];
+          busy.rgba[p + 2] = c[2];
+        }
+      }
+    };
+    paint(0, 0, [200, 30, 30]);
+    paint(24, 0, [30, 200, 30]);
+    paint(0, 24, [30, 30, 200]);
+    paint(24, 24, [220, 210, 30]);
+  }
+  assert.equal(backgroundCut(busy, { start: 0, end: 29 }), null);
+});
+
+test('recorte: aguenta sujeito encostando na borda e respeita alfa existente', () => {
+  // Bloco grande que às vezes cobre um canto: o anel ainda mostra o fundo.
+  const raw = synthVideo({
+    frames: 60,
+    block: 16,
+    bg: [25, 110, 70],
+    fg: [245, 245, 245],
+    place: (f) => (f % 2 ? { x: 0, y: 0 } : { x: 8, y: 8 })
+  });
+  const analysis = analyzeFrames(raw, { sampleFps: 15, width: 1280, height: 1280 });
+  const cut = backgroundCut(analysis, { start: 0, end: 59 });
+  assert.ok(cut, 'sujeito na borda não pode derrubar o recorte');
+  assert.ok(cut.coverage > 0.3 && cut.contrast > 0.15);
+
+  // Figurinha que já veio transparente (PNG/GIF com alfa): não recorta de novo.
+  const transparent = Buffer.from(raw);
+  for (let i = 0; i < transparent.length; i += 4) {
+    if (Math.abs(transparent[i] - 25) <= 6 && Math.abs(transparent[i + 1] - 110) <= 6) transparent[i + 3] = 0;
+  }
+  const already = analyzeFrames(transparent, { sampleFps: 15 });
+  assert.equal(backgroundCut(already, { start: 0, end: 59 }), null);
+});
+
+test('fundo liso também enquadra o sujeito (sem esticar demais)', () => {
+  // Sujeito grande (metade do quadro) sobre fundo chapado numa fonte 1280².
+  const analysis = analyzeFrames(
+    synthVideo({ frames: 60, place: (f) => ({ x: 8, y: 8 + (f % 3) }), block: 16, bg: [20, 90, 60], fg: [240, 210, 120] }),
+    { sampleFps: 15, width: 1280, height: 1280 }
+  );
+  const cut = backgroundCut(analysis, { start: 0, end: 59 });
+  assert.ok(cut, 'fundo chapado detectado');
+  const box = subjectBox(analysis, cut, { start: 0, end: 59 });
+  assert.ok(box && box.w > 0.4 && box.w <= 1, `caixa do sujeito: ${JSON.stringify(box)}`);
+  const plan = planSticker(analysis, { maxSeconds: 10 });
+  assert.equal(plan.mode, 'animated');
+  assert.ok(plan.cut, 'o plano leva o corte para o FFmpeg');
+  assert.ok(plan.crop, 'enquadra o sujeito quando o recorte não estica');
+  assert.ok(plan.crop.w >= 384 && plan.crop.w < 1280, `lado: ${plan.crop.w}`);
+  assert.equal(plan.crop.w, plan.crop.h);
+
+  // Fonte pequena: enquadrar esticaria → mantém o quadro inteiro, só com o corte.
+  const small = analyzeFrames(
+    synthVideo({ frames: 60, place: () => ({ x: 8, y: 8 }), block: 16, bg: [20, 90, 60], fg: [240, 210, 120] }),
+    { sampleFps: 15, width: 360, height: 360 }
+  );
+  const smallPlan = planSticker(small, { maxSeconds: 10 });
+  assert.ok(smallPlan.cut, 'fundo liso continua recortado');
+  assert.equal(smallPlan.crop, null, 'sem upscale feio');
+});
+
+test('equilíbrio automático: ação vira fluidez, calma vira nitidez', () => {
+  assert.equal(qualityFloorFor(0), 50);
+  assert.equal(qualityFloorFor(0.02), 38);
+  assert.equal(qualityFloorFor(0.045), 22);
+  assert.equal(qualityFloorFor(1), 22);
+
+  const action = planSticker(
+    analyzeFrames(synthVideo({ frames: 120, place: (f) => ({ x: 2 + ((f * 5) % 22), y: 12 }) }), { sampleFps: 15 }),
+    {}
+  );
+  const calm = planSticker(
+    analyzeFrames(synthVideo({ frames: 120, place: () => ({ x: 8, y: 8 }) }), { sampleFps: 15 }),
+    {}
+  );
+  assert.equal(action.qualityFloor, 22, 'muito movimento → aceita q menor por mais fluidez');
+  assert.ok(calm.qualityFloor >= 40, `pouca ação → nitidez (piso ${calm.qualityFloor})`);
+});
+
+test('buildStickerFilter aplica o colorkey do fundo antes da escala', () => {
+  const cut = { color: { r: 30, g: 60, b: 140 }, similarity: 0.15, coverage: 0.9, contrast: 0.3 };
+  const vf = buildStickerFilter({ animated: true, fps: 15, fit: 'fill', crop: null, select: null, cut });
+  assert.match(vf, /colorkey=0x1e3c8c:0\.15:0\.1/, vf);
+  assert.ok(vf.indexOf('colorkey') < vf.indexOf('scale=512'), 'recorte antes da escala');
+  const plain = buildStickerFilter({ animated: true, fps: 15, fit: 'fill' });
+  assert.ok(!plain.includes('colorkey'));
 });
 
 test('selectExpression compacta quadros consecutivos em faixas', () => {

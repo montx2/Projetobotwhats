@@ -441,15 +441,16 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
   const { buffer: webp, smart } = await toStickerWebp(buffer, { animated: isVideo, ext, fit, onProgress });
   // O motor inteligente explica o que decidiu (trecho, quadros, crop, qualidade).
   if (smart) {
+    const cut = smart.cut ? ` · ${smart.cut}` : '';
     if (smart.mode === 'static') {
       log.info(
-        `motivo: ${smart.reason} · quadro em ${smart.stillSeconds}s · q=${smart.q} · ${formatBytes(smart.bytes)}`
+        `motivo: ${smart.reason} · quadro em ${smart.stillSeconds}s${cut} · q=${smart.q} · ${formatBytes(smart.bytes)}`
       );
     } else {
       const end = (smart.startSeconds + smart.durationSeconds).toFixed(2);
       log.info(
         `trecho ${smart.startSeconds}s–${end}s · ${smart.framesKept ?? smart.frames} quadros (${smart.targetFps} fps)` +
-          `${smart.crop ? ` · enquadrado em ${smart.crop}` : ''} · q=${smart.q} · ${formatBytes(smart.bytes)}` +
+          `${smart.crop ? ` · enquadrado em ${smart.crop}` : ''}${cut} · q=${smart.q} · ${formatBytes(smart.bytes)}` +
           ` · ${smart.probes} medição(ões)`
       );
     }
