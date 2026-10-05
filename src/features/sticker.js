@@ -503,16 +503,20 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
   if (smart) {
     const cut = smart.cut ? ` · ${smart.cut}` : '';
     const modo = PREF_LABEL[smart.prefer] ? ` · modo ${PREF_LABEL[smart.prefer]}` : '';
+    // Quanto do limite do WhatsApp a figurinha aproveitou: o motor enche o
+    // orçamento com qualidade (e sem perdas quando cabe), então isso mostra se
+    // ainda sobrou espaço que o conteúdo não conseguiu usar.
+    const uso = smart.fill ? formatFillUse(smart.fill) : '';
     if (smart.mode === 'static') {
       log.info(
-        `motivo: ${smart.reason} · quadro em ${smart.stillSeconds}s${cut} · q=${smart.q} · ${formatBytes(smart.bytes)}`
+        `motivo: ${smart.reason} · quadro em ${smart.stillSeconds}s${cut} · q=${smart.q} · ${formatBytes(smart.bytes)}${uso}`
       );
     } else {
       const end = (smart.startSeconds + smart.durationSeconds).toFixed(2);
       log.info(
         `trecho ${smart.startSeconds}s–${end}s · ${smart.framesKept ?? smart.frames} quadros (${smart.targetFps} fps)${modo}` +
           `${smart.crop ? ` · enquadrado em ${smart.crop}` : ''}${cut} · q=${smart.q} · ${formatBytes(smart.bytes)}` +
-          ` · ${smart.probes} medição(ões)`
+          ` · ${smart.probes} medição(ões)${uso}`
       );
     }
   }
@@ -555,6 +559,19 @@ export function parseStickerPrefs(args = []) {
 }
 
 const PREF_LABEL = { smooth: 'liso (fluidez)', sharp: 'nítido (imagem)' };
+
+/**
+ * Explica no log quanto do limite do WhatsApp a figurinha aproveitou. O motor
+ * gasta o orçamento inteiro em fidelidade, então um número baixo quer dizer que
+ * o conteúdo não rende mais bytes — não que falhou coisa.
+ */
+function formatFillUse(fill) {
+  const pct = Math.round((fill.ratio ?? 0) * 100);
+  if (fill.emergency) return ` · usa ${pct}% do limite (conteúdo pesado, travado na spec)`;
+  if (fill.lossless) return ` · usa ${pct}% do limite (sem perdas: teto de qualidade)`;
+  if (pct >= 90) return ` · usa ${pct}% do limite`;
+  return ` · usa ${pct}% do limite (o codificador não gasta mais sem perder nitidez)`;
+}
 
 const FIT_WORDS = {
   contain: ['inteira', 'inteiro', 'full', 'original', 'normal', 'contain', 'proporcao', 'proporção'],

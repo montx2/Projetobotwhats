@@ -10,7 +10,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { isAnimatedWebp, parseWebp, webpDurationMs } from '../src/util/webp.js';
+import { isAnimatedWebp, parseWebp, tagSticker, webpDurationMs } from '../src/util/webp.js';
+import { predictQuality } from '../src/util/stickerbrain.js';
 
 const ffmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
 const ANIM_MAX = 500 * 1024;
@@ -87,12 +88,160 @@ test('vídeo comum preserva a duração inteira e não vira estática', { skip: 
   assert.equal(r.status, 0, r.stderr?.toString());
 
   const { toStickerWebp } = await import('../src/util/ffmpeg.js');
-  const { buffer, animated } = await toStickerWebp(fs.readFileSync(src), { animated: true, ext: '.mp4', fit: 'fill' });
+  const { buffer, animated, smart } = await toStickerWebp(fs.readFileSync(src), {
+    animated: true,
+    ext: '.mp4',
+    fit: 'fill'
+  });
   assert.ok(animated);
   assert.ok(buffer.length <= ANIM_MAX, `${Math.round(buffer.length / 1024)} KB`);
   const dur = webpDurationMs(buffer);
   assert.ok(dur >= 7_500 && dur <= 10_000, `duração preservada (${dur} ms de 8000)`);
   assert.ok(isAnimatedWebp(buffer));
+  // O limite é uma permissão: quando o conteúdo rende bytes, a figurinha sai
+  // colada no teto (é o pedido: extrair tudo que o WhatsApp permite).
+  assert.ok(smart?.fill, 'o caminho inteligente reporta o aproveitamento');
+  assert.ok(
+    smart.fill.ratio >= 0.9,
+    `aproveitou só ${Math.round(smart.fill.ratio * 100)}% do orçamento`
+  );
+  const tagged = tagSticker(buffer, { pack: 'MontxBOT', author: 'nexus-bot', emojis: ['🔥'] });
+  assert.ok(tagged.length <= ANIM_MAX, `com EXIF passou de 500 KB: ${Math.round(tagged.length / 1024)} KB`);
 
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ── ENCHER O ORÇAMENTO: o limite do WhatsApp é uma permissão de fidelidade ──
+// A decisão é pura (probe/predict injetados), então dá para testar o algoritmo
+// inteiro sem FFmpeg — inclusive os casos em que encher seria ruim.
+
+/** Codificador falso: bytes(q) = e^(a + b·q), como o libwebp de verdade. */
+function fakeEncoder({ a = Math.log(3000), b = 0.06, maxBytes = Infinity } = {}) {
+  const samples = [];
+  const sizeAt = (q) => Math.min(maxBytes, Math.round(Math.exp(a + b * q)));
+  return {
+    samples,
+    sizeAt,
+    probe: async (q) => {
+      const bytes = sizeAt(q);
+      samples.push({ q, bytes });
+      return Buffer.alloc(bytes);
+    },
+    predict: (target, state) =>
+      predictQuality(samples, target, { minQ: state.q + 1, maxQ: 100, sizeKey: 'bytes' })
+  };
+}
+
+test('fillStickerBudget encosta no limite sem nunca passar dele', async () => {
+  const { fillStickerBudget } = await import('../src/util/ffmpeg.js');
+  const budget = 496 * 1024;
+  const enc = fakeEncoder();
+  const filled = await fillStickerBudget({
+    buf: Buffer.alloc(enc.sizeAt(45)),
+    q: 45,
+    budget,
+    probe: enc.probe,
+    predict: enc.predict
+  });
+  assert.ok(filled.buf.length <= budget, 'passou do limite');
+  assert.ok(filled.buf.length > enc.sizeAt(45), 'não cresceu');
+  assert.ok(
+    filled.buf.length >= budget * 0.9,
+    `aproveitou pouco: ${Math.round((filled.buf.length / budget) * 100)}%`
+  );
+});
+
+test('fillStickerBudget recusa degrau acima do limite e fica com o maior válido', async () => {
+  const { fillStickerBudget } = await import('../src/util/ffmpeg.js');
+  const budget = 100 * 1024;
+  // Modelo íngreme: q alto estoura feio o limite de 100 KB.
+  const enc = fakeEncoder({ a: Math.log(2000), b: 0.09 });
+  assert.ok(enc.sizeAt(30) < budget, 'o caso começa dentro do limite');
+  const filled = await fillStickerBudget({
+    buf: Buffer.alloc(enc.sizeAt(30)),
+    q: 30,
+    budget,
+    probe: enc.probe,
+    predict: (target, state) => predictQuality(enc.samples, target, { minQ: state.q + 1, maxQ: 100, sizeKey: 'bytes' })
+  });
+  assert.ok(filled.buf.length <= budget);
+  for (const s of enc.samples) {
+    if (s.bytes <= budget) assert.ok(filled.buf.length >= s.bytes, 'existia um degrau válido maior');
+  }
+});
+
+test('sem perdas entra só quando sobra orçamento e é o maior arquivo válido', async () => {
+  const { fillStickerBudget } = await import('../src/util/ffmpeg.js');
+  const budget = 496 * 1024;
+  const enc = fakeEncoder({ a: Math.log(2000), b: 0.002 }); // conteúdo "simples"
+  let asked = 0;
+  const filled = await fillStickerBudget({
+    buf: Buffer.alloc(enc.sizeAt(60)),
+    q: 60,
+    budget,
+    probe: enc.probe,
+    predict: (target, state) => predictQuality(enc.samples, target, { minQ: state.q + 1, maxQ: 100, sizeKey: 'bytes' }),
+    tryLossless: async () => {
+      asked++;
+      return Buffer.alloc(Math.round(budget * 0.7));
+    }
+  });
+  assert.equal(asked, 1);
+  assert.equal(filled.lossless, true);
+  assert.equal(filled.buf.length, Math.round(budget * 0.7));
+  assert.equal(filled.q, 100);
+});
+
+test('sem perdas menor que a versão com perdas ainda é o melhor resultado', async () => {
+  const { fillStickerBudget } = await import('../src/util/ffmpeg.js');
+  const budget = 496 * 1024;
+  // Cena chapada: o sem perdas comprime MELHOR que o lossy e é pixel-perfect.
+  const enc = fakeEncoder({ a: Math.log(2000), b: 0.002 });
+  const filled = await fillStickerBudget({
+    buf: Buffer.alloc(enc.sizeAt(60)),
+    q: 60,
+    budget,
+    probe: enc.probe,
+    predict: (target, state) => predictQuality(enc.samples, target, { minQ: Math.min(99, state.q + 1), maxQ: 100, sizeKey: 'bytes' }),
+    tryLossless: async () => Buffer.alloc(30 * 1024)
+  });
+  assert.equal(filled.lossless, true);
+  assert.equal(filled.buf.length, 30 * 1024, 'o arquivo perfeito e menor é o escolhido');
+});
+
+test('sem perdas é descartado quando não cabe no limite', async () => {
+  const { fillStickerBudget } = await import('../src/util/ffmpeg.js');
+  const budget = 496 * 1024;
+  const enc = fakeEncoder({ a: Math.log(2000), b: 0.002 });
+  const filled = await fillStickerBudget({
+    buf: Buffer.alloc(enc.sizeAt(60)),
+    q: 60,
+    budget,
+    probe: enc.probe,
+    predict: (target, state) => predictQuality(enc.samples, target, { minQ: state.q + 1, maxQ: 100, sizeKey: 'bytes' }),
+    tryLossless: async () => Buffer.alloc(budget + 1024)
+  });
+  assert.equal(filled.lossless, false);
+  assert.ok(filled.buf.length <= budget);
+});
+
+test('sem perdas nem é tentado quando o conteúdo já encheu metade do orçamento', async () => {
+  const { fillStickerBudget } = await import('../src/util/ffmpeg.js');
+  const budget = 496 * 1024;
+  const enc = fakeEncoder({ a: Math.log(3000), b: 0.06 });
+  assert.ok(enc.sizeAt(75) > budget * 0.5, 'o caso começa acima da metade do orçamento');
+  let asked = 0;
+  const filled = await fillStickerBudget({
+    buf: Buffer.alloc(enc.sizeAt(75)),
+    q: 75,
+    budget,
+    probe: enc.probe,
+    predict: enc.predict,
+    tryLossless: async () => {
+      asked++;
+      return Buffer.alloc(budget);
+    }
+  });
+  assert.equal(asked, 0, 'não vale gastar uma codificação enorme à toa');
+  assert.ok(filled.buf.length <= budget);
 });

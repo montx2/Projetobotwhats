@@ -23,7 +23,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { toStickerWebp } from '../src/util/ffmpeg.js';
-import { isAnimatedWebp, parseWebp, webpDurationMs } from '../src/util/webp.js';
+import { isAnimatedWebp, parseWebp, tagSticker, webpDurationMs } from '../src/util/webp.js';
 import { analyzeSource, deadLeadFrames, windowMotion } from '../src/util/stickerbrain.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -166,10 +166,13 @@ for (const [file, type, label] of cases) {
   }
   const ms = Date.now() - t0;
   const problems = [];
-  const row = { label, mode: '—', out: '—', decision: '—', ms, problems };
+  const row = { label, mode: '—', out: '—', decision: '—', fill: '—', ms, problems };
   if (error) problems.push(`erro: ${error}`);
   if (out) {
-    const { buffer: webp, animated, smart } = out;
+    const { buffer: raw, animated, smart } = out;
+    // A auditoria mede o arquivo COMO ELE SAI para o WhatsApp: com VP8X + EXIF
+    // do pack (é esse tamanho que o WhatsApp valida contra os 500 KB).
+    const webp = tagSticker(raw, { pack: 'MontxBOT', author: 'nexus-bot', emojis: ['🔥'] });
     const info = parseWebp(webp);
     const anim = isAnimatedWebp(webp);
     const kb = Math.round(webp.length / 1024);
@@ -180,6 +183,13 @@ for (const [file, type, label] of cases) {
     row.decision = smart
       ? `${smart.startSeconds}s · q${smart.q}${smart.crop ? ` · crop ${smart.crop}` : ''}${smart.cut ? ' · fundo liso' : ''}${smart.emergency ? ` · trava ${smart.emergency}` : ''}`
       : '—';
+    // Aproveitamento do limite: o motor enche o orçamento com fidelidade
+    // (qualidade até 100 e sem perdas quando cabe), então isto mostra se sobrou
+    // espaço que o conteúdo simplesmente não tem como usar.
+    row.fillInfo = smart?.fill || null;
+    if (smart?.fill) {
+      row.fill = `${Math.round(smart.fill.ratio * 100)}%${smart.fill.lossless ? ' sem perdas' : ''}${smart.fill.emergency ? ' (trava)' : ''}`;
+    }
 
     if (info.width !== 512 || info.height !== 512) problems.push(`dimensões ${info.width}×${info.height}`);
     if (anim && webp.length > ANIM_MAX) problems.push(`${kb} KB > 500 KB`);
@@ -204,10 +214,23 @@ for (const [file, type, label] of cases) {
   rows.push(row);
 }
 
-console.log('\n| Caso | Modo | Saída | Decisão | Tempo | Veredito |');
-console.log('| --- | --- | --- | --- | --- | --- |');
+console.log('\n| Caso | Modo | Saída | Decisão | Limite | Tempo | Veredito |');
+console.log('| --- | --- | --- | --- | --- | --- | --- |');
 for (const r of rows) {
-  console.log(`| ${r.label} | ${r.mode} | ${r.out} | ${r.decision} | ${(r.ms / 1000).toFixed(1)}s | ${r.problems.length ? `❌ ${r.problems.join('; ')}` : '✅'} |`);
+  console.log(`| ${r.label} | ${r.mode} | ${r.out} | ${r.decision} | ${r.fill} | ${(r.ms / 1000).toFixed(1)}s | ${r.problems.length ? `❌ ${r.problems.join('; ')}` : '✅'} |`);
+}
+const animRows = rows.filter((r) => r.mode === 'animada' && r.fillInfo);
+if (animRows.length) {
+  const comPerdas = animRows.filter((r) => !r.fillInfo.lossless && !r.fillInfo.emergency);
+  const ratios = comPerdas.map((r) => r.fillInfo.ratio);
+  const media = ratios.length ? Math.round((ratios.reduce((a, b) => a + b, 0) / ratios.length) * 100) : 0;
+  const semPerdas = animRows.filter((r) => r.fillInfo.lossless).length;
+  const travadas = animRows.filter((r) => r.fillInfo.emergency).length;
+  console.log(
+    `\nAproveitamento do limite (arquivo final, com EXIF): ${media}% nas ${comPerdas.length} animadas com perdas` +
+      `${semPerdas ? ` · ${semPerdas} saíram SEM PERDAS (pixel-perfect, o máximo que o WebP entrega)` : ''}` +
+      `${travadas ? ` · ${travadas} travada(s) pela spec (conteúdo incompressível)` : ''}.`
+  );
 }
 console.log(`\n${rows.length - fails}/${rows.length} casos dentro da spec do WhatsApp.`);
 if (fails) console.log('Saídas fora do padrão seriam recusadas pelo WhatsApp — corrija antes de subir.');

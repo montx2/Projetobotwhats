@@ -11,10 +11,10 @@ import { gradeImageSamples } from './imageinfo.js';
 import {
   analyzeSource,
   framesForQualityFloor,
+  planSchedule,
   planSticker,
   predictQuality,
   shrinkSchedule,
-  GOOD_FIT_RATIO,
   QUALITY_FLOOR
 } from './stickerbrain.js';
 
@@ -252,8 +252,25 @@ export const STICKER_FITS = ['fill', 'contain', 'cover'];
  */
 export const STICKER_MAX_SECONDS = 10;
 export const STICKER_ANIMATED_SPEC_BYTES = 500 * 1024;
-export const STICKER_STATIC_MAX_BYTES = 100 * 1024;
-export const STICKER_ANIMATED_MAX_BYTES = 480 * 1024;
+export const STICKER_STATIC_SPEC_BYTES = 100 * 1024;
+/**
+ * O teto INTERNO fica alguns KB abaixo do limite da spec: depois do FFmpeg o
+ * arquivo ainda recebe VP8X + EXIF (pack, autor, emojis) e o que conta é o
+ * tamanho FINAL. A folga cobre esse metadado com sobra — o resto do limite é
+ * do usuário, e o motor gasta até o último byte que comprar fidelidade.
+ */
+export const STICKER_METADATA_HEADROOM = 4 * 1024;
+export const STICKER_ANIMATED_MAX_BYTES = STICKER_ANIMATED_SPEC_BYTES - STICKER_METADATA_HEADROOM;
+export const STICKER_STATIC_MAX_BYTES = STICKER_STATIC_SPEC_BYTES - 2 * 1024;
+
+/** Fração do orçamento que a busca de qualidade usa como alvo (evita estourar). */
+export const STICKER_FILL_TARGET_RATIO = 0.96;
+/** Sem perdas entra quando ainda sobra este tanto de orçamento. */
+export const STICKER_LOSSLESS_MAX_RATIO = 0.5;
+/** Abaixo disto o arquivo é tão leve que o sem perdas é tentado de cara. */
+export const STICKER_LOSSLESS_EARLY_RATIO = 0.2;
+/** Rodadas da busca de qualidade (cada uma é uma codificação). */
+export const STICKER_FILL_ROUNDS = 3;
 
 /** Cor do fundo detectado em `rrggbb` (formato do colorkey do FFmpeg). */
 export function cutHex(cut) {
@@ -355,7 +372,7 @@ async function encodeStep(inFile, outFile, { animated, q, fps = 15, dur = STICKE
  * os quadros selecionados (com os timestamps originais, o que dá durações
  * variáveis por quadro) e aplica o crop do assunto antes da escala 512×512.
  */
-async function encodePlanned(inFile, outFile, { plan, q, keep, fit = 'fill', animated = true, level = 5 }) {
+async function encodePlanned(inFile, outFile, { plan, q, keep, fit = 'fill', animated = true, level = 5, lossless = false }) {
   const select = keep?.length ? selectExpression(keep) : null;
   const vf = buildStickerFilter({ animated, fps: plan.fps, fit, crop: plan.crop, select, cut: plan.cut });
   const args = ['-y', '-hide_banner', '-loglevel', 'error'];
@@ -365,8 +382,8 @@ async function encodePlanned(inFile, outFile, { plan, q, keep, fit = 'fill', ani
   } else if (plan.stillMs > 0) {
     args.push('-ss', (plan.stillMs / 1000).toFixed(3));
   }
-  args.push('-i', inFile, '-an', '-sn', '-vf', vf, '-c:v', 'libwebp', '-lossless', '0', '-q:v', String(q),
-    '-compression_level', String(level), '-preset', 'default');
+  args.push('-i', inFile, '-an', '-sn', '-vf', vf, '-c:v', 'libwebp', '-lossless', lossless ? '1' : '0',
+    '-q:v', String(q), '-compression_level', String(level), '-preset', 'default');
   if (animated) args.push('-loop', '0', '-vsync', '0');
   else args.push('-frames:v', '1');
   args.push('-f', 'webp', outFile);
@@ -419,6 +436,94 @@ async function enforceStickerLimit(inFile, outFile, { animated, fit, wanted, max
     if (buf.length <= maxBytes) return buf;
   }
   return smallest;
+}
+
+/**
+ * ENCHER O ORÇAMENTO — extrai o máximo que o limite do WhatsApp permite.
+ *
+ * O teto de bytes é uma permissão, não um alvo: quando a figurinha já coube com
+ * sobra, o que resta do orçamento vira fidelidade. A busca sobe a qualidade (q
+ * até 100) usando o modelo log-linear do que já foi medido — e cada estouro
+ * vira amostra, então a rodada seguinte interpola e encosta no alvo. Quando
+ * ainda sobra espaço de verdade, tenta a codificação SEM PERDAS: o teto
+ * absoluto do WebP, que em cena chapada/recortada até fica MENOR que a versão
+ * com perdas (por isso ele vence sempre que cabe, sem precisar ser maior).
+ * Nenhum degrau acima do orçamento é aceito.
+ *
+ * Os `probe`/`predict`/`tryLossless` são injetados para a decisão ser pura e
+ * testável sem FFmpeg (a codificação de verdade fica no caminho inteligente).
+ *
+ * @param {{buf: Buffer, q: number, budget: number, probe: Function, predict: Function, tryLossless?: Function, onProgress?: Function}} opts
+ * @returns {Promise<{buf: Buffer, q: number, lossless: boolean, rounds: number}>}
+ */
+export async function fillStickerBudget({
+  buf,
+  q,
+  budget,
+  targetRatio = STICKER_FILL_TARGET_RATIO,
+  losslessRatio = STICKER_LOSSLESS_MAX_RATIO,
+  earlyLosslessRatio = STICKER_LOSSLESS_EARLY_RATIO,
+  probe,
+  predict,
+  tryLossless,
+  onProgress
+}) {
+  let best = { buf, q, lossless: false };
+  if (!buf?.length || !(budget > 0) || typeof probe !== 'function') return { ...best, rounds: 0 };
+  // Já está acima do limite: encher não é o problema aqui (a trava final assume).
+  if (buf.length > budget) return { ...best, rounds: 0 };
+  const target = Math.round(budget * Math.max(0.5, Math.min(0.999, targetRatio)));
+  let rounds = 0;
+  let triedLossless = false;
+  const QUALITY_MAX = 100;
+
+  const attemptLossless = async () => {
+    if (triedLossless || typeof tryLossless !== 'function') return false;
+    triedLossless = true;
+    let lossless = null;
+    try {
+      lossless = await tryLossless();
+    } catch {
+      lossless = null;
+    }
+    if (!lossless?.length || lossless.length > budget) return false;
+    // Pixel-perfect e dentro do limite: é o melhor que o WebP entrega, mesmo
+    // quando o arquivo fica menor que o da busca por qualidade.
+    best = { buf: lossless, q: QUALITY_MAX, lossless: true };
+    return true;
+  };
+
+  // Conteúdo leve → tenta o sem perdas de cara: em fundo chapado/recortado ele
+  // costuma sair menor E perfeito, e aí nem precisa subir a qualidade.
+  if (best.buf.length < budget * earlyLosslessRatio) {
+    await onProgress?.('✨ Tentando a figurinha sem perdas (pixel-perfect)…');
+    if (await attemptLossless()) return { ...best, rounds };
+  }
+
+  while (best.buf.length < target && rounds < STICKER_FILL_ROUNDS) {
+    const raw = Math.round(Number(predict(target, best)));
+    const qTry = Math.max(1, Math.min(QUALITY_MAX, raw));
+    // Sem previsão de ganho (o modelo já está no teto) não há o que medir.
+    if (!Number.isFinite(qTry) || qTry <= best.q) break;
+    rounds++;
+    let next = null;
+    try {
+      next = await probe(qTry);
+    } catch {
+      break;
+    }
+    if (!next?.length) break;
+    if (next.length > budget) continue; // estourou: a próxima rodada interpola
+    if (next.length <= best.buf.length) break; // não cresceu: o codificador saturou
+    best = { buf: next, q: qTry, lossless: false };
+  }
+
+  // Ainda sobra orçamento e o sem perdas não foi tentado: é a última carta.
+  if (best.buf.length < budget * losslessRatio) {
+    await onProgress?.('✨ Buscando a qualidade máxima (sem perdas)…');
+    await attemptLossless();
+  }
+  return { ...best, rounds };
 }
 
 /**
@@ -514,30 +619,69 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
   if (plan.mode === 'static') {
     report.stillSeconds = Number((plan.stillMs / 1000).toFixed(2));
     await onProgress?.(`🧠 ${plan.reason} — montando a melhor foto…`);
-    let best = null;
+    let best = null; // maior arquivo que ainda CABE (é o que sai)
+    let over = null; // menor arquivo acima do limite (rede de segurança)
     let first = true;
-    for (const step of [{ q: 82 }, { q: 68 }, { q: 52 }, { q: 36 }, { q: 22 }]) {
+    const samples = [];
+    const shoot = async (qTry, { lossless = false } = {}) => {
+      const args = { plan, q: qTry, keep: null, fit, animated: false, lossless, level: lossless ? 6 : 5 };
       let buf;
       try {
-        buf = await encodePlanned(inFile, outFile, { plan, q: step.q, keep: null, fit, animated: false });
+        buf = await encodePlanned(inFile, outFile, args);
       } catch (error) {
         if (first && degrade()) {
-          buf = await encodePlanned(inFile, outFile, { plan, q: step.q, keep: null, fit, animated: false });
+          buf = await encodePlanned(inFile, outFile, args);
         } else {
           throw error;
         }
       }
       first = false;
       report.probes++;
-      if (!best || buf.length < best.length) best = { buf, q: step.q };
+      if (!lossless) samples.push({ q: qTry, bytes: buf.length });
+      report.tries.push({ q: qTry, kb: Math.round(buf.length / 1024), ...(lossless ? { lossless: true } : {}) });
+      return buf;
+    };
+    for (const step of [{ q: 82 }, { q: 68 }, { q: 52 }, { q: 36 }, { q: 22 }]) {
+      const buf = await shoot(step.q);
       if (buf.length <= STICKER_STATIC_MAX_BYTES) {
-        best = { buf, q: step.q };
+        if (!best || buf.length > best.buf.length) best = { buf, q: step.q };
         break;
       }
+      if (!over || buf.length < over.buf.length) over = { buf, q: step.q };
     }
-    report.q = best.q;
-    report.bytes = best.buf.length;
-    return { buffer: best.buf, animated: false, smart: report };
+    // Enche o limite parado (100 KB): qualidade até 100 e, se ainda sobrar
+    // espaço de verdade, sem perdas — foto simples sai pixel-perfect.
+    let chosen = best ?? over;
+    let lossless = false;
+    if (best) {
+      const filled = await fillStickerBudget({
+        buf: best.buf,
+        q: best.q,
+        budget: STICKER_STATIC_MAX_BYTES,
+        probe: (qTry) => shoot(qTry),
+        predict: (targetBytes, state) =>
+          predictQuality(samples, targetBytes, { minQ: Math.min(99, state.q + 1), maxQ: 100, sizeKey: 'bytes' }),
+        tryLossless: () => shoot(100, { lossless: true }),
+        onProgress
+      });
+      chosen = { buf: filled.buf, q: filled.q };
+      lossless = filled.lossless;
+      report.fillRounds = filled.rounds;
+    }
+    report.q = chosen.q;
+    report.bytes = chosen.buf.length;
+    report.lossless = lossless;
+    report.fill =
+      chosen.buf.length <= STICKER_STATIC_MAX_BYTES
+        ? {
+            bytes: chosen.buf.length,
+            limit: STICKER_STATIC_MAX_BYTES,
+            spec: STICKER_STATIC_SPEC_BYTES,
+            ratio: Number((chosen.buf.length / STICKER_STATIC_MAX_BYTES).toFixed(3)),
+            lossless
+          }
+        : null;
+    return { buffer: chosen.buf, animated: false, smart: report };
   }
 
   // ── Animada: muitos quadros onde há ação, qualidade aceitável ───────────
@@ -552,16 +696,27 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
   const samples = []; // {q, bytesPerFrame} — normalizado, vale para qualquer nº de quadros
   let best = null;
 
-  const probe = async (qTry, keepList) => {
+  const probe = async (qTry, keepList, { lossless = false } = {}) => {
     report.probes++;
     if (report.probes > 1) {
       await onProgress?.(
-        `🎯 Ajustando a figurinha (${keepList.length} quadros · tentativa ${report.probes})…`
+        lossless
+          ? '✨ Buscando a qualidade máxima (sem perdas)…'
+          : `🎯 Ajustando a figurinha (${keepList.length} quadros · tentativa ${report.probes})…`
       );
     }
-    const buf = await encodePlanned(inFile, outFile, { plan, q: qTry, keep: keepList, fit, animated: true });
-    samples.push({ q: qTry, bytesPerFrame: buf.length / keepList.length });
-    report.tries.push({ q: qTry, frames: keepList.length, kb: Math.round(buf.length / 1024) });
+    const buf = await encodePlanned(inFile, outFile, {
+      plan,
+      q: qTry,
+      keep: keepList,
+      fit,
+      animated: true,
+      lossless,
+      level: lossless ? 6 : 5
+    });
+    // Sem perdas fica fora do modelo log-linear (é outra escala de bytes).
+    if (!lossless) samples.push({ q: qTry, bytesPerFrame: buf.length / keepList.length });
+    report.tries.push({ q: qTry, frames: keepList.length, kb: Math.round(buf.length / 1024), ...(lossless ? { lossless: true } : {}) });
     if (!best || buf.length < best.buf.length) best = { buf, q: qTry, keep: keepList };
     return buf;
   };
@@ -582,6 +737,7 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
   let keep = plan.schedule;
   let q = startQ;
   let buf;
+  let framesCut = false; // o orçamento tirou quadros? (na hora de encher, eles voltam primeiro)
   try {
     buf = await probe(q, keep);
   } catch (error) {
@@ -600,7 +756,10 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
       budgetBytes: budget,
       minFrames
     });
-    if (fits < keep.length) keep = shrinkSchedule(plan, fits);
+    if (fits < keep.length) {
+      keep = shrinkSchedule(plan, fits);
+      framesCut = true;
+    }
     const predicted = Math.max(qualityFloor, measure());
     if (predicted !== q) {
       q = predicted;
@@ -613,23 +772,56 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
     const fits = Math.floor(keep.length * 0.9 * (budget / buf.length));
     if (fits < keep.length) {
       keep = shrinkSchedule(plan, Math.max(minFrames, fits));
+      framesCut = true;
       if (qualityFloor !== q) q = qualityFloor;
       buf = await probe(q, keep);
     }
-  } else if (buf.length < budget * GOOD_FIT_RATIO && keep.length >= maxFrames) {
-    // Cabe mais qualidade: sobe o q até perto do orçamento.
-    const predicted = predictQuality(samples, (budget * 0.95) / keep.length, {
-      minQ: q + 2,
-      maxQ: 82,
-      sizeKey: 'bytesPerFrame'
-    });
-    if (predicted > q) {
-      const buf2 = await probe(predicted, keep);
-      if (buf2.length <= budget && buf2.length > buf.length) {
-        buf = buf2;
-        q = predicted;
+  }
+
+  // ── Encher o orçamento: extrair tudo que o WhatsApp permite ─────────────
+  // 1º fluidez: se foi o orçamento que tirou quadros (e o modo não é o de
+  // nitidez), devolvê-los antes de gastar em qualidade — a figurinha é exibida
+  // pequena, então movimento suave vale mais que detalhe fino.
+  if (framesCut && prefer !== 'sharp' && buf.length <= budget) {
+    try {
+      const dense = planSchedule(plan.analysis, {
+        start: plan.start,
+        end: plan.end,
+        targetFrames: maxFrames
+      }).map((i) => i - plan.start);
+      if (dense.length > keep.length) {
+        const buf2 = await probe(q, dense);
+        if (buf2.length <= budget) {
+          buf = buf2;
+          keep = dense;
+        }
       }
+    } catch {
+      // Sem quadros extras: segue com o que já coube.
     }
+  }
+
+  // 2º fidelidade: qualidade até 100 e, se ainda sobrar espaço de verdade, a
+  // codificação sem perdas. Cada degrau só é aceito se couber no orçamento.
+  if (buf.length <= budget) {
+    const filled = await fillStickerBudget({
+      buf,
+      q,
+      budget,
+      probe: (qTry) => probe(qTry, keep),
+      predict: (targetBytes, state) =>
+        predictQuality(samples, targetBytes / keep.length, {
+          minQ: Math.min(99, state.q + 1),
+          maxQ: 100,
+          sizeKey: 'bytesPerFrame'
+        }),
+      tryLossless: () => probe(100, keep, { lossless: true }),
+      onProgress
+    });
+    buf = filled.buf;
+    q = filled.q;
+    report.lossless = filled.lossless;
+    report.fillRounds = filled.rounds;
   }
 
   // Se nada coube no orçamento, entrega o menor arquivo que o FFmpeg produziu.
@@ -641,6 +833,18 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
   report.bytes = finalBuf.length;
   report.framesKept = keepCount;
   report.effectiveFps = Number((keepCount / seconds).toFixed(1));
+  report.lossless = Boolean(report.lossless && finalBuf === buf);
+  // Aproveitamento só quando a figurinha saiu do caminho planejado/enchido: no
+  // caso de emergência (conteúdo incompressível) quem reporta é a trava.
+  if (finalBuf === buf) {
+    report.fill = {
+      bytes: finalBuf.length,
+      limit: budget,
+      spec: STICKER_ANIMATED_SPEC_BYTES,
+      ratio: Number((finalBuf.length / budget).toFixed(3)),
+      lossless: report.lossless
+    };
+  }
   return { buffer: finalBuf, animated: isAnimatedWebp(finalBuf), smart: report };
 }
 
@@ -783,7 +987,7 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = STIC
           // Dentro do limite: pronto. Acima (conteúdo incompressível): aperta
           // mais antes de entregar — a spec vale mais que o plano. Vale para
           // animada (500 KB) e para foto (100 KB).
-          const specLimit = animated ? STICKER_ANIMATED_SPEC_BYTES : STICKER_STATIC_MAX_BYTES;
+          const specLimit = animated ? STICKER_ANIMATED_SPEC_BYTES : STICKER_STATIC_SPEC_BYTES;
           if (result.buffer.length <= specLimit) return result;
           const shrunk = await enforceStickerLimit(inFile, outFile, { animated, fit, wanted, maxBytes, onProgress });
           if (shrunk && shrunk.length <= maxBytes) {
@@ -792,7 +996,18 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = STIC
             return {
               buffer: shrunk,
               animated: isAnimatedWebp(shrunk),
-              smart: { ...result.smart, emergency: `${kb(result.buffer.length)}→${kb(shrunk.length)}` }
+              smart: {
+                ...result.smart,
+                emergency: `${kb(result.buffer.length)}→${kb(shrunk.length)}`,
+                fill: {
+                  bytes: shrunk.length,
+                  limit: specLimit,
+                  spec: specLimit,
+                  ratio: Number((shrunk.length / specLimit).toFixed(3)),
+                  lossless: false,
+                  emergency: true
+                }
+              }
             };
           }
         }
@@ -817,6 +1032,27 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = STIC
 
       if (!best || buf.length < best.length) best = buf;
       if (buf.length <= maxBytes) {
+        // Cabendo, ainda sobra limite: uma tentativa com qualidade maior (é o
+        // máximo que o WhatsApp permite — o usuário pediu para aproveitar).
+        if (step.q < 88 && buf.length < maxBytes * 0.8) {
+          try {
+            const boostFile = tmpFile('.webp');
+            await encodeStep(inFile, boostFile, {
+              animated,
+              fit,
+              ...step,
+              q: Math.min(100, step.q + 12),
+              level: 6
+            });
+            const boost = fs.readFileSync(boostFile);
+            fs.rmSync(boostFile, { force: true });
+            if (boost.length > buf.length && boost.length <= maxBytes && isWebp(boost)) {
+              return { buffer: boost, animated: isAnimatedWebp(boost) };
+            }
+          } catch {
+            // Sem o degrau extra: entrega o que já cabia.
+          }
+        }
         return { buffer: buf, animated: isAnimatedWebp(buf) };
       }
       // Se ficou muito acima do limite, pula degraus para economizar tempo
