@@ -12,6 +12,8 @@ import { TONE_MAX, TONE_MIN, describeRecipe, toneOptionLines, voiceOptionLines }
 
 const STICKER_ITEMS = [
   ['.s', 'foto, vídeo ou GIF vira figurinha inteligente (até 10 s)'],
+  ['.s liso | hd | curto', 'mais fluidez · mais nitidez · mais curta (5 s)'],
+  ['.s 6s', 'figurinha com duração exata (2 a 10 s)'],
   ['.s <link>', 'baixa o link e já monta a figurinha'],
   ['.s inteira', 'mantém a imagem inteira, sem esticar'],
   ['.s cortar', 'preenche o quadrado sem esticar'],

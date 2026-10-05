@@ -6,13 +6,28 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { buildStickerFilter } from '../src/util/ffmpeg.js';
-import { parseFit } from '../src/features/sticker.js';
+import { parseFit, parseStickerPrefs } from '../src/features/sticker.js';
 
 test('parseFit: padrão preenche; flags escolhem outros modos', () => {
   assert.equal(parseFit([]), 'fill');
   assert.equal(parseFit(['qualquer', 'coisa']), 'fill');
   for (const w of ['inteira', 'INTEIRA', 'full', 'original', '-inteira']) assert.equal(parseFit([w]), 'contain');
   for (const w of ['cortar', 'crop', 'corte']) assert.equal(parseFit([w]), 'cover');
+});
+
+test('parseStickerPrefs: liso/hd/curto e duração exata, sem conflito com enquadramento', () => {
+  assert.deepEqual(parseStickerPrefs([]), { prefer: 'auto', seconds: 0 });
+  assert.deepEqual(parseStickerPrefs(['qualquer']), { prefer: 'auto', seconds: 0 });
+  for (const w of ['liso', 'LISO', '-fluido', 'fluidez']) assert.equal(parseStickerPrefs([w]).prefer, 'smooth', w);
+  for (const w of ['nitido', 'nítido', 'hd', 'qualidade']) assert.equal(parseStickerPrefs([w]).prefer, 'sharp', w);
+  assert.equal(parseStickerPrefs(['curto']).seconds, 5);
+  assert.equal(parseStickerPrefs(['6s']).seconds, 6);
+  assert.equal(parseStickerPrefs(['8,5s']).seconds, 8.5);
+  assert.equal(parseStickerPrefs(['20s']).seconds, 10, 'não passa do teto do WhatsApp');
+  assert.equal(parseStickerPrefs(['1s']).seconds, 2, 'nem abaixo do mínimo útil');
+  const junto = parseStickerPrefs(['inteira', 'hd', '7s']);
+  assert.deepEqual(junto, { prefer: 'sharp', seconds: 7 });
+  assert.equal(parseFit(['inteira', 'hd', '7s']), 'contain', 'enquadramento continua funcionando junto');
 });
 
 test('buildStickerFilter: fill não usa pad; contain usa pad; cover usa crop', () => {

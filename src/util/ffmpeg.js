@@ -378,6 +378,50 @@ async function encodePlanned(inFile, outFile, { plan, q, keep, fit = 'fill', ani
 }
 
 /**
+ * TRAVA FINAL DA SPEC: nenhuma figurinha pode sair acima do limite do WhatsApp.
+ *
+ * O motor gasta o orçamento com previsão e a escada clássica encurta a duração;
+ * mesmo assim, conteúdo incompressível (ruído de TV, Mandelbrot, areia, chuva)
+ * pode não caber em 500 KB nem no piso de qualidade. Aí esta escada aperta o que
+ * sobrou — mais compressão, menos quadros, qualidade menor — e só no fim encurta
+ * a duração, seguindo a prioridade da casa. Melhor uma figurinha simples do que
+ * uma que o WhatsApp recusa.
+ */
+async function enforceStickerLimit(inFile, outFile, { animated, fit, wanted, maxBytes, onProgress }) {
+  const rungs = animated
+    ? [
+        { q: 20, fps: 6, dur: wanted, level: 6 },
+        { q: 14, fps: 5, dur: wanted, level: 6 },
+        { q: 10, fps: 4, dur: Math.min(wanted, 6), level: 6 },
+        { q: 8, fps: 3, dur: Math.min(wanted, 4), level: 6 },
+        { q: 6, fps: 3, dur: Math.min(wanted, 2.5), level: 6 },
+        { q: 5, fps: 2, dur: Math.min(wanted, 2), level: 6 }
+      ]
+    : [
+        { q: 12, fps: 1, dur: 1, level: 6 },
+        { q: 8, fps: 1, dur: 1, level: 6 },
+        { q: 5, fps: 1, dur: 1, level: 6 }
+      ];
+  let smallest = null;
+  for (let i = 0; i < rungs.length; i++) {
+    if (onProgress && i > 0) {
+      await onProgress(`🗜️ Conteúdo pesado — apertando mais (${i + 1}/${rungs.length})…`);
+    }
+    try {
+      await encodeStep(inFile, outFile, { animated, fit, ...rungs[i] });
+    } catch {
+      continue;
+    }
+    if (!fs.existsSync(outFile)) continue;
+    const buf = fs.readFileSync(outFile);
+    if (!buf.length || !isWebp(buf)) continue;
+    if (!smallest || buf.length < smallest.length) smallest = buf;
+    if (buf.length <= maxBytes) return buf;
+  }
+  return smallest;
+}
+
+/**
  * MOTOR INTELIGENTE: analisa o vídeo em quadros minúsculos, escolhe o melhor
  * trecho de até 10 s, fecha o loop, enquadra o assunto e só então encoda —
  * gastando o orçamento de 500 KB em quadros e qualidade com previsão, não com
@@ -385,7 +429,7 @@ async function encodePlanned(inFile, outFile, { plan, q, keep, fit = 'fill', ani
  *
  * @returns {Promise<{buffer: Buffer, animated: boolean, smart: object}|null>} null quando não deu (aí a escada padrão assume)
  */
-export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSeconds = STICKER_MAX_SECONDS, onProgress, autoCrop = true } = {}) {
+export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSeconds = STICKER_MAX_SECONDS, onProgress, autoCrop = true, prefer = 'auto' } = {}) {
   const bin = findFfmpeg();
   if (!bin) return null;
 
@@ -398,7 +442,8 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
   let plan = planSticker(analysis, {
     maxSeconds,
     budgetBytes: STICKER_ANIMATED_MAX_BYTES,
-    autoCrop
+    autoCrop,
+    prefer
   });
   if (!plan) return null;
   // Rede de segurança: se o recorte não couber no quadro real (rotação/SAR
@@ -415,7 +460,8 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
       maxSeconds,
       budgetBytes: STICKER_ANIMATED_MAX_BYTES,
       autoCrop: false,
-      autoCut: Boolean(plan.cut)
+      autoCut: Boolean(plan.cut),
+      prefer
     });
     if (plan) plan.crop = null;
     return plan;
@@ -430,6 +476,7 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
     crop: plan.crop ? `${plan.crop.w}x${plan.crop.h}+${plan.crop.x}+${plan.crop.y}` : null,
     cut: plan.cut ? `fundo liso 0x${cutHex(plan.cut)} · ${Math.round(plan.cut.coverage * 100)}% do quadro` : null,
     qualityFloor: plan.qualityFloor,
+    prefer: plan.prefer,
     cutState: plan.cutState ?? (plan.cut ? 'flat' : 'off'),
     activity: plan.activity
       ? {
@@ -709,7 +756,7 @@ export function animatedStickerSteps(maxSeconds = STICKER_MAX_SECONDS) {
  * @param {{animated?: boolean, maxSeconds?: number, ext?: string, fit?: string, onProgress?: (msg: string) => Promise<any>}} opts
  * @returns {Promise<{buffer: Buffer, animated: boolean}>}
  */
-export async function toStickerWebp(input, { animated = false, maxSeconds = STICKER_MAX_SECONDS, ext = '.png', fit = 'fill', onProgress, smart = true } = {}) {
+export async function toStickerWebp(input, { animated = false, maxSeconds = STICKER_MAX_SECONDS, ext = '.png', fit = 'fill', onProgress, smart = true, prefer = 'auto' } = {}) {
   const realExt = detectMediaExt(input, ext);
   const inFile = tmpFile(realExt);
   const outFile = tmpFile('.webp');
@@ -731,8 +778,24 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = STIC
     // (`cutState`) para o chamador decidir se vale a IA.
     if (smart) {
       try {
-        const result = await smartStickerWebp(inFile, outFile, { fit, maxSeconds: wanted, onProgress });
-        if (result?.buffer?.length) return result;
+        const result = await smartStickerWebp(inFile, outFile, { fit, maxSeconds: wanted, onProgress, prefer });
+        if (result?.buffer?.length) {
+          // Dentro do limite: pronto. Acima (conteúdo incompressível): aperta
+          // mais antes de entregar — a spec vale mais que o plano. Vale para
+          // animada (500 KB) e para foto (100 KB).
+          const specLimit = animated ? STICKER_ANIMATED_SPEC_BYTES : STICKER_STATIC_MAX_BYTES;
+          if (result.buffer.length <= specLimit) return result;
+          const shrunk = await enforceStickerLimit(inFile, outFile, { animated, fit, wanted, maxBytes, onProgress });
+          if (shrunk && shrunk.length <= maxBytes) {
+            const kb = (n) => `${Math.round(n / 1024)} KB`;
+            console.warn(`[ffmpeg] conteúdo pesado: ${kb(result.buffer.length)} → ${kb(shrunk.length)} (travado no limite do WhatsApp)`);
+            return {
+              buffer: shrunk,
+              animated: isAnimatedWebp(shrunk),
+              smart: { ...result.smart, emergency: `${kb(result.buffer.length)}→${kb(shrunk.length)}` }
+            };
+          }
+        }
       } catch (error) {
         console.warn(`[ffmpeg] análise inteligente falhou (${String(error?.message || error).slice(0, 160)}); usando a escada padrão`);
       }
@@ -763,6 +826,11 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = STIC
     }
 
     if (!best) throw new Error('ffmpeg não gerou saída');
+    // A escada também tem piso: se nem ela coube, a trava final resolve.
+    if (best.length > maxBytes) {
+      const shrunk = await enforceStickerLimit(inFile, outFile, { animated, fit, wanted, maxBytes, onProgress });
+      if (shrunk && (shrunk.length < best.length || shrunk.length <= maxBytes)) best = shrunk;
+    }
     return { buffer: best, animated: isAnimatedWebp(best) };
   } finally {
     fs.rmSync(inFile, { force: true });

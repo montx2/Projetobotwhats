@@ -426,6 +426,25 @@ test('equilíbrio automático: ação vira fluidez, calma vira nitidez', () => {
   assert.ok(calm.qualityFloor >= 40, `pouca ação → nitidez (piso ${calm.qualityFloor})`);
 });
 
+test('modos do usuário: liso rende fluidez, nítido rende qualidade', () => {
+  // Vídeo calmo: o automático já prefere nitidez; os modos forçam os extremos.
+  const calm = analyzeFrames(synthVideo({ frames: 120, place: (f) => ({ x: 8 + (f % 3), y: 10 }) }), {
+    sampleFps: 15,
+    width: 1280,
+    height: 720
+  });
+  const auto = planSticker(calm, {});
+  const smooth = planSticker(calm, { prefer: 'smooth' });
+  const sharp = planSticker(calm, { prefer: 'sharp' });
+  assert.equal(smooth.targetFps, 15, 'liso usa o teto de fps');
+  assert.equal(smooth.qualityFloor, 22, 'liso aceita qualidade menor para ter mais quadros');
+  assert.ok(sharp.targetFps <= 8, `nítido reduz quadros (${sharp.targetFps})`);
+  assert.ok(sharp.qualityFloor >= 62, `nítido exige qualidade (${sharp.qualityFloor})`);
+  assert.ok(sharp.qualityFloor > auto.qualityFloor);
+  assert.ok(smooth.schedule.length >= sharp.schedule.length, 'liso guarda mais quadros que nítido');
+  assert.equal(planSticker(calm, { prefer: 'inventado' }).prefer, 'auto', 'modo inválido cai no automático');
+});
+
 test('buildStickerFilter aplica o colorkey do fundo antes da escala', () => {
   const cut = { color: { r: 30, g: 60, b: 140 }, similarity: 0.15, coverage: 0.9, contrast: 0.3 };
   const vf = buildStickerFilter({ animated: true, fps: 15, fit: 'fill', crop: null, select: null, cut });

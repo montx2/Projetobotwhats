@@ -178,7 +178,17 @@ O WhatsApp aceita WebP de exatamente **512×512**: até **100 KB** na figurinha 
 - **Gasta os 500 KB com previsão** — o tamanho da figurinha é medido em uma ou duas tentativas e o modelo (tamanho por quadro e qualidade) calcula quantos quadros cabem e qual qualidade fecha o orçamento, em vez de testar uma escada fixa de qualidade.
 - **Vídeo sem movimento vira figurinha parada** — em alta qualidade, menor e sem o "pisca" de uma animação que não anima nada.
 
-Cada conversão registra a decisão no log (`trecho 12.4s–22.4s · 96 quadros (15 fps) · enquadrado em 500x500+110+640 · fundo liso 0x1e8c3c · 68% do quadro · q=48`), e o resultado continua sendo um WebP padrão com pack/autor/emojis. Se a análise falhar por qualquer motivo, a conversão cai automaticamente na escada clássica — ninguém fica sem figurinha.
+**Você pode mandar no resultado** (opcional — sem nada disso o motor decide sozinho):
+
+| Comando | O que muda |
+| --- | --- |
+| `.s` | automático: o motor equilibra duração, fluidez e nitidez pelo movimento do vídeo |
+| `.s liso` | prioriza fluidez (até 15 fps), aceitando qualidade um pouco menor por quadro |
+| `.s hd` | prioriza nitidez (menos quadros, piso de qualidade alto) |
+| `.s curto` | até 5 s — o orçamento de 500 KB compra mais qualidade por segundo |
+| `.s 6s` | duração exata, de 2 a 10 s (`.s 8,5s` também vale) |
+
+Cada conversão registra a decisão no log (`trecho 12.4s–22.4s · 96 quadros (15 fps) · enquadrado em 500x500+110+640 · fundo liso 0x1e8c3c · 68% do quadro · q=48`), e o resultado continua sendo um WebP padrão com pack/autor/emojis. Se a análise falhar por qualquer motivo, a conversão cai automaticamente na escada clássica — ninguém fica sem figurinha. **E há uma trava final de conformidade:** se o conteúdo for incompressível (ruído de TV, areia, chuva, Mandelbrot) e nem o piso de qualidade couber no orçamento, o bot aperta mais — compressão máxima, menos quadros, qualidade menor — e só no fim encurta a duração. Acima de 500 KB (animada) ou 100 KB (parada) nada sai: o WhatsApp recusaria.
 
 ### Jogos & arcade
 
@@ -529,6 +539,8 @@ npm run doctor
 ```
 
 A suíte executa os arquivos de teste em processos sequenciais, cada um com `NEXUS_DATA_DIR` temporário próprio (removido ao final), incluindo testes offline de jogos e alinhamento de tabuleiros, limites, cache, roteamento, migração, SSRF, redirecionamentos e streams.
+
+`node scripts/sticker-battery.mjs [filtro]` é a auditoria da conversão de figurinhas: gera 20 entradas sintéticas (celular com rotação, 16:9, vertical, quadrado, GIF, WebM/VP9, 10 fps, 60 fps, sem movimento, abertura preta, 90 s, 0,4 s, cena escura/clara, fundo liso, ruído incompressível, detalhe extremo, já 512×512, foto) e confere **cada saída** contra o que o WhatsApp aceita: exatamente 512×512, ≤100 KB parada, ≤500 KB animada, ≤10 s, nenhum quadro abaixo de 8 ms, duração preservada e vídeo com movimento que não vira figurinha parada. Sai com código 1 (e diz o motivo) se qualquer caso violar a spec.
 
 ## Estrutura
 

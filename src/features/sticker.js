@@ -388,7 +388,7 @@ async function tryAiCut({ smart, buffer, ext, isVideo, onProgress }) {
  * Cria figurinha a partir da mídia.
  * @returns {Promise<Buffer>} webp pronto para enviar (com VP8X + EXIF válidos)
  */
-export async function makeSticker(source, { removeBg = false, pack, author, emojis, fit = 'fill', onProgress } = {}) {
+export async function makeSticker(source, { removeBg = false, pack, author, emojis, fit = 'fill', prefer = 'auto', seconds = 0, onProgress } = {}) {
   let { buffer } = source;
   const { type, node } = source;
   const mime = String(node?.mimetype || '').toLowerCase();
@@ -491,10 +491,18 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
     }`
   );
   const ext = magicExt || (isGif ? '.gif' : isVideo ? '.mp4' : mime.includes('png') ? '.png' : '.jpg');
-  const { buffer: webp, smart } = await toStickerWebp(buffer, { animated: isVideo, ext, fit, onProgress });
+  const { buffer: webp, smart } = await toStickerWebp(buffer, {
+    animated: isVideo,
+    ext,
+    fit,
+    prefer,
+    maxSeconds: seconds || STICKER_MAX_SECONDS,
+    onProgress
+  });
   // O motor inteligente explica o que decidiu (trecho, quadros, crop, qualidade).
   if (smart) {
     const cut = smart.cut ? ` · ${smart.cut}` : '';
+    const modo = PREF_LABEL[smart.prefer] ? ` · modo ${PREF_LABEL[smart.prefer]}` : '';
     if (smart.mode === 'static') {
       log.info(
         `motivo: ${smart.reason} · quadro em ${smart.stillSeconds}s${cut} · q=${smart.q} · ${formatBytes(smart.bytes)}`
@@ -502,7 +510,7 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
     } else {
       const end = (smart.startSeconds + smart.durationSeconds).toFixed(2);
       log.info(
-        `trecho ${smart.startSeconds}s–${end}s · ${smart.framesKept ?? smart.frames} quadros (${smart.targetFps} fps)` +
+        `trecho ${smart.startSeconds}s–${end}s · ${smart.framesKept ?? smart.frames} quadros (${smart.targetFps} fps)${modo}` +
           `${smart.crop ? ` · enquadrado em ${smart.crop}` : ''}${cut} · q=${smart.q} · ${formatBytes(smart.bytes)}` +
           ` · ${smart.probes} medição(ões)`
       );
@@ -515,6 +523,38 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
   await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
   return tagSticker(webp, { pack, author, emojis });
 }
+
+/**
+ * Palavras do usuário para o trade-off da animação (`.s liso`, `.s hd`,
+ * `.s curto`, `.s 6s`):
+ *  - liso/fluido  → fluidez máxima (15 fps), qualidade menor por quadro;
+ *  - nítido/hd    → imagem mais limpa, menos quadros;
+ *  - curto        → até 5 s (o orçamento de 500 KB compra mais qualidade);
+ *  - `6s`/`8s`    → duração exata (2 a 10 s).
+ * Sem nada disso, o motor decide pelo movimento (automático).
+ */
+const PREF_WORDS = {
+  smooth: ['liso', 'lisa', 'fluido', 'fluida', 'fluidez', 'smooth', 'movimento'],
+  sharp: ['nitido', 'nítido', 'nitidez', 'hd', 'qualidade', 'quality', 'sharp', 'cristalino', 'cristalina']
+};
+const SHORT_WORDS = ['curto', 'curta', 'curtinha', 'rapido', 'rápido', 'resumido', 'shorter'];
+
+export function parseStickerPrefs(args = []) {
+  const words = args.map((a) => String(a).toLowerCase().replace(/^[-–—]+/, '').replace(/^#/, ''));
+  let prefer = 'auto';
+  let seconds = 0;
+  for (const word of words) {
+    if (PREF_WORDS.smooth.includes(word)) prefer = 'smooth';
+    else if (PREF_WORDS.sharp.includes(word)) prefer = 'sharp';
+    else if (SHORT_WORDS.includes(word)) seconds = 5;
+    const match = /^(\d{1,2}(?:[.,]\d)?)s$/.exec(word);
+    if (match) seconds = Number(match[1].replace(',', '.'));
+  }
+  const clamped = seconds ? Math.min(STICKER_MAX_SECONDS, Math.max(2, seconds)) : 0;
+  return { prefer, seconds: clamped };
+}
+
+const PREF_LABEL = { smooth: 'liso (fluidez)', sharp: 'nítido (imagem)' };
 
 const FIT_WORDS = {
   contain: ['inteira', 'inteiro', 'full', 'original', 'normal', 'contain', 'proporcao', 'proporção'],

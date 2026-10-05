@@ -16,7 +16,7 @@ import { messageCache, isBotSent, markBotSent, containsViewOnce } from '../wa/ca
 import { extractAnyText, isIgnored, normalizeIgnoreTarget, handleDelete, statusText } from './antidelete.js';
 import { SYM, header, section, card, footer, ok, fail, warn, wait, usage, kv, toggle } from '../core/ui.js';
 import { isViewOnce, onViewOnceMessage, unwrapViewOnce } from './viewonce.js';
-import { makeSticker, packInfo, isAnimatedWebp, parseFit, extractAnyMediaSource } from './sticker.js';
+import { makeSticker, packInfo, isAnimatedWebp, parseFit, parseStickerPrefs, extractAnyMediaSource } from './sticker.js';
 import { stickerSourcesForCommand } from './stickerlink.js';
 import { removeBackground, bgStatus, bgPools } from './bgremoval.js';
 import {
@@ -1083,11 +1083,18 @@ async function runCommand(sock, msg, cmd, ctx) {
       if (!got) return;
       const { sources, failures, skipped } = got;
       if (!sources.length) {
-        return reply(usage('.s', '.s https://br.pinterest.com/pin/123/', 'Envie/responda uma imagem, vídeo ou GIF — ou mande o link que eu baixo e monto a figurinha. A animação vai até os 10 s do WhatsApp.'));
+        return reply(
+          usage(
+            '.s',
+            '.s https://br.pinterest.com/pin/123/',
+            'Envie/responda uma imagem, vídeo ou GIF — ou mande o link que eu baixo e monto a figurinha. A animação vai até os 10 s do WhatsApp.\n' +
+              'Quer mandar no resultado? `.s liso` (mais fluidez), `.s hd` (mais nitidez), `.s curto` (5 s) ou `.s 6s` (duração exata).'
+          )
+        );
       }
       let done = 0;
       for (let i = 0; i < sources.length; i++) {
-        const webp = await makeSticker(sources[i], { ...packInfo(), fit: parseFit(args), onProgress: reply });
+        const webp = await makeSticker(sources[i], { ...packInfo(), fit: parseFit(args), ...parseStickerPrefs(args), onProgress: reply });
         await reply(wait(sources.length > 1 ? `Enviando figurinha ${i + 1}/${sources.length}` : 'Enviando figurinha'));
         await sendStickerMessage(sock, jid, webp, msg);
         done++;
@@ -1108,7 +1115,7 @@ async function runCommand(sock, msg, cmd, ctx) {
       }
       let done = 0;
       for (let i = 0; i < sources.length; i++) {
-        const webp = await makeSticker(sources[i], { ...packInfo(), removeBg: true, fit: parseFit(args), onProgress: reply });
+        const webp = await makeSticker(sources[i], { ...packInfo(), removeBg: true, fit: parseFit(args), ...parseStickerPrefs(args), onProgress: reply });
         await reply(wait(sources.length > 1 ? `Enviando figurinha sem fundo ${i + 1}/${sources.length}` : 'Enviando figurinha sem fundo'));
         await sendStickerMessage(sock, jid, webp, msg);
         done++;

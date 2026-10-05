@@ -517,6 +517,20 @@ export const QUALITY_FLOOR = 22;
 export const QUALITY_FLOOR_MOTION_LOW = 50;
 export const MOTION_REFERENCE = 0.045;
 
+/**
+ * Modos que o usuário pode pedir (em cima do equilíbrio automático):
+ *  - `smooth` (liso): fluidez máxima — 15 fps, aceitando qualidade menor;
+ *  - `sharp` (nítido): imagem mais nítida — menos quadros, piso de qualidade alto;
+ *  - `auto`: o motor decide pelo movimento (padrão).
+ */
+export const STICKER_PREFERENCES = ['auto', 'smooth', 'sharp'];
+/** FPS máximo do modo fluidez (o mesmo teto da análise). */
+export const SMOOTH_FPS = SAMPLE_FPS;
+/** FPS máximo do modo nítido: poucos quadros, cada um mais limpo. */
+export const SHARP_FPS = 8;
+/** Piso de qualidade do modo nítido (o orçamento vira nitidez, não quadros). */
+export const SHARP_QUALITY_FLOOR = 62;
+
 export function qualityFloorFor(motionPerSecond) {
   const level = Math.min(1, Math.max(0, (Number(motionPerSecond) || 0) / MOTION_REFERENCE));
   return Math.round(QUALITY_FLOOR_MOTION_LOW - (QUALITY_FLOOR_MOTION_LOW - QUALITY_FLOOR) * level);
@@ -621,8 +635,9 @@ export function bestStillFrame(analysis, start, end) {
  * @param {{maxSeconds?: number, budgetBytes?: number, minFrames?: number, qStart?: number, autoCrop?: boolean}} [opts]
  * @returns {object|null} plano pronto para o FFmpeg (ou null quando não deu)
  */
-export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 1024, minFrames = 8, qStart = 45, autoCrop = true, autoCut = true } = {}) {
+export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 1024, minFrames = 8, qStart = 45, autoCrop = true, autoCut = true, prefer = 'auto' } = {}) {
   if (!analysis) return null;
+  const mode = STICKER_PREFERENCES.includes(prefer) ? prefer : 'auto';
   // Foto: um quadro só. Vira figurinha parada — e o fundo liso ainda é recortado.
   if (analysis.frameCount === 1) {
     const { state, cut } = autoCut ? backgroundVerdict(analysis) : { state: 'off', cut: null };
@@ -639,6 +654,7 @@ export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 102
       minFrames,
       qStart,
       qualityFloor: qualityFloorFor(0),
+      prefer: mode,
       cut,
       cutState: state,
       mode: 'static',
@@ -662,6 +678,14 @@ export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 102
   // parada e animada: fundo chapado em volta do sujeito fica transparente.
   const verdict = autoCut ? backgroundVerdict(analysis, { start, end }) : { state: 'off', cut: null };
   const cut = verdict.cut;
+  // O usuário pode mandar: liso (fluidez) ou nítido (imagem). O automático
+  // segue o movimento medido.
+  const autoFps = targetFpsFor(motion * fps);
+  const targetFps =
+    mode === 'smooth' ? SMOOTH_FPS : mode === 'sharp' ? Math.min(SHARP_FPS, Math.max(5, autoFps)) : autoFps;
+  const autoFloor = qualityFloorFor(motion * fps);
+  const qualityFloor =
+    mode === 'smooth' ? QUALITY_FLOOR : mode === 'sharp' ? Math.max(autoFloor, SHARP_QUALITY_FLOOR) : autoFloor;
   const base = {
     analysis,
     start,
@@ -674,7 +698,8 @@ export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 102
     budgetBytes,
     minFrames,
     qStart,
-    qualityFloor: qualityFloorFor(motion * fps),
+    qualityFloor,
+    prefer: mode,
     cut,
     cutState: verdict.state
   };
@@ -694,7 +719,6 @@ export function planSticker(analysis, { maxSeconds = 10, budgetBytes = 480 * 102
     };
   }
 
-  const targetFps = targetFpsFor(motion * fps);
   const targetFrames = Math.max(minFrames, Math.round(seconds * targetFps));
   const kept = planSchedule(analysis, { start, end, targetFrames });
   const box = activityBox(analysis, { start, end });
