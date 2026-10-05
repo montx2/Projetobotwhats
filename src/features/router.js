@@ -1083,7 +1083,7 @@ async function runCommand(sock, msg, cmd, ctx) {
       if (!got) return;
       const { sources, failures, skipped } = got;
       if (!sources.length) {
-        return reply(usage('.s', '.s https://br.pinterest.com/pin/123/', 'Envie/responda uma imagem, vídeo ou GIF — ou mande o link que eu baixo e monto a figurinha.'));
+        return reply(usage('.s', '.s https://br.pinterest.com/pin/123/', 'Envie/responda uma imagem, vídeo ou GIF — ou mande o link que eu baixo e monto a figurinha. A animação vai até os 10 s do WhatsApp.'));
       }
       let done = 0;
       for (let i = 0; i < sources.length; i++) {

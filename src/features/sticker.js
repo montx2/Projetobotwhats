@@ -8,8 +8,16 @@
 import { cfg } from '../core/config.js';
 import { log } from '../core/logger.js';
 import { SYM } from '../core/ui.js';
-import { toStickerWebp, decodeWebpToPng, detectMediaExt, hasFfmpeg } from '../util/ffmpeg.js';
-import { isWebp, isAnimatedWebp, parseWebp, readStickerExif, tagSticker } from '../util/webp.js';
+import { toStickerWebp, decodeWebpToPng, detectMediaExt, hasFfmpeg, STICKER_MAX_SECONDS, STICKER_ANIMATED_SPEC_BYTES } from '../util/ffmpeg.js';
+import {
+  isWebp,
+  isAnimatedWebp,
+  parseWebp,
+  readStickerExif,
+  tagSticker,
+  trimAnimatedWebp,
+  webpDurationMs
+} from '../util/webp.js';
 import { removeBackground } from './bgremoval.js';
 import { formatBytes } from '../core/http.js';
 import { messageCache } from '../wa/cache.js';
@@ -328,7 +336,8 @@ export async function extractStickerSource(sock, msg, { onProgress, allowViewOnc
  * @returns {Promise<Buffer>} webp pronto para enviar (com VP8X + EXIF válidos)
  */
 export async function makeSticker(source, { removeBg = false, pack, author, emojis, fit = 'fill', onProgress } = {}) {
-  const { buffer, type, node } = source;
+  let { buffer } = source;
+  const { type, node } = source;
   const mime = String(node?.mimetype || '').toLowerCase();
   const magicExt = detectMediaExt(buffer, '');
   const isStickerInput = type === 'sticker' || type === 'stickerMessage' || mime.includes('webp') || isWebp(buffer);
@@ -352,6 +361,34 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
     const info = parseWebp(buffer);
     const oldExif = readStickerExif(buffer);
     const finalEmojis = emojis?.length ? emojis : oldExif?.emojis;
+
+    // Figurinha animada vinda de fora: o WhatsApp aceita no máximo 10 s. O
+    // FFmpeg não decodifica WebP animado, então o corte é feito no contêiner
+    // (quadros ANMF finais fora) — sem reencode, sem perder qualidade.
+    if (info.animated) {
+      const durationMs = webpDurationMs(buffer);
+      if (durationMs > STICKER_MAX_SECONDS * 1000) {
+        const trim = trimAnimatedWebp(buffer, STICKER_MAX_SECONDS * 1000);
+        if (trim.dropped > 0) {
+          log.info(
+            `figurinha animada de ${(durationMs / 1000).toFixed(1)} s cortada para ` +
+              `${(trim.durationMs / 1000).toFixed(1)} s (${trim.dropped} quadro(s) fora do limite)`
+          );
+          await onProgress?.(
+            `${SYM.wait} Cortando a figurinha em ${STICKER_MAX_SECONDS} s (limite do WhatsApp)…`
+          );
+          buffer = trim.buffer;
+        }
+      }
+      if (buffer.length > STICKER_ANIMATED_SPEC_BYTES) {
+        log.warn(
+          `figurinha animada de ${formatBytes(buffer.length)} acima dos 500 KB do WhatsApp; ` +
+            'reenvie como imagem/vídeo para o bot reencodar dentro do limite'
+        );
+      }
+      await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
+      return tagSticker(buffer, { pack, author, emojis: finalEmojis });
+    }
 
     // Se for um WebP estático fora do padrão 512x512 e tivermos FFmpeg, padroniza em 512x512
     if (!info.animated && (info.width !== 512 || info.height !== 512) && hasFfmpeg()) {
@@ -393,7 +430,13 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
     return tagSticker(webp, { pack, author, emojis });
   }
 
-  await onProgress?.(`${SYM.wait} ${isVideo ? 'Convertendo vídeo/GIF em figurinha animada…' : 'Convertendo imagem em figurinha 512×512…'}`);
+  await onProgress?.(
+    `${SYM.wait} ${
+      isVideo
+        ? `Convertendo vídeo/GIF em figurinha animada (até ${STICKER_MAX_SECONDS} s)…`
+        : 'Convertendo imagem em figurinha 512×512…'
+    }`
+  );
   const ext = magicExt || (isGif ? '.gif' : isVideo ? '.mp4' : mime.includes('png') ? '.png' : '.jpg');
   const { buffer: webp } = await toStickerWebp(buffer, { animated: isVideo, ext, fit, onProgress });
   await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);

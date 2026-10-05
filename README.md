@@ -158,6 +158,10 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .info                            → status do bot (exclusivo do dono)
 ```
 
+### Figurinhas e o limite de duração
+
+O WhatsApp aceita WebP de exatamente **512×512**: até **100 KB** na figurinha parada e até **500 KB e 10 segundos** de animação na animada. O bot trabalha dentro desses limites e **tenta preservar a animação inteira**: ao converter um vídeo/GIF de até 10 s, a qualidade e o FPS caem antes da duração — os 10 segundos só são encurtados (8 s, 6 s, 5 s, 4 s, 3 s) se nem a compressão mínima couber em 500 KB. Vídeo maior que 10 s é cortado nos 10 s, e uma figurinha animada recebida pronta e com mais de 10 s perde apenas os quadros finais, sem reencode (o bot corta os quadros no próprio contêiner WebP, porque o FFmpeg não decodifica WebP animado). Para regerar uma animação acima de 500 KB, reenvie o vídeo/imagem original — aí o bot reencoda dentro do limite.
+
 ### Jogos & arcade
 
 Os jogos funcionam em chats liberados com `.ativar` e no privado do dono. Use `.jogos` para ver o catálogo; há uma partida de tabuleiro ativa por chat. Se alguém tentar abrir outro jogo com uma partida em curso, o bot explica qual partida está rolando, qual o progresso, como continuar e que `.encerrar` (ou `.jogos cancelar`) encerra a rodada atual. Os palpites aceitos podem ser enviados com o comando ou diretamente, sem prefixo. As dicas (`.termo dica`, `.forca dica`, `.quiz dica`, `.anagrama dica`, `.adivinhe dica`, `.minado dica`) são informadas uma única vez: depois de usadas, o jogo passa a exibir a informação revelada — a categoria na forca, a primeira letra no termo, casas e minas restantes no campo minado — e o rodapé para de repetir o comando.

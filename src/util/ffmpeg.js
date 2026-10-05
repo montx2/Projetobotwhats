@@ -232,6 +232,20 @@ export function detectAudioMime(buf) {
  */
 export const STICKER_FITS = ['fill', 'contain', 'cover'];
 
+/**
+ * Limites oficiais da figurinha do WhatsApp (WhatsApp/stickers · Meta):
+ *  - 512×512, WebP com transparência;
+ *  - estática: até 100 KB;
+ *  - animada: até 500 KB e 10 segundos de animação (quadros de no mínimo 8 ms).
+ *
+ * O teto interno de bytes sai um pouco menor que a spec para o arquivo final
+ * continuar dentro do limite depois de receber VP8X + EXIF (pack/autor/emojis).
+ */
+export const STICKER_MAX_SECONDS = 10;
+export const STICKER_ANIMATED_SPEC_BYTES = 500 * 1024;
+export const STICKER_STATIC_MAX_BYTES = 100 * 1024;
+export const STICKER_ANIMATED_MAX_BYTES = 480 * 1024;
+
 export function buildStickerFilter({ animated, fps = 15, simple = false, fit = 'fill' }) {
   const flags = simple ? '' : `:flags=${animated ? 'bicubic' : 'lanczos'}`;
   const parts = [];
@@ -250,7 +264,7 @@ export function buildStickerFilter({ animated, fps = 15, simple = false, fit = '
   return parts.join(',');
 }
 
-async function encodeStep(inFile, outFile, { animated, q, fps = 15, dur = 7, fit = 'fill' }) {
+async function encodeStep(inFile, outFile, { animated, q, fps = 15, dur = STICKER_MAX_SECONDS, fit = 'fill', level = 4 }) {
   const buildArgs = ({ simpleFilter = false, omitVsync = false } = {}) => {
     const vf = buildStickerFilter({ animated, fps, simple: simpleFilter, fit });
     const args = ['-y'];
@@ -269,7 +283,7 @@ async function encodeStep(inFile, outFile, { animated, q, fps = 15, dur = 7, fit
       '-q:v',
       String(q),
       '-compression_level',
-      '4',
+      String(level),
       '-preset',
       'default'
     );
@@ -291,28 +305,65 @@ async function encodeStep(inFile, outFile, { animated, q, fps = 15, dur = 7, fit
 }
 
 /**
+ * Padroniza a duração da figurinha animada dentro do limite do WhatsApp.
+ * Aceita 1 s…10 s; valor ausente/inválido vira o teto (10 s).
+ */
+export function stickerSeconds(maxSeconds = STICKER_MAX_SECONDS) {
+  const n = Number(maxSeconds);
+  if (!Number.isFinite(n) || n <= 0) return STICKER_MAX_SECONDS;
+  return Math.max(1, Math.min(STICKER_MAX_SECONDS, n));
+}
+
+/**
+ * Escada adaptativa de FPS/qualidade/duração da figurinha animada.
+ *
+ * A ORDEM protege o que o WhatsApp permite de melhor: a duração cheia (até 10 s)
+ * é a última coisa a cair. Primeiro caem o FPS e a qualidade, mantendo os 10 s
+ * inteiros; só se nem o FPS mínimo couber no teto de 500 KB a animação é
+ * encurtada (8 s, 6 s, 5 s, 4 s, 3 s), mantendo compressão forte.
+ *
+ * @returns {Array<{fps: number, q: number, level: number, dur: number}>}
+ */
+export function animatedStickerSteps(maxSeconds = STICKER_MAX_SECONDS) {
+  const dur = stickerSeconds(maxSeconds);
+  const keepDuration = [
+    { fps: 15, q: 60, level: 4 },
+    { fps: 12, q: 52, level: 5 },
+    { fps: 10, q: 44, level: 5 },
+    { fps: 8, q: 36, level: 6 },
+    { fps: 6, q: 28, level: 6 },
+    { fps: 5, q: 22, level: 6 },
+    { fps: 4, q: 16, level: 6 },
+    { fps: 3, q: 12, level: 6 }
+  ].map((step) => ({ ...step, dur }));
+
+  const shorten = [];
+  for (const seconds of [8, 6, 5, 4, 3]) {
+    if (seconds < dur) shorten.push({ fps: 6, q: 24, level: 6, dur: seconds });
+  }
+  return [...keepDuration, ...shorten];
+}
+
+/**
  * Converte imagem/vídeo/gif em WebP de figurinha (512x512, com transparência)
- * respeitando os limites de tamanho do WhatsApp (<= 100 KB estática, <= 500 KB animada).
+ * respeitando os limites do WhatsApp (<= 100 KB estática; <= 500 KB e <= 10 s
+ * de animação na animada). A duração pedida em `maxSeconds` é preservada ao
+ * máximo — a compressão come FPS/qualidade antes de cortar tempo.
+ *
  * @param {Buffer} input mídia original
- * @param {{animated?: boolean, maxSeconds?: number, ext?: string, onProgress?: (msg: string) => Promise<any>}} opts
+ * @param {{animated?: boolean, maxSeconds?: number, ext?: string, fit?: string, onProgress?: (msg: string) => Promise<any>}} opts
  * @returns {Promise<{buffer: Buffer, animated: boolean}>}
  */
-export async function toStickerWebp(input, { animated = false, maxSeconds = 8, ext = '.png', fit = 'fill', onProgress } = {}) {
+export async function toStickerWebp(input, { animated = false, maxSeconds = STICKER_MAX_SECONDS, ext = '.png', fit = 'fill', onProgress } = {}) {
   const realExt = detectMediaExt(input, ext);
   const inFile = tmpFile(realExt);
   const outFile = tmpFile('.webp');
   fs.writeFileSync(inFile, input);
 
-  // Escada adaptativa de qualidade/FPS/duração para nunca estourar o limite do WhatsApp
-  const maxBytes = animated ? 480 * 1024 : 100 * 1024;
+  const maxBytes = animated ? STICKER_ANIMATED_MAX_BYTES : STICKER_STATIC_MAX_BYTES;
+  const wanted = stickerSeconds(maxSeconds);
   const steps = animated
-    ? [
-        { fps: 15, q: 55, dur: Math.min(maxSeconds, 7) },
-        { fps: 12, q: 42, dur: Math.min(maxSeconds, 6) },
-        { fps: 10, q: 32, dur: Math.min(maxSeconds, 5) },
-        { fps: 8, q: 22, dur: Math.min(maxSeconds, 4) },
-        { fps: 6, q: 15, dur: Math.min(maxSeconds, 3) }
-      ]
+    ? animatedStickerSteps(wanted)
     : [{ q: 82 }, { q: 68 }, { q: 52 }, { q: 36 }, { q: 22 }];
 
   let best = null;
@@ -322,7 +373,7 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = 8, e
       if (i > 0 && onProgress) {
         await onProgress(
           animated
-            ? `🗜️ Otimizando figurinha animada para o WhatsApp (tentativa ${i + 1}/${steps.length})…`
+            ? `🗜️ Ajustando a figurinha animada (até ${wanted} s · tentativa ${i + 1}/${steps.length})…`
             : `🗜️ Ajustando peso da figurinha (${i + 1}/${steps.length})…`
         );
       }
@@ -335,8 +386,10 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = 8, e
       if (buf.length <= maxBytes) {
         return { buffer: buf, animated: isAnimatedWebp(buf) };
       }
-      // Se ficou muito acima do limite, pula direto 2 degraus para economizar tempo
-      i += buf.length > maxBytes * 2.2 && i + 2 < steps.length ? 2 : 1;
+      // Se ficou muito acima do limite, pula degraus para economizar tempo
+      const ratio = buf.length / maxBytes;
+      const skip = ratio > 6 ? 3 : ratio > 2.2 ? 2 : 1;
+      i += Math.max(1, Math.min(skip, steps.length - 1 - i));
     }
 
     if (!best) throw new Error('ffmpeg não gerou saída');
