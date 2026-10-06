@@ -330,3 +330,162 @@ test('ponta a ponta: foto complexa usa provedor quando disponível; vídeo, GIF 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/* ───────── ordem do recorte de fundo no `.sia`: API primeiro ───────── */
+
+test('ordem do .sia: API de remoção primeiro (mesmo com fundo liso); recorte local só como reserva', { skip: !hasFfmpeg }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sia-ordem-'));
+  const lisa = path.join(dir, 'lisa.png');
+  const apiCut = path.join(dir, 'api-cut.png');
+  const apiVazio = path.join(dir, 'api-vazio.png');
+  const complexa = path.join(dir, 'complexa.png');
+  const parado = path.join(dir, 'parado.mp4');
+  const gif = path.join(dir, 'liso.gif');
+  // Foto de fundo liso com um bloco pequeno: o recorte local daria alfa ~0,02.
+  ffmpegOk(['-f', 'lavfi', '-i', 'color=c=0x1e8c3c:s=640x640',
+    '-vf', 'drawbox=x=270:y=270:w=100:h=100:color=0xf0f0f0:t=fill', '-frames:v', '1', lisa]);
+  // O que a "API" devolve: um bloco grande (alfa ~0,94), bem diferente do local.
+  ffmpegOk(['-f', 'lavfi', '-i', 'color=c=black@0:s=640x640,format=rgba',
+    '-f', 'lavfi', '-i', 'color=c=0xf0f0f0:s=620x620',
+    '-filter_complex', '[0][1]overlay=x=10:y=10', '-frames:v', '1', apiCut]);
+  // Recorte vazio: mesmo PNG válido, sem sujeito nenhum.
+  ffmpegOk(['-f', 'lavfi', '-i', 'color=c=black@0:s=640x640,format=rgba', '-frames:v', '1', apiVazio]);
+  ffmpegOk(['-f', 'lavfi', '-i', 'testsrc2=s=640x640:r=15:d=1',
+    '-vf', 'drawbox=x=220:y=220:w=200:h=200:color=0xf0f0f0:t=fill,scale=640:640', '-frames:v', '1', complexa]);
+  // Vídeo PARADO que o motor transforma em figurinha estática (fundo liso).
+  ffmpegOk(['-loop', '1', '-i', lisa, '-t', '2', '-r', '15', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', parado]);
+  ffmpegOk(['-f', 'lavfi', '-i', 'color=c=0x1e8c3c:s=320x320:d=1:r=10',
+    '-f', 'lavfi', '-i', 'color=c=0xf0f0f0:s=100x100:d=1:r=10',
+    '-filter_complex', "[0][1]overlay=x='60+80*sin(2*t)':y=110", '-loop', '0', gif]);
+
+  const lisaUrl = 'https://i.pinimg.com/originals/ab/cd/lisa-ordem.png';
+  const lisaDoisUrl = 'https://i.pinimg.com/originals/ab/cd/lisa-ordem-2.png';
+  const complexaUrl = 'https://i.pinimg.com/originals/ab/cd/complexa-ordem.png';
+  const videoUrl = 'https://i.pinimg.com/originals/ab/cd/parado-ordem.mp4';
+  const gifUrl = 'https://i.pinimg.com/originals/ab/cd/lisa-ordem.gif';
+  const endpoint = 'https://removebg.test/ordem';
+  const pool = bgPools().endpoints.items;
+  const previousFlag = process.env.STICKER_AI_CUT;
+  delete process.env.STICKER_AI_CUT; // pedido explícito não depende de flag nenhuma
+  let posts = 0;
+  let plans = 0;
+  let apiMode = 'ok';
+  let fundoPlano = 'remover';
+
+  const routes = [
+    [lisaUrl, bufferResponse(fs.readFileSync(lisa))],
+    [lisaDoisUrl, bufferResponse(fs.readFileSync(lisa))],
+    [complexaUrl, bufferResponse(fs.readFileSync(complexa))],
+    [videoUrl, bufferResponse(fs.readFileSync(parado), { contentType: 'video/mp4' })],
+    [gifUrl, bufferResponse(fs.readFileSync(gif), { contentType: 'image/gif' })],
+    [endpoint, () => {
+      posts++;
+      if (apiMode === 'erro') {
+        return new Response('erro do provedor', { status: 500, headers: { 'content-type': 'text/plain' } });
+      }
+      return bufferResponse(fs.readFileSync(apiMode === 'vazio' ? apiVazio : apiCut));
+    }],
+    ['text.pollinations.ai', (_target, opts) => {
+      plans++;
+      const pedido = JSON.parse(opts.body).messages[0].content;
+      assert.doesNotMatch(pedido, /i\.pinimg\.com|removebg\.test/, 'o planejador recebe só o texto do pedido');
+      return jsonResponse({
+        choices: [{ message: { content: JSON.stringify({ fundo: fundoPlano, duracao: 0, estilo: 'auto', enquadramento: 'auto', avisos: [] }) } }]
+      });
+    }]
+  ];
+
+  try {
+    await withMockFetch(routes, async () => {
+      // 1) Provedor configurado + pedido explícito: a API é a PRIMEIRA tentativa,
+      //    mesmo com fundo liso, e o resultado dela é a figurinha final.
+      pool.push(endpoint);
+      const umaFoto = await run(`.sia sem fundo ${lisaUrl}`);
+      assertSentSticker(umaFoto.stickers[0]);
+      assert.equal(posts, 1, 'fundo liso também vai à API quando a remoção foi pedida');
+      const alphaApi = await alphaCoverage(umaFoto.stickers[0].sticker);
+      assert.ok(alphaApi > 0.5, `a figurinha final é o recorte da API, não o local (alfa ${alphaApi})`);
+      assert.match(umaFoto.last, /sem fundo/);
+
+      // Uma tentativa por fonte estática, nunca por quadro: 2 fotos → 2 chamadas.
+      const duasFotos = await run(`.sia sem fundo ${lisaUrl} ${lisaDoisUrl}`);
+      assert.equal(duasFotos.stickers.length, 2);
+      assert.equal(posts, 3, 'exatamente uma chamada por foto');
+      assert.equal(plans, 2, 'um plano por pedido, não por fonte');
+      for (const sticker of duasFotos.stickers) {
+        assert.ok((await alphaCoverage(sticker.sticker)) > 0.5, 'as duas fotos usam o recorte da API');
+      }
+
+      // 2) API falhando: SÓ ENTÃO o recorte local de fundo liso entra.
+      apiMode = 'erro';
+      const aposErro = await run(`.sia sem fundo ${lisaUrl}`);
+      assertSentSticker(aposErro.stickers[0]);
+      assert.equal(posts, 4, 'uma tentativa de API por fonte, mesmo falhando');
+      const alphaReserva = await alphaCoverage(aposErro.stickers[0].sticker);
+      assert.ok(alphaReserva > 0.005 && alphaReserva < 0.15, `o recorte local salvou a figurinha (alfa ${alphaReserva})`);
+      assert.match(aposErro.last, /sem fundo/);
+
+      // 3) API devolvendo recorte vazio: descartado, sem segunda tentativa.
+      apiMode = 'vazio';
+      const aposVazio = await run(`.sia sem fundo ${lisaUrl}`);
+      assertSentSticker(aposVazio.stickers[0]);
+      assert.equal(posts, 5, 'recorte vazio não gera nova tentativa na API');
+      const alphaVazio = await alphaCoverage(aposVazio.stickers[0].sticker);
+      assert.ok(alphaVazio > 0.005 && alphaVazio < 0.15, `recorte vazio descartado; o local entrou (alfa ${alphaVazio})`);
+      assert.match(aposVazio.last, /sem fundo/);
+
+      // 4) API falhando E recorte local sem solução: fundo mantido, aviso honesto.
+      apiMode = 'erro';
+      const semSolucao = await run(`.sia sem fundo ${complexaUrl}`);
+      assert.equal(posts, 6);
+      const alphaMantido = await alphaCoverage(semSolucao.stickers[0].sticker);
+      assert.ok(alphaMantido > 0.9, `fundo original preservado (alfa ${alphaMantido})`);
+      assert.match(semSolucao.last, /Fundo mantido/);
+      assert.match(semSolucao.last, /a remoção por IA falhou/);
+
+      // 5) Sem provedor configurado: nenhuma chamada e recorte local na hora.
+      pool.splice(pool.indexOf(endpoint), 1);
+      bgPools().endpoints.clearCooldowns();
+      const semProvedor = await run(`.sia sem fundo ${lisaUrl}`);
+      assert.equal(posts, 6, 'sem provedor, zero chamadas');
+      const alphaSemProvedor = await alphaCoverage(semProvedor.stickers[0].sticker);
+      assert.ok(alphaSemProvedor > 0.005 && alphaSemProvedor < 0.15, `recorte local de reserva (alfa ${alphaSemProvedor})`);
+      assert.match(semProvedor.last, /sem fundo/);
+
+      // 6) Sem pedido explícito de remoção, a API de remoção não é chamada.
+      pool.push(endpoint);
+      fundoPlano = 'auto';
+      const automatico = await run(`.sia ${lisaUrl}`);
+      assert.equal(posts, 6, 'plano automático não chama a API de remoção');
+      assert.ok((await alphaCoverage(automatico.stickers[0].sticker)) < 0.15, 'fundo liso segue recortado de graça');
+
+      fundoPlano = 'manter';
+      const mantido = await run(`.sia mantém o fundo ${lisaUrl}`);
+      assert.equal(posts, 6, 'pedido de manter fundo não chama a API de remoção');
+      assert.ok((await alphaCoverage(mantido.stickers[0].sticker)) > 0.9, 'fundo preservado');
+      assert.match(mantido.last, /fundo mantido/);
+
+      // 7) Vídeo (inclusive o que vira imagem estática), GIF e figurinha animada
+      //    nunca enviam quadro nenhum ao provedor.
+      fundoPlano = 'remover';
+      const video = await run(`.sia sem fundo ${videoUrl}`);
+      assertSentSticker(video.stickers[0]); // vídeo parado → figurinha estática
+      assert.equal(isAnimatedWebp(video.stickers[0].sticker), false, 'o vídeo parado virou imagem estática');
+      assert.equal(posts, 6, 'nem um vídeo parado envia quadro ao provedor');
+      assert.ok((await alphaCoverage(video.stickers[0].sticker)) < 0.15, 'no vídeo, só o recorte local de liso');
+
+      const gifResult = await run(`.sia sem fundo ${gifUrl}`);
+      assertSentSticker(gifResult.stickers[0], { animated: true });
+      assert.equal(posts, 6, 'GIF nunca envia quadro ao provedor');
+      assert.match(gifResult.last, /sem fundo/);
+
+      assert.equal(plans, 9, 'um plano por pedido, nunca um por fonte ou por quadro');
+    });
+  } finally {
+    const index = pool.indexOf(endpoint);
+    if (index >= 0) pool.splice(index, 1);
+    if (previousFlag === undefined) delete process.env.STICKER_AI_CUT;
+    else process.env.STICKER_AI_CUT = previousFlag;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
