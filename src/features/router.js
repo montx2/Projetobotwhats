@@ -66,6 +66,13 @@ import {
   dedicatedPlatformNames
 } from './download.js';
 import {
+  comedyHubLogin,
+  comedyHubSessionStatus,
+  clearComedyHubSession,
+  saveComedyHubSession,
+  maskToken
+} from './downloaders/comedyhub.js';
+import {
   ownerMenu,
   publicMenu,
   mainMenu,
@@ -122,7 +129,8 @@ const EXPENSIVE_COMMANDS = new Set([
   'dl', 'download', 'baixar', 'tt', 'tiktok', 'tiktokdl', 'ttmp3', 'tiktokmp3', 'ttaudio',
   'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels', 'yt', 'youtube', 'ytb', 'ytv', 'ytmp4',
   'video', 'ytmp3', 'youtubemp3', 'ytaudio', 'yta', 'mp3', 'play', 'musica', 'música', 'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb',
-  'bsky', 'bluesky', 'imgur', 'dm', 'dailymotion'
+  'bsky', 'bluesky', 'imgur', 'dm', 'dailymotion', 'ch', 'comedyhub', 'chub',
+  'chlogin', 'chlogar', 'comedyhublogin', 'chtoken', 'chjwt'
 ]);
 const MEDIA_KEYS = new Set(['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage', 'documentMessage']);
 const MESSAGE_WRAPPERS = new Set([
@@ -171,9 +179,10 @@ function isExpensiveRequest(command, msg) {
     'yt', 'youtube', 'ytb', 'ytv', 'ytmp4', 'video',
     'ytmp3', 'youtubemp3', 'ytaudio', 'yta', 'mp3', 'play', 'musica', 'música',
     'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb',
-    'bsky', 'bluesky', 'imgur', 'dm', 'dailymotion'
+    'bsky', 'bluesky', 'imgur', 'dm', 'dailymotion',
+    'ch', 'comedyhub', 'chub', 'chlogin', 'chlogar', 'comedyhublogin', 'chtoken', 'chjwt'
   ].includes(name)) {
-    return Boolean(pickUrl(args, getQuotedText(msg)));
+    return Boolean(pickUrl(args, getQuotedText(msg)) || args.length);
   }
   if (['ia', 'ai', 'gpt', 'chat'].includes(name)) {
     if (args[0]?.toLowerCase() === 'reset') return false;
@@ -1048,8 +1057,14 @@ async function runCommand(sock, msg, cmd, ctx) {
     }
 
     case 'info':
-    case 'status':
+    case 'status': {
       requireOwner(ctx, msg);
+      const chSession = comedyHubSessionStatus();
+      const chLine = chSession.logged
+        ? chSession.expired
+          ? 'sessão vencida (CDN cobre · .chlogin)'
+          : 'sessão ativa (.ch)'
+        : 'sem login (CDN público · .chlogin p/ tudo)';
       return reply(
         infoText({
           uptime: uptimeText(STARTED_AT),
@@ -1065,6 +1080,7 @@ async function runCommand(sock, msg, cmd, ctx) {
             'pinterest widget: ativo',
             `hls: ativo (.m3u8 → MP4${hasFfmpeg() ? '' : ' · FFmpeg ausente: só streams fMP4'})`,
             `extratores dedicados: ${dedicatedPlatformNames().length}`,
+            `comedyhub: ${chLine}`,
             ...cobaltInfoRows(),
             `yt-dlp: ${canUseYtdlp(youtubeWatchUrl('dQw4w9WgXcQ')) ? `ativo (YouTube${hasYtDlp() ? ' e demais sites' : ''})` : 'indisponível (pip install -U yt-dlp)'}`,
             `auto-dl: ${cfg.get().autoDownload ? 'ligado' : 'desligado'}`
@@ -1072,6 +1088,7 @@ async function runCommand(sock, msg, cmd, ctx) {
           ownerName: owner ? 'você' : undefined
         })
       );
+    }
 
     case 'doctor':
       requireOwner(ctx, msg);
@@ -1631,6 +1648,115 @@ async function runCommand(sock, msg, cmd, ctx) {
         url: pickUrl(args, quotedText),
         fallback: usage('.dm <link>', '.dm https://dai.ly/x8abc', 'Envie o link do vídeo do Dailymotion.')
       });
+
+    case 'ch':
+    case 'comedyhub':
+    case 'chub':
+      return downloadCommand({
+        sock, msg, args, ctx,
+        url: pickUrl(args, quotedText),
+        fallback: usage(
+          '.ch <link>',
+          '.ch https://thecomedyhub.com.br/meme/<id>',
+          'Meme, foto ou vídeo do ComedyHub — baixa sem login pelo CDN público. `.chlogin` conecta a conta e libera também os posts antigos.'
+        )
+      });
+
+    // ── COMEDYHUB: sessão do usuário ────────────────────
+    case 'chlogin':
+    case 'chlogar':
+    case 'comedyhublogin': {
+      requireOwner(ctx, msg);
+      const [login, ...senhaPartes] = args;
+      const senha = senhaPartes.join(' ').trim();
+      if (!login || !senha) {
+        return reply(
+          usage(
+            '.chlogin <email ou usuário> <senha>',
+            '.chlogin eu@email.com minhasenha',
+            'A senha é usada só para pegar o token de acesso e não fica salva em lugar nenhum.'
+          )
+        );
+      }
+      await reply(wait('Entrando no ComedyHub'));
+      // A mensagem tem senha: apaga assim que der (em grupo precisa ser admin).
+      const apagada = await sock.sendMessage(msg.key.remoteJid, { delete: msg.key }).then(() => true).catch(() => false);
+      const conta = await comedyHubLogin(login, senha);
+      return reply(
+        ok('ComedyHub conectado', `${conta.user ? `conta ${conta.user}` : 'sessão salva'} · token guardado em data/comedyhub.json`) +
+          (apagada ? '' : `\n${SYM.warn} apague a mensagem com a senha você mesmo (o bot não conseguiu)`)
+      );
+    }
+
+    case 'chtoken':
+    case 'chjwt': {
+      requireOwner(ctx, msg);
+      const token = args.join(' ').trim();
+      if (!token) {
+        return reply(
+          usage(
+            '.chtoken <token>',
+            '.chtoken eyJhbGciOi...',
+            'Cole o token do site: F12 → Application → Local Storage → thecomedyhub.com.br (valor que começa com "eyJ").'
+          )
+        );
+      }
+      const saved = saveComedyHubSession(token);
+      const apagada = await sock.sendMessage(msg.key.remoteJid, { delete: msg.key }).then(() => true).catch(() => false);
+      return reply(
+        ok('Token do ComedyHub salvo', `${saved.user ? `conta ${saved.user} · ` : ''}${maskToken(saved.token)}`) +
+          (apagada ? '' : `\n${SYM.warn} apague a mensagem com o token você mesmo (o bot não conseguiu)`)
+      );
+    }
+
+    case 'chstatus':
+    case 'chconta': {
+      requireOwner(ctx, msg);
+      const status = comedyHubSessionStatus();
+      if (!status.logged) {
+        return reply(
+          card([
+            header('ComedyHub', 'sessão'),
+            [
+              `${SYM.detail} *sem sessão* — o bot está baixando pelo *CDN público* do site`,
+              '',
+              `${SYM.section} *COMO CONECTAR (opcional)*`,
+              cmdLine('.chlogin <email> <senha>', 'login e senha da sua conta'),
+              cmdLine('.chtoken <token>', 'alternativa: token copiado do site'),
+              '',
+              `${SYM.detail} Com sessão o bot lê a API do post: pega memes antigos que não estão no CDN e ainda traz título/autor para a legenda.`
+            ].join('\n'),
+            status.source ? kv('Origem lida', status.source) : null
+          ].filter(Boolean))
+        );
+      }
+      const expira = status.expiresAt
+        ? `${new Date(status.expiresAt).toLocaleString('pt-BR')}${status.expired ? ` ${SYM.warn} vencido` : ''}`
+        : 'sem data de validade no token';
+      return reply(
+        card([
+          header('ComedyHub', 'sessão ativa'),
+          [
+            kv('Conta', status.user || 'não informada'),
+            kv('Origem', status.source),
+            kv('Expira em', expira),
+            '',
+            status.expired
+              ? `${SYM.err} token vencido — rode \`.chlogin\` novamente`
+              : `${SYM.ok} pronto para baixar meme, foto e vídeo com \`.ch <link>\``
+          ].join('\n'),
+          usage('.ch <link>', '.ch https://thecomedyhub.com.br/meme/<id>')
+        ])
+      );
+    }
+
+    case 'chsair':
+    case 'chlogout':
+    case 'chdesconectar': {
+      requireOwner(ctx, msg);
+      clearComedyHubSession();
+      return reply(ok('ComedyHub desconectado', 'o token foi apagado de data/comedyhub.json'));
+    }
 
     case 'plataformas':
     case 'sites':

@@ -144,6 +144,10 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .yt <link> / .ytmp3 <link>      → YouTube / áudio
 .tw <link> / .face <link>       → X/Twitter / Facebook
 .bsky <link>                    → Bluesky  ·  `.imgur` Imgur  ·  `.dm` Dailymotion
+.ch <link>                      → ComedyHub (meme, foto, vídeo) — baixa sem login
+.chlogin <email> <senha>        → conecta a conta do ComedyHub (a senha não fica salva)
+.chtoken <token>                → alternativa: token copiado do site
+.chstatus / .chsair             → ver a sessão / desconectar
 .plataformas                    → catálogo completo do que é suportado
 .ia <pergunta>                  → IA conversa natural e entra na resenha se o contexto pedir
 .criar <descrição> [atalhos]    → geração de imagem (prompt otimizado)
@@ -272,6 +276,7 @@ O `.dl` funciona como porta única: o bot identifica a rede pelo link e escolhe 
 | Bluesky | fotos e vídeo do post (API pública do atproto) |
 | Imgur | foto, GIF/MP4 e álbum inteiro |
 | Dailymotion | vídeo em MP4 na maior resolução |
+| ComedyHub | meme, foto e vídeo — baixa sem login (CDN público) e a sua sessão (`.chlogin`) libera o resto |
 | Stream HLS | qualquer `.m3u8`: segmentos → MP4 |
 | GIF | Giphy e Tenor saem como MP4/GIF |
 
@@ -282,6 +287,31 @@ O `.dl` funciona como porta única: o bot identifica a rede pelo link e escolhe 
 **Streams HLS (`.m3u8`).** O bot lê o master playlist, escolhe a melhor variante (ou a faixa de áudio separada, no `.ytmp3`), baixa os segmentos com concorrência limitada, decifra **AES-128** quando a playlist pede e junta tudo em MP4. Segmentos em MPEG-TS precisam do **FFmpeg** instalado (`pkg install ffmpeg`) para o remux `-c copy` — sem ele, playlists fMP4 ainda funcionam e o erro explica o que falta. Stream ao vivo baixa a janela atual; VOD/stream cortado pelo `maxMB` avisa "enviei o trecho inicial" em vez de entregar um arquivo incompleto em silêncio.
 
 Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Faça downloads somente de conteúdo que você tem direito e autorização para acessar.
+
+### ComedyHub: por que o `.dl` antigo trazia a "foto de introdução"
+
+O `thecomedyhub.com.br` não é um site comum de memes: a página do post é uma SPA (React + Vite) e **o conteúdo só aparece depois do login**. O HTML que o servidor entrega para qualquer visitante é só o esqueleto do app — com `og:image` apontando para o logo do site (`/images/logos/opengrath.webp`). Era exatamente isso que o bot antigo mandava: como o raspador genérico lê `og:image`/`og:video` da página, o `.dl` de um link `/meme/<id>` entregava essa imagem de capa no lugar do meme — sem nenhuma chance de acertar, porque o post não está no HTML.
+
+O suporte passou a ser dedicado e resolve por dois caminhos, nesta ordem:
+
+1. **CDN público do site** (funciona **sem login nenhum**): o player toca os memes pelo Bunny CDN `comedyhub-api.b-cdn.net`, e esse caminho não pede token — o bot pega o arquivo original em `/memes/<id>/<id>.<ext>` ou a playlist HLS `/memes/<id>/playlist.m3u8` (o motor HLS baixa os segmentos e entrega MP4). Ou seja: `.ch <link>` já funciona de fábrica, sem configurar nada.
+2. **API oficial com a sua sessão** (opcional, pega o que o CDN não tem): posts antigos, itens em moderação e o título/autor que aparecem na legenda.
+
+Como conectar a conta (opcional):
+
+1. `.chlogin seu@email.com suasenha` — o bot faz login na API e guarda só o token em `data/comedyhub.json` (a mensagem com a senha é apagada quando o WhatsApp permite, e a senha **não fica salva em lugar nenhum**). Se o site pedir código por e-mail, o caminho é o passo 2.
+2. `.chtoken <token>` — entre no site, abra o DevTools (F12) → **Application** → **Local Storage** → `https://thecomedyhub.com.br` e copie o valor que começa com `eyJ`. Cole em `.chtoken`.
+3. Ou, para servidor/Termux, fixe a sessão no `.env`: `COMEDYHUB_TOKEN=eyJ...` (aceita também `COMEDYHUB_LOGIN` + `COMEDYHUB_PASSWORD` para o bot renovar sozinho quando o token vence).
+
+Depois disso, `.ch <link>` (ou o próprio `.dl <link>`) baixa o arquivo **real** do post — o bot lê `contentUrl`/`downloadUrl` do JSON da API, **sonda cada candidato** (mesmo quando só existe um) e só entrega quando os bytes conferem com o tipo do post: vídeo continua vídeo, imagem continua imagem, e uma página HTML de login nunca passa por arquivo. A capa (`thumbnailUrl`) é usada apenas como último recurso, quando o post realmente não tem nenhum outro arquivo. `.chstatus` mostra a conta e a validade do token; `.chsair` desconecta; o `.info` do dono traz a linha `comedyhub: sessão ativa (.ch)`.
+
+Detalhe importante de comportamento: quando o CDN e a API não têm o arquivo, o bot **para e explica o motivo** em vez de cair no raspador de página. É proposital — sem isso ele voltaria a entregar a foto de introdução como se fosse o meme. E quando o download sai pelo CDN, a legenda avisa (`_sem login — peguei pelo CDN público_`), para você saber exatamente de onde veio o arquivo.
+
+Para diagnosticar no PC/Termux (mostra sessão, JSON do post, candidatos da API **e do CDN**, e a assinatura dos bytes):
+
+```bash
+npm run comedyhub -- https://thecomedyhub.com.br/meme/<id>
+```
 
 ### Downloads automáticos e limites
 
@@ -596,6 +626,8 @@ ativas, de onde vieram (manual/cache/descoberta/padrão) e a última atualizaç�
 npm ci
 npm test
 npm run doctor
+# sonda um link do ComedyHub ponta a ponta (sessão, JSON do post, CDN público, mídia escolhida):
+npm run comedyhub -- https://thecomedyhub.com.br/meme/<id>
 ```
 
 A suíte executa os arquivos de teste em processos sequenciais, cada um com `NEXUS_DATA_DIR` temporário próprio (removido ao final), incluindo testes offline de jogos e alinhamento de tabuleiros, limites, cache, roteamento, migração, SSRF, redirecionamentos e streams.

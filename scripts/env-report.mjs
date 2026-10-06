@@ -65,6 +65,21 @@ line('COBALT_INSTANCES', String(envList('COBALT_INSTANCES').length));
 line('TIKTOK_API', String(envList('TIKTOK_API').length));
 line('YTDLP_PATH', process.env.YTDLP_PATH || '— (autodetecta no PATH)');
 
+console.log('\n  ── ComedyHub (.ch / .dl de thecomedyhub.com.br) ──');
+const { comedyHubSessionStatus } = await import('../src/features/downloaders/comedyhub.js');
+const comedy = comedyHubSessionStatus();
+if (comedy.logged) {
+  line('Sessão', `✅ conectada${comedy.user ? ` como ${comedy.user}` : ''} (${comedy.source})`);
+  line('Token vencido?', comedy.expired ? '⚠️ SIM — rode .chlogin novamente' : `não${comedy.expiresAt ? ` (expira em ${new Date(comedy.expiresAt).toLocaleString('pt-BR')})` : ''}`);
+} else {
+  line('Sessão', '— nenhuma (opcional: o CDN público já baixa; .chlogin libera o resto)');
+}
+line('COMEDYHUB_TOKEN', process.env.COMEDYHUB_TOKEN ? '✅ definido' : '— vazio');
+line(
+  'Login automático',
+  process.env.COMEDYHUB_LOGIN && process.env.COMEDYHUB_PASSWORD ? '✅ ligado (.env)' : '— desligado (opcional)'
+);
+
 console.log('\n  ── Dono / pareamento ──');
 line('OWNER_NUMBERS', JSON.stringify(envList('OWNER_NUMBERS')));
 line('PAIRING_NUMBER', String(process.env.PAIRING_NUMBER || '—'));
