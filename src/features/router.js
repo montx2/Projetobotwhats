@@ -81,7 +81,7 @@ import {
   requireAuthorizedGroup,
   requireGroupAdministrator
 } from './group-tools.js';
-import { hasFfmpeg, toVoiceOpus, toAudioMp3, toVideoMp4, decodeWebpToPng, detectAudioMime } from '../util/ffmpeg.js';
+import { hasFfmpeg, toVoiceOpus, toAudioMp3, toVideoMp4, decodeWebpToPng, detectAudioMime, alphaCoverage } from '../util/ffmpeg.js';
 import { cobaltInfoRows, cobaltStatusLine } from './downloaders/cobalt-instances.js';
 import { searchYouTube } from './downloaders/youtube.js';
 import { hasYtDlp, isYtdlpEnabled, canUseYtdlp, youtubeWatchUrl } from './downloaders/ytdlp.js';
@@ -1155,50 +1155,62 @@ async function runCommand(sock, msg, cmd, ctx) {
       const { plano, origem } = await planStickerRequest(pedido, { tipoMidia });
       log.info('plano final do .sia', { origem, plano }); // Nunca registrar o texto do pedido.
 
+      const removerFundo = plano.fundo === 'remover';
+      const provedorDisponivel = bgAvailable();
       const relatorios = [];
       let done = 0;
       for (let i = 0; i < sources.length; i++) {
         const fonte = sources[i];
         const tipoFonte = tipos[i];
-        const podeTentarRecorte = tipoFonte === 'foto' || tipoFonte === 'figurinha parada';
+        const estatica = tipoFonte === 'foto' || tipoFonte === 'figurinha parada';
         const opcoes = stickerPlanToOptions(plano, { tipoMidia: tipoFonte });
+        const comuns = { ...packInfo(), ...opcoes, smart: true, onProgress: reply };
         let relatorioMotor = null;
-        let webp = await makeSticker(fonte, {
-          ...packInfo(),
-          ...opcoes,
-          smart: true,
-          allowAiCut: podeTentarRecorte,
-          onProgress: reply,
-          onReport: (report) => { relatorioMotor = report; }
-        });
         let falhaRemocao = false;
-        const fundoJaSaiu = ['liso', 'ia'].includes(relatorioMotor?.fundoRecortado) ||
-          relatorioMotor?.plano?.cutState === 'transparent';
+        let webp = null;
 
-        // Primeiro aproveita o recorte grátis. Só foto/figurinha parada pode chamar
-        // o provedor do `.sfundo`; fontes animadas nem enviam um quadro à IA.
-        if (plano.fundo === 'remover' && !fundoJaSaiu && podeTentarRecorte && bgAvailable()) {
+        // Pedido explícito de remoção em foto/figurinha parada: a API do `.sfundo`
+        // vem PRIMEIRO — mesmo se o fundo parecer liso — com o recorte local
+        // desligado para não "resolver" o fundo antes da chamada. Uma tentativa
+        // por fonte estática (nunca por quadro); resultado vazio/inválido é
+        // descartado para o recorte local entrar como reserva.
+        if (removerFundo && estatica && provedorDisponivel) {
           try {
-            let relatorioDoRecorte = null;
-            webp = await makeSticker(fonte, {
-              ...packInfo(),
-              ...opcoes,
+            let relatorioApi = null;
+            const recortada = await makeSticker(fonte, {
+              ...comuns,
               removeBg: true,
-              smart: true,
-              onProgress: reply,
-              onReport: (report) => { relatorioDoRecorte = report; }
+              autoCut: false,
+              allowAiCut: false,
+              onReport: (report) => { relatorioApi = report; }
             });
-            relatorioMotor = relatorioDoRecorte || { fundoRecortado: 'ia', plano: null };
+            const visivel = await alphaCoverage(recortada);
+            if (visivel !== null && visivel < 0.02) throw new Error('a API devolveu um recorte vazio');
+            webp = recortada;
+            relatorioMotor = relatorioApi || { fundoRecortado: 'ia', plano: null };
           } catch (error) {
             falhaRemocao = true;
-            log.warn('remoção de fundo pedida no .sia falhou; mantendo a figurinha original', { name: error?.name });
+            log.warn('remoção por API pedida no .sia falhou; tentando o recorte local de fundo liso', {
+              name: error?.name
+            });
           }
+        }
+
+        // Sem pedido de remoção, sem provedor ou com a API falhando, o motor de
+        // sempre decide. Fonte animada (vídeo, GIF, figurinha animada — inclusive
+        // quando vira quadro parado) nunca chama a API: só o recorte local de liso.
+        if (!webp) {
+          webp = await makeSticker(fonte, {
+            ...comuns,
+            allowAiCut: estatica && !removerFundo,
+            onReport: (report) => { relatorioMotor = report; }
+          });
         }
 
         relatorios.push({
           ...(relatorioMotor || { fundoRecortado: null, plano: null }),
           tipoMidia: tipoFonte,
-          provedorDisponivel: bgAvailable(),
+          provedorDisponivel,
           falhaRemocao
         });
         await reply(wait(sources.length > 1 ? `Enviando figurinha ${i + 1}/${sources.length}` : 'Enviando figurinha'));
