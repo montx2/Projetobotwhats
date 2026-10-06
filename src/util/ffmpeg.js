@@ -534,7 +534,7 @@ export async function fillStickerBudget({
  *
  * @returns {Promise<{buffer: Buffer, animated: boolean, smart: object}|null>} null quando não deu (aí a escada padrão assume)
  */
-export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSeconds = STICKER_MAX_SECONDS, onProgress, autoCrop = true, prefer = 'auto' } = {}) {
+export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSeconds = STICKER_MAX_SECONDS, onProgress, autoCrop = true, autoCut = true, prefer = 'auto' } = {}) {
   const bin = findFfmpeg();
   if (!bin) return null;
 
@@ -548,6 +548,7 @@ export async function smartStickerWebp(inFile, outFile, { fit = 'fill', maxSecon
     maxSeconds,
     budgetBytes: STICKER_ANIMATED_MAX_BYTES,
     autoCrop,
+    autoCut,
     prefer
   });
   if (!plan) return null;
@@ -1035,10 +1036,10 @@ async function classicStickerWebp(inFile, outFile, { animated, maxSeconds, fit, 
  * do motor (`classicStickerSteps`), sem análise e sem plano no retorno.
  *
  * @param {Buffer} input mídia original
- * @param {{animated?: boolean, maxSeconds?: number, ext?: string, fit?: string, smart?: boolean, prefer?: string, onProgress?: (msg: string) => Promise<any>}} opts
+ * @param {{animated?: boolean, maxSeconds?: number, ext?: string, fit?: string, smart?: boolean, autoCrop?: boolean, autoCut?: boolean, prefer?: string, onProgress?: (msg: string) => Promise<any>}} opts
  * @returns {Promise<{buffer: Buffer, animated: boolean, smart?: object}>}
  */
-export async function toStickerWebp(input, { animated = false, maxSeconds = STICKER_MAX_SECONDS, ext = '.png', fit = 'fill', onProgress, smart = true, prefer = 'auto' } = {}) {
+export async function toStickerWebp(input, { animated = false, maxSeconds = STICKER_MAX_SECONDS, ext = '.png', fit = 'fill', onProgress, smart = true, autoCrop = true, autoCut = true, prefer = 'auto' } = {}) {
   const realExt = detectMediaExt(input, ext);
   const inFile = tmpFile(realExt);
   const outFile = tmpFile('.webp');
@@ -1063,7 +1064,7 @@ export async function toStickerWebp(input, { animated = false, maxSeconds = STIC
     // (`cutState`) para o chamador decidir se vale a IA.
     if (smart) {
       try {
-        const result = await smartStickerWebp(inFile, outFile, { fit, maxSeconds: wanted, onProgress, prefer });
+        const result = await smartStickerWebp(inFile, outFile, { fit, maxSeconds: wanted, onProgress, autoCrop, autoCut, prefer });
         if (result?.buffer?.length) {
           // Dentro do limite: pronto. Acima (conteúdo incompressível): aperta
           // mais antes de entregar — a spec vale mais que o plano. Vale para

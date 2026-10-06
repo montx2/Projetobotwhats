@@ -1611,7 +1611,7 @@ export async function aiPoll(text) {
   return parseNaturalPollFallback(source);
 }
 
-async function aiChatRaw(prompt) {
+export async function aiChatRaw(prompt) {
   if (String(prompt).length > 3_000) throw new Error('texto de IA longo demais');
   const messages = [{ role: 'user', content: prompt }];
   const errors = [];
