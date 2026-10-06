@@ -75,34 +75,43 @@ export async function probeStream(url, { expect, timeoutMs = 12_000, referer } =
 
     if (!statusOk || res.headers.get('content-length') === '0') {
       await res.body?.cancel?.().catch(() => {});
-      return { verdict: 'unreachable' };
+      return { verdict: 'unreachable', contentType: ct };
     }
     if (expect === 'video' && (isPage || ct.startsWith('image/'))) {
       await res.body?.cancel?.().catch(() => {});
-      return { verdict: 'wrong-type' };
+      return { verdict: 'wrong-type', contentType: ct };
     }
     if (expect === 'image' && (isPage || ct.startsWith('video/'))) {
       await res.body?.cancel?.().catch(() => {});
-      return { verdict: 'wrong-type' };
+      return { verdict: 'wrong-type', contentType: ct };
     }
 
     const sizeBytes = totalStreamBytes(res);
-    if (!res.body) return { verdict: 'unreachable' };
+    if (!res.body) return { verdict: 'unreachable', contentType: ct };
 
     const reader = res.body.getReader();
     try {
       const { value, done } = await reader.read();
-      if (done || (value?.byteLength ?? 0) === 0) return { verdict: 'unreachable' };
-      if (expect === 'video' && looksLikeImageBytes(value)) return { verdict: 'wrong-type' };
-      if (expect === 'image' && !looksLikeImageBytes(value)) return { verdict: 'wrong-type' };
-      if (expect === 'video' && isPage) return { verdict: 'wrong-type' };
-      return { verdict: 'ok', sizeBytes };
+      if (done || (value?.byteLength ?? 0) === 0) return { verdict: 'unreachable', contentType: ct };
+      if (expect === 'video' && looksLikeImageBytes(value)) return { verdict: 'wrong-type', contentType: ct };
+      if (expect === 'image' && !looksLikeImageBytes(value)) return { verdict: 'wrong-type', contentType: ct };
+      if (expect === 'video' && isPage) return { verdict: 'wrong-type', contentType: ct };
+      return { verdict: 'ok', sizeBytes, contentType: ct };
     } finally {
       await reader.cancel().catch(() => {});
     }
   } catch {
     return { verdict: 'unreachable' };
   }
+}
+
+/** Tipo de mídia por content-type HTTP ('image'|'video'|'audio'|null). */
+export function kindByContentType(contentType) {
+  const ct = String(contentType || '').toLowerCase();
+  if (ct.startsWith('image/')) return ct.includes('gif') ? 'gif' : 'image';
+  if (ct.startsWith('video/')) return 'video';
+  if (ct.startsWith('audio/')) return 'audio';
+  return null;
 }
 
 /**
