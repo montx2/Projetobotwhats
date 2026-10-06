@@ -57,12 +57,20 @@ import {
   voiceRecipe,
   VOICE_TONES
 } from './voices.js';
-import { resolveDownload, sendDownload, parseQuality, autoDownload, isKnownSocialUrl } from './download.js';
+import {
+  resolveDownload,
+  sendDownload,
+  parseQuality,
+  autoDownload,
+  isKnownSocialUrl,
+  dedicatedPlatformNames
+} from './download.js';
 import {
   ownerMenu,
   publicMenu,
   mainMenu,
   downloadMenu,
+  platformsMenu,
   stickerMenu,
   antiDeleteMenu,
   voiceMenu,
@@ -113,7 +121,8 @@ const EXPENSIVE_COMMANDS = new Set([
   'tomp3', 'toaudio', 'audio', 'toptt', 'tovn', 'tovoz', 'tovideo', 'tomp4', 'togif', 'toimg', 'tofoto', 'foto',
   'dl', 'download', 'baixar', 'tt', 'tiktok', 'tiktokdl', 'ttmp3', 'tiktokmp3', 'ttaudio',
   'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels', 'yt', 'youtube', 'ytb', 'ytv', 'ytmp4',
-  'video', 'ytmp3', 'youtubemp3', 'ytaudio', 'yta', 'mp3', 'play', 'musica', 'música', 'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb'
+  'video', 'ytmp3', 'youtubemp3', 'ytaudio', 'yta', 'mp3', 'play', 'musica', 'música', 'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb',
+  'bsky', 'bluesky', 'imgur', 'dm', 'dailymotion'
 ]);
 const MEDIA_KEYS = new Set(['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage', 'documentMessage']);
 const MESSAGE_WRAPPERS = new Set([
@@ -161,7 +170,8 @@ function isExpensiveRequest(command, msg) {
     'pin', 'pinterest', 'pint', 'insta', 'instagram', 'ig', 'reels',
     'yt', 'youtube', 'ytb', 'ytv', 'ytmp4', 'video',
     'ytmp3', 'youtubemp3', 'ytaudio', 'yta', 'mp3', 'play', 'musica', 'música',
-    'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb'
+    'tw', 'twitter', 'x', 'tweet', 'face', 'facebook', 'fb',
+    'bsky', 'bluesky', 'imgur', 'dm', 'dailymotion'
   ].includes(name)) {
     return Boolean(pickUrl(args, getQuotedText(msg)));
   }
@@ -1053,6 +1063,8 @@ async function runCommand(sock, msg, cmd, ctx) {
             'innertube: ativo (YouTube)',
             'vxtwitter: ativo (X)',
             'pinterest widget: ativo',
+            `hls: ativo (.m3u8 → MP4${hasFfmpeg() ? '' : ' · FFmpeg ausente: só streams fMP4'})`,
+            `extratores dedicados: ${dedicatedPlatformNames().length}`,
             ...cobaltInfoRows(),
             `yt-dlp: ${canUseYtdlp(youtubeWatchUrl('dQw4w9WgXcQ')) ? `ativo (YouTube${hasYtDlp() ? ' e demais sites' : ''})` : 'indisponível (pip install -U yt-dlp)'}`,
             `auto-dl: ${cfg.get().autoDownload ? 'ligado' : 'desligado'}`
@@ -1596,6 +1608,34 @@ async function runCommand(sock, msg, cmd, ctx) {
         url: pickUrl(args, quotedText),
         fallback: usage('.face <link>', null, 'Envie o link do vídeo do Facebook.')
       });
+
+    case 'bsky':
+    case 'bluesky':
+      return downloadCommand({
+        sock, msg, args, ctx,
+        url: pickUrl(args, quotedText),
+        fallback: usage('.bsky <link>', '.bsky https://bsky.app/profile/usuario/post/3kabc', 'Envie o link do post (foto ou vídeo).')
+      });
+
+    case 'imgur':
+      return downloadCommand({
+        sock, msg, args, ctx,
+        url: pickUrl(args, quotedText),
+        fallback: usage('.imgur <link>', '.imgur https://imgur.com/a/exemplo', 'Aceita imagem direta, álbum ou post com GIF/MP4.')
+      });
+
+    case 'dm':
+    case 'dailymotion':
+      return downloadCommand({
+        sock, msg, args, ctx,
+        url: pickUrl(args, quotedText),
+        fallback: usage('.dm <link>', '.dm https://dai.ly/x8abc', 'Envie o link do vídeo do Dailymotion.')
+      });
+
+    case 'plataformas':
+    case 'sites':
+    case 'redes':
+      return reply(platformsMenu());
 
     // ── CONFIGURAÇÃO ────────────────────────────────────
     case 'config': {

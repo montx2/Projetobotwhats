@@ -137,12 +137,14 @@ O clima inclui atribuição **Open-Meteo · CC BY 4.0**. A API gratuita do Open-
 .sia <pedido>                   → figurinha com IA a partir de uma foto, vídeo, GIF, figurinha ou link
 .sfundo <imagem ou link>        → figurinha sem fundo
 .fundo <imagem ou link>         → PNG sem fundo
-.dl <link> [qualidade]          → download de mídia pública
-.tiktok <link>                  → TikTok
+.dl <link> [qualidade]          → download de mídia pública (foto ou vídeo)
+.tiktok <link>                  → TikTok (`.ttmp3` só o áudio)
 .insta <link>                   → Instagram
 .pin <link>                     → Pinterest
 .yt <link> / .ytmp3 <link>      → YouTube / áudio
 .tw <link> / .face <link>       → X/Twitter / Facebook
+.bsky <link>                    → Bluesky  ·  `.imgur` Imgur  ·  `.dm` Dailymotion
+.plataformas                    → catálogo completo do que é suportado
 .ia <pergunta>                  → IA conversa natural e entra na resenha se o contexto pedir
 .criar <descrição> [atalhos]    → geração de imagem (prompt otimizado)
 .criar anime um gato --formato 9:16 --hd  → estilo, enquadramento e nitidez
@@ -248,12 +250,46 @@ Os tabuleiros são desenhados com **emoji** (❌ ⭕ 🟩🟨⬛ 🟦 🚩 💣 
 
 Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Faça downloads somente de conteúdo que você tem direito e autorização para acessar.
 
+### Suporte a downloads: o que o bot baixa
+
+O `.dl` funciona como porta única: o bot identifica a rede pelo link e escolhe o extrator. `.plataformas` mostra esta lista no WhatsApp.
+
+**Extrator próprio** (método dedicado, sem depender de terceiros):
+
+| Rede | O que sai |
+| --- | --- |
+| TikTok | vídeo HD sem marca, álbum de fotos e áudio (`.ttmp3`) |
+| Douyin | mesma cascata do TikTok (tikwm → Cobalt → página) |
+| Instagram | post, foto, reel e carrossel (todos os slides) |
+| Pinterest | imagem em resolução original e vídeo (aceita pin.it) |
+| YouTube | vídeo e áudio (`.yt`/`.ytmp3`): yt-dlp → Innertube → Invidious → Cobalt |
+| X/Twitter | vídeo, GIF e fotos do tweet |
+| Facebook | vídeo, reels e foto pública |
+| Threads | vídeo e fotos |
+| Reddit | vídeo, foto e galeria (via embed, sem login) |
+| Twitch | clipes e VOD (`/videos/…`) |
+| Vimeo | vídeo em MP4 progressivo |
+| Bluesky | fotos e vídeo do post (API pública do atproto) |
+| Imgur | foto, GIF/MP4 e álbum inteiro |
+| Dailymotion | vídeo em MP4 na maior resolução |
+| Stream HLS | qualquer `.m3u8`: segmentos → MP4 |
+| GIF | Giphy e Tenor saem como MP4/GIF |
+
+**Modo universal** (Cobalt + leitura da própria página): Kwai, Tumblr, Streamable, Snapchat, SoundCloud, VK, Bilibili, Weibo, Rumble, OK.ru, RedGifs, 9GAG, iFunny, LinkedIn — e qualquer outro site que publique `og:video`, `og:image`, `<video src>` ou `twitter:player:stream`. Se nada disso existir, o bot ainda sonda a URL: quando o servidor responde um arquivo de mídia (content-type de imagem/vídeo/áudio), ele baixa.
+
+**Link direto.** `.dl https://site/foto.jpg`, `/video.mp4`, `/anim.gif` e `/audio.mp3` são baixados direto, sem passar por Cobalt.
+
+**Streams HLS (`.m3u8`).** O bot lê o master playlist, escolhe a melhor variante (ou a faixa de áudio separada, no `.ytmp3`), baixa os segmentos com concorrência limitada, decifra **AES-128** quando a playlist pede e junta tudo em MP4. Segmentos em MPEG-TS precisam do **FFmpeg** instalado (`pkg install ffmpeg`) para o remux `-c copy` — sem ele, playlists fMP4 ainda funcionam e o erro explica o que falta. Stream ao vivo baixa a janela atual; VOD/stream cortado pelo `maxMB` avisa "enviei o trecho inicial" em vez de entregar um arquivo incompleto em silêncio.
+
+Links de grupos/redes e conteúdos protegidos podem não estar disponíveis. Faça downloads somente de conteúdo que você tem direito e autorização para acessar.
+
 ### Downloads automáticos e limites
 
 - Auto-download de links soltos vem **desligado**. Para ativar conscientemente: `.config autoDownload true`.
 - O bot limita cada arquivo a `maxMB` (90 MiB por padrão, configurável entre 1 e 200). Lotes também têm teto agregado de 200 MiB. Figurinhas e mídias recebidas do WhatsApp usam limites próprios.
 - Comandos de alto custo têm limitação de frequência e concorrência para reduzir spam e consumo de memória.
 - URLs fornecidas por usuários precisam ser HTTP/HTTPS e o destino inicial não pode ser local/privado. O cliente HTTP do bot valida cada redirecionamento e limita o corpo das respostas.
+- Downloads HLS respeitam o mesmo `maxMB` por arquivo: a playlist é lida até o teto, e o corte é avisado no chat. O teto agregado de 200 MiB continua valendo.
 - O `yt-dlp` local é usado automaticamente **só para links do YouTube** (o bot monta a URL canônica a partir do ID, sem redirecionamento controlado pelo usuário) e é o extrator mais forte para `.yt`/`.ytmp3`: `pip install -U yt-dlp` e `pkg install ffmpeg` no Termux. Para os demais sites ele fica **desligado por padrão**, porque o binário segue redirecionamentos próprios que não passam pela validação por salto do bot; só habilite com `NEXUS_ENABLE_YTDLP=true` se confiar nos links e puder controlar a rede de saída. `NEXUS_DISABLE_YTDLP=true` desliga tudo.
 
 ### YouTube: “Sign in to confirm you’re not a bot” e os 403 do `.ytmp3`

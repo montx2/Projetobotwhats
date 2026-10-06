@@ -7,6 +7,7 @@
 import { cfg } from '../core/config.js';
 import { PLATFORM, PLATFORM_LABEL } from '../core/platform.js';
 import { hasYtDlp } from './downloaders/ytdlp.js';
+import { SUPPORTED_PLATFORMS } from './download.js';
 import { SYM, header, section, cmd, footer, card, kv } from '../core/ui.js';
 import { TONE_MAX, TONE_MIN, describeRecipe, toneOptionLines, voiceOptionLines } from './voices.js';
 
@@ -25,12 +26,14 @@ const STICKER_ITEMS = [
 ];
 
 const DOWNLOAD_ITEMS = [
-  ['.dl <link>', 'qualquer rede social'],
+  ['.dl <link>', 'qualquer rede social, foto ou vídeo'],
   ['.play <nome>', 'pesquisa e baixa música do YouTube'],
   ['.yt <link>', 'YouTube  ·  `.ytmp3` só o áudio'],
   ['.tiktok <link>', 'vídeo do TikTok  ·  `.ttmp3` só o áudio'],
   ['.insta <link>', 'Instagram  ·  `.pin` Pinterest'],
-  ['.tw <link>', 'X/Twitter  ·  `.face` Facebook']
+  ['.tw <link>', 'X/Twitter  ·  `.face` Facebook'],
+  ['.bsky <link>', 'Bluesky  ·  `.imgur` Imgur  ·  `.dm` Dailymotion'],
+  ['.plataformas', 'tudo que o bot baixa hoje']
 ];
 
 const AI_ITEMS = [
@@ -160,7 +163,9 @@ export function downloadMenu() {
       ['.pin <link>', 'Pinterest'],
       ['.yt <link>', 'YouTube  ·  `.ytmp3` só o áudio'],
       ['.tw <link>', 'X/Twitter'],
-      ['.face <link>', 'Facebook']
+      ['.face <link>', 'Facebook'],
+      ['.bsky <link>', 'Bluesky  ·  `.imgur` Imgur  ·  `.dm` Dailymotion'],
+      ['.plataformas', 'lista completa do que é suportado']
     ]),
     section('Figurinha direto do link', [
       kvLine('.s <link>', 'baixa o link e já monta a figurinha'),
@@ -174,11 +179,35 @@ export function downloadMenu() {
       kvLine('baixa', 'economiza dados')
     ], { note: 'Exemplo: .tiktok <link> baixa' }),
     section('Redes atendidas', [
-      'TikTok · Instagram · YouTube · Pinterest',
-      'X/Twitter · Facebook · Threads · Reddit',
-      'Twitch · Vimeo · Snapchat · SoundCloud e mais'
-    ]),
+      'TikTok · Douyin · Instagram · YouTube · Pinterest',
+      'X/Twitter · Facebook · Threads · Reddit · Bluesky',
+      'Imgur · Dailymotion · Twitch · Vimeo · GIFs',
+      'Kwai · Tumblr · Streamable · Snapchat · SoundCloud',
+      'VK · Bilibili · Weibo · Rumble · 9GAG e mais'
+    ], { note: 'Streams .m3u8 também: o bot baixa os segmentos e entrega MP4' }),
     footer(`Modo universal cobre centenas de sites${extra ? `\n${extra.trim()}` : ''}`)
+  ]);
+}
+
+/** Catálogo completo do suporte a downloads (comando `.plataformas`). */
+export function platformsMenu() {
+  const own = SUPPORTED_PLATFORMS.filter((p) => p.dedicated);
+  const universal = SUPPORTED_PLATFORMS.filter((p) => !p.dedicated).map((p) => p.name);
+  return card([
+    header('Downloads', 'o que o bot baixa hoje'),
+    section('Extrator próprio', own.map((p) => [p.name, p.notes])),
+    section('Modo universal', [
+      universal.slice(0, 6).join(' · '),
+      universal.slice(6, 12).join(' · '),
+      universal.slice(12).join(' · ')
+    ].filter(Boolean), {
+      note: 'Cobalt (túnel) + leitura da própria página (og:video / og:image) — foto e vídeo'
+    }),
+    section('Qualquer outro site', [
+      kvLine('.dl <link>', 'tenta a mídia pública da página automaticamente'),
+      kvLine('.s <link>', 'a mesma mídia vira figurinha')
+    ], { note: 'Link .m3u8 (HLS) ganha MP4; MPEG-TS precisa do FFmpeg instalado' }),
+    footer(`Total: ${SUPPORTED_PLATFORMS.length} redes com nome conhecido + a cauda longa do modo universal`)
   ]);
 }
 

@@ -1272,6 +1272,48 @@ export async function toVideoMp4(input, { timeoutMs = 120_000 } = {}) {
   }
 }
 
+/**
+ * Remuxa um contêiner já codificado (MPEG-TS do HLS, FLV, ADTS…) para MP4 sem
+ * reencodar nada. Existe para o baixador HLS: os segmentos chegam em `.ts`, que
+ * o WhatsApp não reproduz, e reencodar um vídeo de 100 MB no celular seria
+ * inviável — `-c copy` só troca o envelope.
+ *
+ * @param {Buffer} input mídia no contêiner original
+ * @param {{audioOnly?: boolean, ext?: string, timeoutMs?: number}} [opts]
+ * @returns {Promise<Buffer>} MP4 (ou M4A quando `audioOnly`)
+ */
+export async function remuxToMp4(input, { audioOnly = false, ext = '.ts', timeoutMs = 240_000 } = {}) {
+  if (!hasFfmpeg()) {
+    throw new Error(
+      'FFmpeg é necessário para finalizar este download (MPEG-TS → MP4). Instale com: pkg install ffmpeg'
+    );
+  }
+  const inFile = tmpFile(detectMediaExt(input, ext));
+  const outFile = tmpFile(audioOnly ? '.m4a' : '.mp4');
+  fs.writeFileSync(inFile, input);
+  const baseArgs = ['-y', '-hide_banner', '-loglevel', 'error', '-i', inFile, ...(audioOnly ? ['-vn'] : []), '-c', 'copy'];
+  const finish = ['-movflags', '+faststart', outFile];
+  try {
+    try {
+      // Áudio ADTS dentro do TS precisa do filtro para caber no MP4 (AAC→ASC).
+      await runFfmpeg([...baseArgs, '-bsf:a', 'aac_adtstoasc', ...finish], { timeoutMs });
+    } catch (error) {
+      if (/aac_adtstoasc|bitstream filter/i.test(String(error.message))) {
+        await runFfmpeg([...baseArgs, ...finish], { timeoutMs });
+      } else {
+        throw error;
+      }
+    }
+    if (!fs.existsSync(outFile)) throw new Error('ffmpeg não gerou o MP4 do stream');
+    const buf = fs.readFileSync(outFile);
+    if (!buf.length) throw new Error('MP4 remuxado está vazio');
+    return buf;
+  } finally {
+    fs.rmSync(inFile, { force: true });
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
 /** WebP animado → GIF (para devolver figurinha como gif). */
 export async function webpToGif(input) {
   const inFile = tmpFile('.webp');

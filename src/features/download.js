@@ -5,8 +5,9 @@
 //   → scraping de og:video/og:image do próprio link.
 //
 // Redes com extrator dedicado (métodos reais, comparados com bots em produção):
-//   TikTok · Instagram · Pinterest · YouTube · X/Twitter · Facebook
-//   Threads · Reddit · Twitch · Vimeo
+//   TikTok · Douyin · Instagram · Pinterest · YouTube · X/Twitter · Facebook
+//   Threads · Reddit · Twitch · Vimeo · Bluesky · Imgur · Dailymotion
+//   + HLS genérico (.m3u8) e scraping de página para a cauda longa.
 //
 // Quem consome isto além do `.dl`: o `.s <link>` (stickerlink.js), que usa o
 // mesmo `resolveDownload` para transformar um link em figurinha pronta.
@@ -23,19 +24,34 @@ import { isInstagramUrl, downloadInstagram } from './downloaders/instagram.js';
 import { isYouTubeUrl, downloadYouTube, parseYouTubeId } from './downloaders/youtube.js';
 import { isTwitterUrl, downloadTwitter } from './downloaders/twitter.js';
 import { isFacebookUrl, downloadFacebook } from './downloaders/facebook.js';
-import { isThreadsUrl, isRedditUrl, isTwitchUrl, isVimeoUrl, downloadGeneric } from './downloaders/generic.js';
+import {
+  isThreadsUrl,
+  isRedditUrl,
+  isTwitchUrl,
+  isVimeoUrl,
+  downloadByPlatform
+} from './downloaders/generic.js';
+import { isBlueskyUrl, downloadBluesky } from './downloaders/bluesky.js';
+import { isImgurUrl, downloadImgur } from './downloaders/imgur.js';
+import { isDailymotionUrl, downloadDailymotion } from './downloaders/dailymotion.js';
 import { cobaltDownload } from './downloaders/cobalt.js';
 import { canUseYtdlp, ytdlpBuffer, ytdlpInfo, youtubeWatchUrl } from './downloaders/ytdlp.js';
 import { isGoogleVideoUrl, fetchGoogleVideoBuffer } from './downloaders/gvs.js';
-import { probeStream } from './downloaders/media.js';
+import { probeStream, kindByContentType } from './downloaders/media.js';
+import { isHlsUrl, looksLikePlaylist, downloadHls, downloadHlsFromText } from './downloaders/hls.js';
 import { detectAudioMime, hasFfmpeg, applyAudioFilter } from '../util/ffmpeg.js';
 
 export { parseQuality };
 
 const HARD_DOWNLOAD_LIMIT = 200 * 1024 * 1024;
 
+export function isDouyinUrl(url) {
+  return /(douyin\.com|iesdouyin\.com)/i.test(String(url));
+}
+
 const PLATFORM_DETECT = [
   { test: isTikTokUrl, name: 'TikTok' },
+  { test: isDouyinUrl, name: 'Douyin' },
   { test: isInstagramUrl, name: 'Instagram' },
   { test: isPinterestUrl, name: 'Pinterest' },
   { test: isYouTubeUrl, name: 'YouTube' },
@@ -45,15 +61,74 @@ const PLATFORM_DETECT = [
   { test: isRedditUrl, name: 'Reddit' },
   { test: isTwitchUrl, name: 'Twitch' },
   { test: isVimeoUrl, name: 'Vimeo' },
+  { test: isBlueskyUrl, name: 'Bluesky' },
+  { test: isImgurUrl, name: 'Imgur' },
+  { test: isDailymotionUrl, name: 'Dailymotion' },
   { test: (u) => /snapchat\.com/i.test(u), name: 'Snapchat' },
   { test: (u) => /soundcloud\.com/i.test(u), name: 'SoundCloud' },
-  { test: (u) => /dailymotion\.com|dai\.ly/i.test(u), name: 'Dailymotion' },
-  { test: (u) => /tiktok\.com\/@[^/]+\/photo|douyin\.com/i.test(u), name: 'Douyin' },
-  { test: (u) => /(giphy\.com|tenor\.com)/i.test(u), name: 'GIF' }
+  { test: (u) => /(giphy\.com|tenor\.com)/i.test(u), name: 'GIF' },
+  // Cauda longa que o modo universal (Cobalt + scraping da página) atende: o
+  // nome aqui é só para a mensagem dizer de onde está baixando.
+  { test: (u) => /kwai\.com|kwai-video\.com/i.test(u), name: 'Kwai' },
+  { test: (u) => /tumblr\.com/i.test(u), name: 'Tumblr' },
+  { test: (u) => /streamable\.com/i.test(u), name: 'Streamable' },
+  { test: (u) => /(vk\.com|vkvideo\.ru)/i.test(u), name: 'VK' },
+  { test: (u) => /bilibili\.com/i.test(u), name: 'Bilibili' },
+  { test: (u) => /weibo\.(com|cn)/i.test(u), name: 'Weibo' },
+  { test: (u) => /rumble\.com/i.test(u), name: 'Rumble' },
+  { test: (u) => /9gag\.com/i.test(u), name: '9GAG' },
+  { test: (u) => /linkedin\.com/i.test(u), name: 'LinkedIn' },
+  { test: (u) => /redgifs\.com/i.test(u), name: 'RedGifs' },
+  { test: (u) => /ok\.ru/i.test(u), name: 'OK.ru' },
+  { test: (u) => /ifunny\.co/i.test(u), name: 'iFunny' },
+  { test: isHlsUrl, name: 'Stream HLS' }
 ];
 
 export function detectPlatform(url) {
   return PLATFORM_DETECT.find((p) => p.test(url))?.name || null;
+}
+
+/**
+ * Catálogo do suporte a downloads — fonte única para o `.plataformas`, para o
+ * `.menudl` e para o README. `dedicated: true` = extrator próprio do bot (não
+ * depende de ninguém); `false` = rota universal (Cobalt + página).
+ */
+export const SUPPORTED_PLATFORMS = [
+  { name: 'TikTok', dedicated: true, notes: 'vídeo sem marca, álbum de fotos e áudio' },
+  { name: 'Douyin', dedicated: true, notes: 'mesma cascata do TikTok' },
+  { name: 'Instagram', dedicated: true, notes: 'post, foto, reel e carrossel' },
+  { name: 'Pinterest', dedicated: true, notes: 'imagem em resolução original e vídeo' },
+  { name: 'YouTube', dedicated: true, notes: 'vídeo e áudio · yt-dlp → Innertube → Invidious' },
+  { name: 'X (Twitter)', dedicated: true, notes: 'vídeo, GIF e fotos do tweet' },
+  { name: 'Facebook', dedicated: true, notes: 'vídeo, reels e foto' },
+  { name: 'Threads', dedicated: true, notes: 'vídeo e fotos' },
+  { name: 'Reddit', dedicated: true, notes: 'vídeo, foto e galeria' },
+  { name: 'Twitch', dedicated: true, notes: 'clipes (VOD é HLS — usa o motor de stream)' },
+  { name: 'Vimeo', dedicated: true, notes: 'vídeo em MP4 progressivo' },
+  { name: 'Bluesky', dedicated: true, notes: 'fotos e vídeo do post' },
+  { name: 'Imgur', dedicated: true, notes: 'foto, GIF/MP4 e álbum' },
+  { name: 'Dailymotion', dedicated: true, notes: 'vídeo em MP4, até a maior resolução' },
+  { name: 'Stream HLS', dedicated: true, notes: 'qualquer link .m3u8 (segmentos → MP4)' },
+  { name: 'GIF', dedicated: false, notes: 'Giphy e Tenor viram MP4/GIF' },
+  { name: 'Kwai', dedicated: false, notes: 'modo universal' },
+  { name: 'Tumblr', dedicated: false, notes: 'modo universal' },
+  { name: 'Streamable', dedicated: false, notes: 'modo universal' },
+  { name: 'Snapchat', dedicated: false, notes: 'Spotlight público' },
+  { name: 'SoundCloud', dedicated: false, notes: 'áudio' },
+  { name: 'VK', dedicated: false, notes: 'modo universal' },
+  { name: 'Bilibili', dedicated: false, notes: 'modo universal' },
+  { name: 'Weibo', dedicated: false, notes: 'modo universal' },
+  { name: 'Rumble', dedicated: false, notes: 'modo universal' },
+  { name: 'OK.ru', dedicated: false, notes: 'modo universal' },
+  { name: 'RedGifs', dedicated: false, notes: 'modo universal' },
+  { name: '9GAG', dedicated: false, notes: 'modo universal' },
+  { name: 'iFunny', dedicated: false, notes: 'modo universal' },
+  { name: 'LinkedIn', dedicated: false, notes: 'modo universal' }
+];
+
+/** Nomes com extrator próprio — usados pelo `.info` e pelo menu. */
+export function dedicatedPlatformNames() {
+  return SUPPORTED_PLATFORMS.filter((p) => p.dedicated).map((p) => p.name);
 }
 
 export function isKnownSocialUrl(url) {
@@ -78,7 +153,11 @@ async function downloadMedia(itemOrUrl, onProgress, maxBytes = 200 * 1024 * 1024
     });
   }
 
-  return fetchBuffer(url, {
+  // HLS: `.m3u8` é uma playlist de texto, não o vídeo. Baixar direto entregaria
+  // um arquivo de texto nomeado como mídia — este é o desvio certo.
+  if (isHlsUrl(url)) return (await hlsBuffer(url, { item, referer, headers: customHeaders, onProgress, maxBytes })).buffer;
+
+  const buffer = await fetchBuffer(url, {
     timeoutMs: 180_000,
     maxBytes,
     headers: {
@@ -86,13 +165,94 @@ async function downloadMedia(itemOrUrl, onProgress, maxBytes = 200 * 1024 * 1024
       ...customHeaders
     }
   });
+
+  // Servidor que devolveu a playlist mesmo sem `.m3u8` na URL (comum em CDN
+  // com query string): aproveita o texto já baixado em vez de falhar.
+  if (looksLikePlaylist(buffer)) {
+    return (await downloadHlsFromText(buffer.toString('utf8'), url, {
+      headers: customHeaders,
+      referer,
+      audioOnly: item.type === 'audio',
+      quality: item.quality,
+      maxBytes,
+      onSegment: (done, total) => onProgress?.(wait(`Baixando stream HLS · ${done}/${total} segmentos`))
+    })).buffer;
+  }
+
+  return buffer;
+}
+
+/** URL que já É o arquivo (foto, vídeo, GIF, áudio) — não é página nem player. */
+const DIRECT_MEDIA_RE = /\.(jpg|jpeg|png|webp|avif|gif|mp4|webm|mov|m4v|mkv|mp3|m4a|opus|ogg|wav|flac)(\?|$)/i;
+const DIRECT_VIDEO_RE = /\.(mp4|webm|mov|m4v|mkv)(\?|$)/i;
+
+function directMediaKind(url) {
+  if (/\.gif(\?|$)/i.test(url)) return 'gif';
+  if (DIRECT_VIDEO_RE.test(url)) return 'video';
+  if (/\.(mp3|m4a|opus|ogg|wav|flac)(\?|$)/i.test(url)) return 'audio';
+  return 'image';
+}
+
+/**
+ * Estratégia de link direto: `https://site/foto.jpg`, `/video.mp4`, `/anim.gif`.
+ * Antes disso o bot só entregava esses links se o Cobalt os aceitasse — e o
+ * Cobalt é um túnel para páginas, não para arquivos soltos.
+ */
+async function viaDirectMedia(url, { platform, audioOnly, maxBytes, onProgress }) {
+  const kind = directMediaKind(url);
+  if (kind === 'audio') {
+    return { platform, kind: 'audio', buffers: [await downloadMedia({ url, type: 'audio' }, onProgress, maxBytes)], media: [{ type: 'audio', url }] };
+  }
+  if (audioOnly) {
+    if (kind !== 'video') throw new Error('este link é uma imagem — não dá para extrair áudio dele');
+    const buffer = await downloadMedia({ url, type: 'video' }, onProgress, maxBytes);
+    if (!hasFfmpeg()) {
+      const err = new Error('este link é um vídeo e o `.mp3` precisa do FFmpeg para extrair o áudio');
+      err.hint = 'Instale com: pkg install ffmpeg (Termux) · apt install ffmpeg · winget install ffmpeg';
+      throw err;
+    }
+    return {
+      platform,
+      kind: 'audio',
+      buffers: [await applyAudioFilter(buffer, { filter: 'anull', ext: '.mp3', bitrate: '128k' })],
+      media: [{ type: 'audio', url }]
+    };
+  }
+  const type = kind === 'gif' ? 'gif' : kind;
+  return {
+    platform,
+    kind: type,
+    buffers: [await downloadMedia({ url, type }, onProgress, maxBytes)],
+    media: [{ type, url }]
+  };
+}
+
+/** Baixa um stream HLS e avisa o chat conforme os segmentos chegam. */
+function hlsBuffer(url, { item = {}, referer, headers = {}, onProgress, maxBytes }) {
+  log.dl(`hls: ${shortUrl(url)}…`);
+  return downloadHls(url, {
+    headers,
+    referer,
+    audioOnly: item.type === 'audio',
+    quality: item.quality,
+    maxBytes,
+    onSegment: (done, total) => onProgress?.(wait(`Baixando stream HLS · ${done}/${total} segmentos`))
+  });
 }
 
 /** Extrator dedicado por plataforma (null = usa o caminho genérico). */
 async function byPlatform(url, platform, quality, audioOnly, maxBytes) {
   switch (platform) {
     case 'TikTok':
+    case 'Douyin':
+      // A tikwm atende o Douyin também: mesma cascata, mesmas reservas.
       return audioOnly ? tiktokAudio(url, { maxBytes }) : downloadTikTok(url, quality, { maxBytes });
+    case 'Bluesky':
+      return downloadBluesky(url, quality, { maxBytes });
+    case 'Imgur':
+      return downloadImgur(url, quality, { maxBytes });
+    case 'Dailymotion':
+      return downloadDailymotion(url, quality, { maxBytes });
     case 'Instagram':
       return downloadInstagram(url, quality, { maxBytes });
     case 'Pinterest':
@@ -103,6 +263,14 @@ async function byPlatform(url, platform, quality, audioOnly, maxBytes) {
       return downloadTwitter(url, quality, { maxBytes });
     case 'Facebook':
       return downloadFacebook(url, quality, { maxBytes });
+    // Extratores próprios de Threads/Reddit/Twitch/Vimeo vivem em generic.js e
+    // precisam ser chamados aqui: sem esta rota eles existiam mas nunca rodavam,
+    // e o link caía direto no Cobalt (ou falhava) mesmo tendo extrator dedicado.
+    case 'Threads':
+    case 'Reddit':
+    case 'Twitch':
+    case 'Vimeo':
+      return downloadByPlatform(url, platform, { maxBytes });
     default:
       return null;
   }
@@ -244,6 +412,36 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
   // e chega ao usuário em vez de morrer no log.
   let failureHint = '';
 
+  // Link `.m3u8` colado direto: o stream É o arquivo — o motor HLS baixa os
+  // segmentos e entrega MP4 sem depender de Cobalt/yt-dlp.
+  if (isHlsUrl(url)) {
+    strategies.push([
+      'hls',
+      async () => {
+        const hls = await downloadHls(url, {
+          audioOnly,
+          quality,
+          maxBytes,
+          onSegment: (done, total) => onProgress?.(wait(`Baixando stream HLS · ${done}/${total} segmentos`))
+        });
+        return {
+          platform: 'Stream HLS',
+          kind: hls.kind,
+          duration: hls.duration,
+          buffers: [hls.buffer],
+          media: [{ type: hls.kind, url }],
+          partial: hls.truncated || hls.live
+        };
+      }
+    ]);
+  } else if (DIRECT_MEDIA_RE.test(url)) {
+    // Arquivo solto: baixa direto, sem depender de terceiros.
+    strategies.push([
+      'link direto',
+      () => viaDirectMedia(url, { platform: platform === 'Web' ? 'Link direto' : platform, audioOnly, maxBytes, onProgress })
+    ]);
+  }
+
   // YouTube: o yt-dlp (com runtime JS) continua sendo o extrator mais forte —
   // resolve cifra, escolhe formato e cobre casos que a Innertube não alcança —
   // então vai PRIMEIRO. Quando ele cai no muro de verificação, a Innertube
@@ -294,6 +492,7 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
   const dedicatedTriesCobalt =
     dedicatedCobaltTried ||
     ((platform === 'TikTok' ||
+      platform === 'Douyin' ||
       platform === 'Instagram' ||
       platform === 'Pinterest' ||
       platform === 'YouTube' ||
@@ -332,6 +531,42 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
     }
   ]);
 
+  // Última reserva: a URL não tem extensão nem extrator, mas o servidor pode
+  // simplesmente servir um arquivo de mídia (anexo, CDN com query string,
+  // imagem de fórum). Sonda os primeiros bytes e, se for mídia, baixa.
+  strategies.push([
+    'mídia servida',
+    async () => {
+      const probe = await probeStream(url, { timeoutMs: 12_000 });
+      if (probe.verdict !== 'ok') return null;
+      const type = kindByContentType(probe.contentType);
+      if (!type && /mpegurl|vnd\.apple/i.test(String(probe.contentType))) {
+        // HLS servido sem `.m3u8` na URL (CDN com query string, por exemplo).
+        const hls = await downloadHls(url, {
+          audioOnly,
+          quality,
+          maxBytes,
+          onSegment: (done, total) => onProgress?.(wait(`Baixando stream HLS · ${done}/${total} segmentos`))
+        });
+        return {
+          platform: 'Stream HLS',
+          kind: hls.kind,
+          duration: hls.duration,
+          buffers: [hls.buffer],
+          media: [{ type: hls.kind, url }],
+          partial: hls.truncated || hls.live
+        };
+      }
+      if (!type) return null;
+      return {
+        platform: platform === 'Web' ? 'Link direto' : platform,
+        kind: audioOnly && type === 'video' ? 'video' : type,
+        buffers: [await downloadMedia({ url, type, contentLength: probe.sizeBytes, ranged: false }, onProgress, maxBytes)],
+        media: [{ type, url }]
+      };
+    }
+  ]);
+
   let result;
   try {
     result = await firstOf(strategies);
@@ -359,7 +594,10 @@ function normalize(result, platform) {
     // o extrator marcou: o `.s <link>` usa isso para tentar outra versão quando
     // a primeira não passa na validação de conteúdo.
     alternates: result.alternates || [],
-    audioBuffer: result.audioBuffer || null
+    audioBuffer: result.audioBuffer || null,
+    // Stream cortado pelo teto de bytes (VOD de horas, HLS ao vivo): o envio
+    // avisa o usuário em vez de entregar um arquivo incompleto em silêncio.
+    partial: result.partial === true
   };
 }
 
@@ -447,6 +685,14 @@ export async function sendDownload(sock, jid, result, { quality, url, onProgress
   }
   if (sent > 0) {
     await onProgress?.(ok('Download concluído', result.platform || 'mídia'));
+    if (result.partial) {
+      const note = warn(
+        'Stream longo: enviei o trecho inicial',
+        `o teto de ${maxMB} MB cortou o resto — ajuste com .config maxMB 200`
+      );
+      if (onProgress) await onProgress(note);
+      else await sock.sendMessage(jid, { text: note }, sendOpts);
+    }
   } else {
     await onProgress?.(warn('Nada foi enviado', 'o arquivo pode ser grande demais'));
   }
