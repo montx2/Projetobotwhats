@@ -19,19 +19,37 @@
 //      `contentUrl`, `downloadUrl`, `downloadExtension`, `thumbnailUrl`;
 //   4) SONDA cada candidato antes de entregar — é o mesmo cuidado dos outros
 //      extratores: se o servidor devolver a capa em vez do vídeo, o bot tenta o
-//      próximo candidato em vez de mandar arquivo errado.
+//      próximo candidato em vez de mandar arquivo errado;
+//   5) sem sessão (ou se a API falhar) cai no CDN PÚBLICO dos memes — ver
+//      abaixo.
 //
-// O que é público (não precisa de token): `GET /api/v2/metrics/json`.
+// O CDN É PÚBLICO (por que dá para baixar sem login)
+// --------------------------------------------------
+// O player do site toca os memes pelo Bunny CDN `comedyhub-api.b-cdn.net`, em
+// `/memes/<id>/…`: o arquivo original (`/memes/<id>/<id>.mp4`) e as playlists
+// HLS (`/memes/<id>/playlist.m3u8` → `480p/` e `720p/`). Esse caminho NÃO pede
+// token — medido em campo, com o meme de exemplo do bug:
+//   GET https://comedyhub-api.b-cdn.net/memes/<id>/playlist.m3u8 → 200 (HLS)
+//   GET https://comedyhub-api.b-cdn.net/memes/<id>/<id>.mp4       → 200 (MP4)
+// Então o bot tenta a API (que traz título/autor e o arquivo canônico) e, se
+// não houver sessão, baixa do CDN em vez de desistir. Em nenhum caminho a capa
+// (`og:image`) é usada como se fosse o meme.
+//
+// O que é público na API (não precisa de token): `GET /api/v2/metrics/json`.
 // Todo o resto do conteúdo responde 401 `"Token não fornecido."` — daí a sessão.
 
 import { httpGet, postJson, formatBytes, sleep } from '../../core/http.js';
 import { readJson, writeJsonNow } from '../../core/store.js';
 import { log } from '../../core/logger.js';
-import { probeStream, kindByExtension } from './media.js';
+import { probeStream, kindByExtension, kindByContentType } from './media.js';
 
 export const COMEDYHUB_WEB = 'https://thecomedyhub.com.br';
 export const COMEDYHUB_API = 'https://api.thecomedyhub.com.br';
 export const COMEDYHUB_API_BASE = `${COMEDYHUB_API}/api/v2`;
+/** CDN (Bunny) que serve as mídias dos memes — público, NÃO precisa de sessão. */
+export const COMEDYHUB_CDN = 'https://comedyhub-api.b-cdn.net';
+/** CDNs alternativos já vistos em campo (podem estar fora do ar; sondamos mesmo assim). */
+const COMEDYHUB_CDN_ALTS = ['https://cdn.thecomedyhub.com.br/cdn', 'https://comedyhub.b-cdn.net'];
 
 const SESSION_FILE = 'comedyhub.json';
 const BROWSER_UA =
@@ -40,7 +58,9 @@ const BROWSER_UA =
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const MEDIA_EXT_RE = /\.(mp4|webm|mov|m4v|mkv|gif|jpg|jpeg|png|webp|avif|mp3|m4a|opus|ogg|wav|flac)(\?|$)/i;
 
-/** Hosts do ComedyHub (site, API e qualquer CDN deles). */
+/** Hosts do ComedyHub (site, API e os CDNs que servem os memes). */
+const COMEDYHUB_HOSTS = ['comedyhub-api.b-cdn.net', 'comedyhub.b-cdn.net', 'cdn.thecomedyhub.com.br'];
+
 export function isComedyHubUrl(url) {
   const value = String(url || '').trim();
   if (!value) return false;
@@ -49,6 +69,7 @@ export function isComedyHubUrl(url) {
     try {
       const host = new URL(candidate).hostname.toLowerCase();
       if (host === 'thecomedyhub.com.br' || host.endsWith('.thecomedyhub.com.br')) return true;
+      if (COMEDYHUB_HOSTS.includes(host)) return true;
     } catch {
       /* tenta o próximo formato */
     }
@@ -583,6 +604,70 @@ export async function pickComedyHubMedia(candidates, expectedKind, { token } = {
   throw error;
 }
 
+/* ─────────────────── CDN público: funciona SEM sessão ─────────────────── */
+
+const CDN_VIDEO_EXTS = ['mp4', 'webm', 'mov', 'm4v', 'mkv'];
+const CDN_IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
+
+/**
+ * Candidatos do CDN para um meme, na ordem de sondagem:
+ *   1) o ARQUIVO direto (`/memes/<id>/<id>.<ext>`) — é o upload original e não
+ *      precisa remuxar (o `<ext>` varia com o post, por isso tentamos vários);
+ *   2) as playlists HLS do player (`playlist.m3u8`, depois `720p` e `480p`) —
+ *      o motor HLS do bot baixa os segmentos e entrega MP4.
+ *
+ * `expectedKind` (quando o post já é conhecido) só muda a ORDEM das extensões:
+ * vídeo começa por mp4/webm, imagem por jpg/png/webp.
+ */
+export function comedyHubCdnCandidates(id, { expectedKind } = {}) {
+  const cleanId = String(id || '').trim();
+  if (!cleanId) return [];
+  const exts =
+    expectedKind === 'image'
+      ? [...CDN_IMAGE_EXTS, ...CDN_VIDEO_EXTS]
+      : expectedKind === 'video'
+        ? [...CDN_VIDEO_EXTS, ...CDN_IMAGE_EXTS]
+        : [...CDN_VIDEO_EXTS, ...CDN_IMAGE_EXTS];
+
+  const list = [];
+  for (const base of [COMEDYHUB_CDN, ...COMEDYHUB_CDN_ALTS]) {
+    const dir = `${base}/memes/${cleanId}`;
+    for (const ext of exts) {
+      const url = `${dir}/${cleanId}.${ext}`;
+      const kind = kindByExtension(url);
+      list.push({ url, label: `cdn ${ext}`, kind: kind === 'unknown' ? 'video' : kind });
+    }
+    list.push({ url: `${dir}/playlist.m3u8`, label: 'cdn hls', kind: 'video' });
+    list.push({ url: `${dir}/720p/playlist.m3u8`, label: 'cdn hls 720p', kind: 'video' });
+    list.push({ url: `${dir}/480p/playlist.m3u8`, label: 'cdn hls 480p', kind: 'video' });
+  }
+  return list;
+}
+
+/**
+ * Escolhe o primeiro candidato do CDN que responde 200/206 COM bytes.
+ *
+ * Deliberadamente NÃO existe "último recurso" aqui: no bucket, chave que não
+ * existe vira 404 — usar um candidato 404 só trocaria um erro claro por um
+ * "não consegui baixar" no fim. Também recusa `text/html` (é o que o CDN
+ * devolve quando o domínio está suspenso — não é meme).
+ */
+export async function pickComedyHubCdnMedia(id, { expectedKind, quality = 'melhor' } = {}) {
+  const candidates = comedyHubCdnCandidates(id, { expectedKind });
+  if (!candidates.length) return null;
+  const expect = expectedKind === 'image' ? 'image' : expectedKind === 'video' ? 'video' : undefined;
+  for (const candidate of candidates) {
+    const probe = await probeStream(candidate.url, { expect, timeoutMs: 12_000 }).catch(() => null);
+    if (!probe || probe.verdict !== 'ok' || /text\/html/i.test(String(probe.contentType || ''))) {
+      log.dl(`comedyhub cdn: ${candidate.label} indisponível (${probe?.verdict || 'erro'})`);
+      continue;
+    }
+    const kind = kindByContentType(probe.contentType) || candidate.kind;
+    return { ...candidate, kind, sizeBytes: probe.sizeBytes, contentType: probe.contentType };
+  }
+  return null;
+}
+
 /* ─────────────────────────────── download ─────────────────────────────── */
 
 function summarizeAuthor(post) {
@@ -621,53 +706,105 @@ export async function downloadComedyHub(url, quality = 'melhor', { maxBytes } = 
   }
 
   const session = await comedyHubSessionOrLogin();
-  if (!session?.token) {
-    const error = new Error('o ComedyHub só libera meme/foto/vídeo para quem está logado');
+  const notes = [];
+  let post = null;
+  let chosen = null;
+  let expectedKind = '';
+  let apiError = null;
+
+  // 1) Caminho preferido: API oficial com a sessão do dono (traz título, autor
+  //    e o arquivo canônico do post).
+  if (session?.token && !session.expired) {
+    try {
+      post = await fetchComedyHubPost(id, session.token);
+      const candidates = comedyHubMediaCandidates(post);
+      const postType = String(post.type || post.mediaType || '').toLowerCase();
+      expectedKind =
+        postType === 'video' ? 'video' : postType === 'image' || postType === 'photo' ? 'image' : candidates[0]?.kind || '';
+      if (candidates.length) chosen = await pickComedyHubMedia(candidates, expectedKind, { token: session.token });
+    } catch (error) {
+      apiError = error;
+      log.dl(`comedyhub: API não liberou o post (${String(error?.message || error).slice(0, 120)}) — tentando o CDN público`);
+    }
+  }
+
+  // 2) Plano B (e caminho normal de quem não tem sessão): CDN público.
+  let viaCdn = false;
+  if (!chosen) {
+    const cdn = await pickComedyHubCdnMedia(id, { expectedKind, quality });
+    if (cdn) {
+      chosen = cdn;
+      viaCdn = true;
+    }
+  }
+
+  if (!chosen) {
+    // Nenhum caminho deu certo: junta o motivo da API (sessão vencida, post em
+    // moderação, meme apagado…) com o fato de o CDN também não ter o arquivo —
+    // é isso que faz a resposta do bot ser útil em vez de "falhou".
+    const base =
+      session?.token && !session.expired
+        ? 'não consegui baixar esse meme do ComedyHub'
+        : 'o ComedyHub só libera meme/foto de verdade para quem está logado — e o CDN público não tinha esse arquivo';
+    const error = new Error(apiError?.message ? `${base}: ${String(apiError.message).slice(0, 160)}` : base);
     error.hint =
-      'entre uma vez no bot: `.chlogin seu@email.com suasenha` — ou copie o token no site (F12 → Application → Local Storage → thecomedyhub.com.br) e use `.chtoken <token>`';
-    throw error;
-  }
-  if (session.expired) {
-    const error = new Error('a sessão do ComedyHub venceu');
-    error.hint = 'renove com `.chlogin email senha` ou `.chtoken <token>`';
-    throw error;
-  }
-
-  const post = await fetchComedyHubPost(id, session.token);
-  const candidates = comedyHubMediaCandidates(post);
-  if (!candidates.length) {
-    const error = new Error('o post não devolveu nenhum arquivo de mídia');
-    error.hint = `status do meme: ${post.status || 'desconhecido'}`;
+      apiError?.hint ||
+      (session?.token && !session.expired
+        ? 'confira a sessão com `.chstatus`; se o post está em moderação, só existe a capa'
+        : 'entre uma vez com `.chlogin seu@email.com suasenha` — ou copie o token no site (F12 → Application → Local Storage → thecomedyhub.com.br) e use `.chtoken <token>`');
+    if (apiError?.details) error.details = apiError.details;
     throw error;
   }
 
-  // O tipo do POST manda: um vídeo continua vídeo mesmo se o primeiro candidato
+  if (viaCdn) {
+    notes.push(
+      session?.expired
+        ? 'sessão vencida — peguei pelo CDN público (`.chlogin` renova)'
+        : session?.token
+          ? 'peguei pelo CDN público'
+          : 'sem login — peguei pelo CDN público (`.chlogin` libera os antigos)'
+    );
+  }
+
+  // O tipo do POST manda: um vídeo continua vídeo mesmo se o arquivo escolhido
   // tiver nome de imagem (a sonda usa isso para recusar capa).
-  const postType = String(post.type || post.mediaType || '').toLowerCase();
-  const expectedKind = postType === 'video' ? 'video' : postType === 'image' || postType === 'photo' ? 'image' : candidates[0].kind;
-  const pending = ['PENDING', 'REVIEW'].includes(String(post.status || '').toUpperCase());
-  const chosen = await pickComedyHubMedia(candidates, expectedKind, { token: session.token });
-  const others = candidates.filter((item) => item.url !== chosen.url);
-  const kind = expectedKind === 'video' ? 'video' : chosen.kind === 'audio' ? 'video' : chosen.kind;
+  const postType = String(post?.type || post?.mediaType || '').toLowerCase();
+  const kind =
+    expectedKind === 'video' || postType === 'video' ? 'video' : chosen.kind === 'audio' ? 'video' : chosen.kind;
+  const pending = ['PENDING', 'REVIEW'].includes(String(post?.status || '').toUpperCase());
 
   log.dl(`comedyhub: ${id} · ${chosen.label} · ${kind}${chosen.sizeBytes ? ` · ${formatBytes(chosen.sizeBytes)}` : ''}`);
 
+  // Reservas: sem CDN são os outros candidatos da API; com CDN, os próximos do
+  // próprio CDN (o engine só usa isso se o primeiro download falhar).
+  const others = viaCdn
+    ? comedyHubCdnCandidates(id, { expectedKind })
+        .filter((item) => item.url !== chosen.url)
+        .slice(0, 2)
+    : comedyHubMediaCandidates(post).filter((item) => item.url !== chosen.url);
+
   return baseResult({
     kind,
-    title: String(post.title || post.description || '').slice(0, 300) || `Meme do ComedyHub`,
+    title: String(post?.title || post?.description || '').slice(0, 300) || 'Meme do ComedyHub',
     author: summarizeAuthor(post),
-    thumbnail: absoluteMediaUrl(post.thumbnailUrl) || '',
+    thumbnail: absoluteMediaUrl(post?.thumbnailUrl) || '',
+    note: notes.join(' · '),
     media: [
       {
         type: kind,
         url: chosen.url,
         label: chosen.label,
-        headers: comedyHubMediaHeaders(chosen.url, session.token),
+        headers: comedyHubMediaHeaders(chosen.url, session?.token),
         contentLength: chosen.sizeBytes || 0,
         quality
       }
     ],
-    alternates: others.map((item) => ({ type: item.kind, url: item.url, label: item.label, headers: comedyHubMediaHeaders(item.url, session.token) })),
+    alternates: others.map((item) => ({
+      type: item.kind,
+      url: item.url,
+      label: item.label,
+      headers: comedyHubMediaHeaders(item.url, session?.token)
+    })),
     // O site marca meme em análise: o arquivo existe, mas pode estar só com a capa.
     partial: false,
     notes: pending ? [`meme em moderação (${post.status})`] : []

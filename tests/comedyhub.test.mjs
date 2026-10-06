@@ -17,6 +17,8 @@ import {
   comedyHubPostUrl,
   comedyHubMediaCandidates,
   comedyHubMediaHeaders,
+  comedyHubCdnCandidates,
+  pickComedyHubCdnMedia,
   pickComedyHubMedia,
   comedyHubLogin,
   comedyHubSession,
@@ -139,11 +141,13 @@ test('comedyHubPostId lê todas as formas de link do ComedyHub', () => {
   assert.equal(comedyHubPostUrl(MEME_ID), POST_PAGE);
 });
 
-test('isComedyHubUrl reconhece site, API e recusa parecidos', () => {
+test('isComedyHubUrl reconhece site, API, CDN e recusa parecidos', () => {
   assert.ok(isComedyHubUrl(POST_PAGE));
   assert.ok(isComedyHubUrl('https://api.thecomedyhub.com.br/api/v2/memes/1'));
+  assert.ok(isComedyHubUrl(CDN_HLS));
   assert.ok(!isComedyHubUrl('https://thecomedyhub.com.br.evil.example/meme/1'));
   assert.ok(!isComedyHubUrl('https://outrohub.com.br/meme/1'));
+  assert.ok(!isComedyHubUrl('https://outra-coisa.b-cdn.net/memes/1/playlist.m3u8'));
 });
 
 test('detectPlatform nomeia o ComedyHub', () => {
@@ -374,6 +378,74 @@ test('resolveDownload (ComedyHub sem sessão): falha com instrução e NÃO mand
   }
 });
 
+/* ────────── CDN público: baixa o meme mesmo sem sessão nenhuma ────────── */
+
+const CDN = 'https://comedyhub-api.b-cdn.net';
+const CDN_MP4 = `${CDN}/memes/${MEME_ID}/${MEME_ID}.mp4`;
+const CDN_HLS = `${CDN}/memes/${MEME_ID}/playlist.m3u8`;
+const NO_SUCH_KEY = '<?xml version="1.0"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>';
+const SUSPENDED = '<html><body><h1>Domain suspended or not configured</h1></body></html>';
+
+test('cdn: candidatos começam pelo arquivo direto e terminam no HLS', () => {
+  const video = comedyHubCdnCandidates(MEME_ID, { expectedKind: 'video' });
+  assert.equal(video[0].url, CDN_MP4);
+  assert.ok(video.some((item) => item.url === CDN_HLS), 'playlist HLS entra na lista');
+  const image = comedyHubCdnCandidates(MEME_ID, { expectedKind: 'image' });
+  assert.equal(image[0].url, `${CDN}/memes/${MEME_ID}/${MEME_ID}.jpg`);
+  assert.deepEqual(comedyHubCdnCandidates(''), []);
+});
+
+test('cdn: domínio suspenso (HTTP 200 com HTML) NÃO vira mídia', async () => {
+  const mock = mockFetch([[/b-cdn\.net/, () => new Response(SUSPENDED, { status: 200, headers: { 'content-type': 'text/html' } })]]);
+  try {
+    assert.equal(await pickComedyHubCdnMedia(MEME_ID, { expectedKind: 'video' }), null);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('cdn: sem sessão o meme desce do CDN, sem Authorization e sem tocar na API', async () => {
+  clearComedyHubEnv();
+  clearComedyHubSession();
+  const mock = mockFetch([
+    [CDN_MP4, () => mediaResponse(MP4_BYTES)],
+    [/NoSuchKey|noSuchKey/, () => new Response(NO_SUCH_KEY, { status: 404, headers: { 'content-type': 'application/xml' } })],
+    ['/memes/', () => new Response(NO_SUCH_KEY, { status: 404, headers: { 'content-type': 'application/xml' } })]
+  ]);
+  try {
+    const result = await downloadComedyHub(POST_PAGE, 'melhor', {});
+    assert.equal(result.kind, 'video');
+    assert.equal(result.media[0].url, CDN_MP4, 'o arquivo direto do CDN venceu');
+    assert.ok(!result.media[0].headers.authorization, 'CDN não leva token');
+    assert.match(result.note, /CDN público/);
+    assert.ok(
+      !mock.urls().some((url) => url.includes('api.thecomedyhub.com.br/api/v2/memes')),
+      'sem sessão o bot nem bate na API (que responderia 401)'
+    );
+  } finally {
+    mock.restore();
+    clearComedyHubEnv();
+  }
+});
+
+test('cdn: arquivo direto ausente cai na playlist HLS (segmentos → MP4)', async () => {
+  clearComedyHubEnv();
+  clearComedyHubSession();
+  const master = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1400000,RESOLUTION=762x720\n720p/playlist.m3u8\n';
+  const mock = mockFetch([
+    [CDN_HLS, () => new Response(master, { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl' } })],
+    [/b-cdn\.net/, () => new Response(NO_SUCH_KEY, { status: 404, headers: { 'content-type': 'application/xml' } })]
+  ]);
+  try {
+    const result = await downloadComedyHub(POST_PAGE, 'melhor', {});
+    assert.equal(result.media[0].url, CDN_HLS);
+    assert.equal(result.kind, 'video');
+  } finally {
+    mock.restore();
+    clearComedyHubEnv();
+  }
+});
+
 /* ──────────────────── comandos do router (.ch / .chlogin) ──────────────────── */
 
 const { handleMessage } = await import('../src/features/router.js');
@@ -479,7 +551,7 @@ test('router: .info do dono mostra o estado da sessão do ComedyHub', async () =
   clearComedyHubSession();
   const withoutSession = makeSock();
   await handleMessage(withoutSession, ownerMessage('.info'), makeDeps(withoutSession));
-  assert.match(replyText(withoutSession), /comedyhub: sem login \(\.chlogin\)/);
+  assert.match(replyText(withoutSession), /comedyhub: sem login \(CDN público · \.chlogin p\/ tudo\)/);
 
   saveComedyHubSession(fakeJwt());
   const withSession = makeSock();
@@ -489,9 +561,35 @@ test('router: .info do dono mostra o estado da sessão do ComedyHub', async () =
   saveComedyHubSession(fakeJwt(Math.floor(Date.now() / 1000) - 60));
   const expired = makeSock();
   await handleMessage(expired, ownerMessage('.info'), makeDeps(expired));
-  assert.match(replyText(expired), /comedyhub: sessão vencida \(rode \.chlogin\)/);
+  assert.match(replyText(expired), /comedyhub: sessão vencida \(CDN cobre · \.chlogin\)/);
 
   clearComedyHubSession();
+});
+
+test('router: .ch sem sessão baixa o vídeo pelo CDN e avisa na legenda', async () => {
+  clearComedyHubEnv();
+  clearComedyHubSession();
+  const mock = mockFetch([
+    [CDN_MP4, () => mediaResponse(MP4_BYTES)],
+    [/b-cdn\.net/, () => new Response(NO_SUCH_KEY, { status: 404, headers: { 'content-type': 'application/xml' } })],
+    // Se o bot voltasse ao scraping, cairia aqui (a "foto de introdução"):
+    ['thecomedyhub.com.br/meme/', () => new Response(LOGIN_PAGE, { status: 200, headers: { 'content-type': 'text/html' } })],
+    [/opengrath\.webp/, () => mediaResponse(JPEG_BYTES)]
+  ]);
+  try {
+    const sock = makeSock();
+    await handleMessage(sock, ownerMessage(`.ch ${POST_PAGE}`), makeDeps(sock));
+    const video = sock.sent.find((item) => item.content?.video);
+    assert.ok(video, 'enviou um vídeo de verdade');
+    assert.equal(video.content.mimetype, 'video/mp4');
+    assert.match(String(video.content.caption || ''), /ComedyHub/);
+    assert.match(String(video.content.caption || ''), /CDN público/, 'a legenda avisa de onde veio');
+    assert.ok(!mock.urls().some((url) => url.includes('opengrath.webp')), 'a capa nunca é baixada');
+  } finally {
+    mock.restore();
+    clearComedyHubEnv();
+    clearComedyHubSession();
+  }
 });
 
 test('resolveDownload (ComedyHub com sessão): entrega o MP4 do meme', async () => {

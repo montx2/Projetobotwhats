@@ -33,7 +33,7 @@ const DOWNLOAD_ITEMS = [
   ['.insta <link>', 'Instagram  ·  `.pin` Pinterest'],
   ['.tw <link>', 'X/Twitter  ·  `.face` Facebook'],
   ['.bsky <link>', 'Bluesky  ·  `.imgur` Imgur  ·  `.dm` Dailymotion'],
-  ['.ch <link>', 'ComedyHub (meme, foto, vídeo) · `.chlogin` conecta a conta'],
+  ['.ch <link>', 'ComedyHub (meme, foto, vídeo) · baixa sem login e `.chlogin` libera tudo'],
   ['.plataformas', 'tudo que o bot baixa hoje']
 ];
 
@@ -166,7 +166,7 @@ export function downloadMenu() {
       ['.tw <link>', 'X/Twitter'],
       ['.face <link>', 'Facebook'],
       ['.bsky <link>', 'Bluesky  ·  `.imgur` Imgur  ·  `.dm` Dailymotion'],
-      ['.ch <link>', 'ComedyHub  ·  `.chlogin` conecta a conta uma vez'],
+      ['.ch <link>', 'ComedyHub  ·  baixa sem login; `.chlogin` libera tudo'],
       ['.plataformas', 'lista completa do que é suportado']
     ]),
     section('Figurinha direto do link', [

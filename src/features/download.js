@@ -7,12 +7,15 @@
 // Redes com extrator dedicado (métodos reais, comparados com bots em produção):
 //   TikTok · Douyin · Instagram · Pinterest · YouTube · X/Twitter · Facebook
 //   Threads · Reddit · Twitch · Vimeo · Bluesky · Imgur · Dailymotion
-//   ComedyHub (SPA com login: usa a sessão do dono — `.chlogin`)
+//   ComedyHub (SPA com login: sessão do dono — `.chlogin` — e CDN público
+//   como plano B, então meme/vídeo também baixa SEM sessão)
 //   + HLS genérico (.m3u8) e scraping de página para a cauda longa.
 //
-// Rede com login NÃO cai no scraping: quando o extrator dedicado do ComedyHub
-// falha, o bot para e explica o motivo em vez de entregar o `og:image` da
-// página (era exatamente isso que fazia o `.dl` mandar só a foto de introdução).
+// O ComedyHub NUNCA cai no scraping: a página do meme é uma SPA que só monta o
+// conteúdo depois do login, então o raspador genérico leria o `og:image` da
+// página (a "foto de introdução"). O extrator dedicado resolve pela API (com
+// sessão) ou pelo CDN público — e, se os dois falharem, o bot para e explica em
+// vez de mandar arquivo errado.
 //
 // Quem consome isto além do `.dl`: o `.s <link>` (stickerlink.js), que usa o
 // mesmo `resolveDownload` para transformar um link em figurinha pronta.
@@ -115,7 +118,7 @@ export const SUPPORTED_PLATFORMS = [
   { name: 'Bluesky', dedicated: true, notes: 'fotos e vídeo do post' },
   { name: 'Imgur', dedicated: true, notes: 'foto, GIF/MP4 e álbum' },
   { name: 'Dailymotion', dedicated: true, notes: 'vídeo em MP4, até a maior resolução' },
-  { name: 'ComedyHub', dedicated: true, notes: 'meme, foto e vídeo · pede login uma vez (.chlogin)' },
+  { name: 'ComedyHub', dedicated: true, notes: 'meme, foto e vídeo · baixa sem login (CDN) e com login pega tudo (.chlogin)' },
   { name: 'Stream HLS', dedicated: true, notes: 'qualquer link .m3u8 (segmentos → MP4)' },
   { name: 'GIF', dedicated: false, notes: 'Giphy e Tenor viram MP4/GIF' },
   { name: 'Kwai', dedicated: false, notes: 'modo universal' },
@@ -500,7 +503,9 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
   // ComedyHub: a página do meme é uma SPA e só monta o conteúdo DEPOIS do
   // login — as reservas genéricas (Cobalt, yt-dlp, scraping) não têm o que ler
   // e acabam devolvendo o `og:image` da página, que é a "foto de introdução" do
-  // site. Melhor parar aqui, com o motivo real, do que entregar arquivo errado.
+  // site. O extrator dedicado já tentou a API (se houver sessão) e o CDN
+  // público; se chegou até aqui, é porque nenhum dos dois tinha o arquivo —
+  // melhor parar com o motivo real do que entregar arquivo errado.
   if (platform === 'ComedyHub') {
     const error =
       dedicatedError ||
@@ -620,6 +625,8 @@ function normalize(result, platform) {
     // a primeira não passa na validação de conteúdo.
     alternates: result.alternates || [],
     audioBuffer: result.audioBuffer || null,
+    // Aviso curto que vai no rodapé do envio (ex.: "peguei pelo CDN público").
+    note: result.note || '',
     // Stream cortado pelo teto de bytes (VOD de horas, HLS ao vivo): o envio
     // avisa o usuário em vez de entregar um arquivo incompleto em silêncio.
     partial: result.partial === true
@@ -636,7 +643,10 @@ export async function sendDownload(sock, jid, result, { quality, url, onProgress
     result.author ? ` ${SYM.detail} ${result.author}` : null,
     result.duration
       ? ` ${SYM.detail} ${Math.floor(result.duration / 60)}:${String(Math.floor(result.duration % 60)).padStart(2, '0')}`
-      : null
+      : null,
+    // De onde o arquivo veio quando isso não é óbvio (ex.: ComedyHub sem sessão,
+    // que baixa pelo CDN público) — evita o usuário achar que o bot "adivinhou".
+    result.note ? ` ${SYM.detail} _${truncate(result.note, 140)}_` : null
   ]
     .filter(Boolean)
     .join('\n');

@@ -1062,9 +1062,9 @@ async function runCommand(sock, msg, cmd, ctx) {
       const chSession = comedyHubSessionStatus();
       const chLine = chSession.logged
         ? chSession.expired
-          ? 'sessão vencida (rode .chlogin)'
+          ? 'sessão vencida (CDN cobre · .chlogin)'
           : 'sessão ativa (.ch)'
-        : 'sem login (.chlogin)';
+        : 'sem login (CDN público · .chlogin p/ tudo)';
       return reply(
         infoText({
           uptime: uptimeText(STARTED_AT),
@@ -1658,7 +1658,7 @@ async function runCommand(sock, msg, cmd, ctx) {
         fallback: usage(
           '.ch <link>',
           '.ch https://thecomedyhub.com.br/meme/<id>',
-          'Meme, foto ou vídeo do ComedyHub. O site só libera o arquivo para quem está logado: conecte uma vez com `.chlogin`.'
+          'Meme, foto ou vídeo do ComedyHub — baixa sem login pelo CDN público. `.chlogin` conecta a conta e libera também os posts antigos.'
         )
       });
 
@@ -1718,13 +1718,13 @@ async function runCommand(sock, msg, cmd, ctx) {
           card([
             header('ComedyHub', 'sessão'),
             [
-              `${SYM.warn} *sem sessão* — o site não libera meme sem login`,
+              `${SYM.detail} *sem sessão* — o bot está baixando pelo *CDN público* do site`,
               '',
-              `${SYM.section} *COMO CONECTAR*`,
+              `${SYM.section} *COMO CONECTAR (opcional)*`,
               cmdLine('.chlogin <email> <senha>', 'login e senha da sua conta'),
               cmdLine('.chtoken <token>', 'alternativa: token copiado do site'),
               '',
-              `${SYM.detail} Sem isso o bot não consegue ler o arquivo do meme.`
+              `${SYM.detail} Com sessão o bot lê a API do post: pega memes antigos que não estão no CDN e ainda traz título/autor para a legenda.`
             ].join('\n'),
             status.source ? kv('Origem lida', status.source) : null
           ].filter(Boolean))

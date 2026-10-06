@@ -72,7 +72,7 @@ if (comedy.logged) {
   line('Sessão', `✅ conectada${comedy.user ? ` como ${comedy.user}` : ''} (${comedy.source})`);
   line('Token vencido?', comedy.expired ? '⚠️ SIM — rode .chlogin novamente' : `não${comedy.expiresAt ? ` (expira em ${new Date(comedy.expiresAt).toLocaleString('pt-BR')})` : ''}`);
 } else {
-  line('Sessão', '⚠️ nenhuma — o site só libera meme com login (.chlogin ou COMEDYHUB_TOKEN)');
+  line('Sessão', '— nenhuma (opcional: o CDN público já baixa; .chlogin libera o resto)');
 }
 line('COMEDYHUB_TOKEN', process.env.COMEDYHUB_TOKEN ? '✅ definido' : '— vazio');
 line(
