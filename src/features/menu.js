@@ -15,6 +15,7 @@ const STICKER_ITEMS = [
   ['.s <link>', 'baixa o link e já monta a figurinha'],
   ['.s inteira', 'mantém a imagem inteira, sem esticar'],
   ['.s cortar', 'preenche o quadrado sem esticar'],
+  ['.sia <pedido>', 'peça do seu jeito e a IA monta a figurinha'],
   ['.sfundo', 'figurinha sem fundo (IA) — funciona com link também'],
   ['.fundo', 'remove o fundo e envia em PNG'],
   ['.toimg', 'transforma figurinha em foto'],

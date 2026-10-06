@@ -23,11 +23,11 @@ import {
   parseFit,
   parseStickerPrefs,
   parseSimpleSticker,
-  parseStickerCommand,
   extractAnyMediaSource
 } from './sticker.js';
-import { stickerSourcesForCommand } from './stickerlink.js';
-import { removeBackground, bgStatus, bgPools } from './bgremoval.js';
+import { stickerSourcesForCommand, normalizeStickerLink } from './stickerlink.js';
+import { planStickerRequest, stickerPlanToOptions, describeStickerPlan } from './stickerai.js';
+import { removeBackground, bgAvailable, bgStatus, bgPools } from './bgremoval.js';
 import {
   aiChat,
   aiImageFull,
@@ -105,7 +105,7 @@ const GROUP_CONTROL_COMMANDS = new Set(['boasvindas', 'bemvindo', 'welcome', 'an
 const MAX_CONCURRENT_EXPENSIVE = 3;
 let activeExpensive = 0;
 const EXPENSIVE_COMMANDS = new Set([
-  's', 'fig', 'figu', 'sticker', 'stiker', 'figurinha', 'sfundo', 'stickerfundo', 'sfundinho',
+  's', 'fig', 'figu', 'sia', 'sticker', 'stiker', 'figurinha', 'sfundo', 'stickerfundo', 'sfundinho',
   'fundo', 'removefundo', 'rmbg', 'removebg', 'ia', 'ai', 'gpt', 'chat',
   'clima', 'tempo', 'previsao', 'previsão', 'cotacao', 'cotação', 'cambio', 'câmbio', 'feriados',
   'criar', 'img',
@@ -153,7 +153,7 @@ function isExpensiveRequest(command, msg) {
   const args = command.args || [];
   const quoted = hasQuotedMessage(msg.message);
   const hasAttachment = hasNestedMedia(msg.message);
-  if (['s', 'fig', 'figu', 'sticker', 'stiker', 'figurinha', 'sfundo', 'stickerfundo', 'sfundinho', 'fundo', 'removefundo', 'rmbg', 'removebg', 'tomp3', 'toaudio', 'audio', 'toptt', 'tovn', 'tovoz', 'tovideo', 'tomp4', 'togif', 'toimg', 'tofoto', 'foto'].includes(name)) {
+  if (['s', 'fig', 'figu', 'sia', 'sticker', 'stiker', 'figurinha', 'sfundo', 'stickerfundo', 'sfundinho', 'fundo', 'removefundo', 'rmbg', 'removebg', 'tomp3', 'toaudio', 'audio', 'toptt', 'tovn', 'tovoz', 'tovideo', 'tomp4', 'togif', 'toimg', 'tofoto', 'foto'].includes(name)) {
     return Boolean(args.length || hasAttachment || quoted);
   }
   if ([
@@ -452,21 +452,38 @@ function stickerSourceNote(sources, failures = [], skipped = 0) {
   return truncate(note.join('\n'), 300);
 }
 
-/** Guia curto do comando escondido `.figurinha` — não aparece em menu nenhum. */
-function stickerGuide() {
+/** Guia curto do `.sia`: sem mídia nem link, nunca chama a IA. */
+function siaGuide() {
   return card([
-    header('Figurinha', 'ajustes finos'),
+    header('Figurinha com IA', 'peça do seu jeito'),
     [
-      'Responda uma mídia (ou mande um link) com:',
-      cmdLine('.figurinha', 'automático: melhor trecho, loop fechado e assunto enquadrado'),
-      cmdLine('.figurinha fundo', 'remove o fundo (IA)'),
-      cmdLine('.figurinha hd', 'mais nitidez  ·  `.figurinha liso` mais fluidez'),
-      cmdLine('.figurinha curto', '5 s  ·  `.figurinha 6s` duração exata (2 a 10 s)'),
-      cmdLine('.figurinha inteira', 'imagem completa, sem esticar  ·  `.figurinha cortar` preenche cortando as bordas'),
-      '  _pode combinar: `.figurinha fundo hd 6s`_'
+      'Responda uma foto, vídeo, GIF ou figurinha (ou mande um link) com:',
+      cmdLine('.sia', 'automático: melhor trecho, loop fechado e assunto enquadrado'),
+      cmdLine('.sia sem fundo, 10 segundos, bem fluida'),
+      cmdLine('.sia nítida e sem esticar'),
+      cmdLine('.sia só tira o fundo')
     ].join('\n'),
-    footer('`.s` continua a figurinha simples, esticada por padrão.')
+    footer('`.s` continua a figurinha simples e rápida, sem IA.')
   ]);
+}
+
+/** Texto do pedido sem URLs: link é fonte de mídia, não instrução para a IA. */
+function stickerRequestText(args = []) {
+  let text = String(args.join(' '))
+    .replace(/https?:\/\/[^\s<>"'`]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  text = text.split(/\s+/).filter((part) => !normalizeStickerLink(part)).join(' ');
+  return text.replace(/\s+/g, ' ').trim().slice(0, 300);
+}
+
+function stickerSourceType(source) {
+  const kind = String(source?.kind || '').toLowerCase();
+  if (kind === 'gif') return 'GIF';
+  if (kind === 'animated' || (source?.type === 'sticker' && isAnimatedWebp(source?.buffer))) return 'figurinha animada';
+  if (source?.type === 'video' || kind === 'video') return 'vídeo';
+  if (source?.type === 'sticker') return 'figurinha parada';
+  return 'foto';
 }
 
 /**
@@ -1121,25 +1138,94 @@ async function runCommand(sock, msg, cmd, ctx) {
       );
     }
 
-    // `.figurinha` é escondido (fora de qualquer menu): motor inteligente com
-    // todos os ajustes na mesma linha. Sem mídia nem link, ele se explica.
+    // `.sia` entende o pedido; as palavras antigas são apenas apelidos do comando.
+    case 'sia':
     case 'figurinha':
     case 'sticker':
     case 'stiker': {
       const got = await stickerSourcesOrReply({ sock, msg, args, allowViewOnce: inOwnerPrivate, reply });
       if (!got) return;
       const { sources, failures, skipped } = got;
-      if (!sources.length) return reply(stickerGuide());
+      if (!sources.length) return reply(siaGuide());
+
+      const pedido = stickerRequestText(args);
+      const tipos = sources.map(stickerSourceType);
+      const tiposUnicos = [...new Set(tipos)];
+      const tipoMidia = tiposUnicos.length === 1 ? tiposUnicos[0] : 'múltiplas mídias';
+      const { plano, origem } = await planStickerRequest(pedido, { tipoMidia });
+      log.info('plano final do .sia', { origem, plano }); // Nunca registrar o texto do pedido.
+
+      const relatorios = [];
       let done = 0;
       for (let i = 0; i < sources.length; i++) {
-        const webp = await makeSticker(sources[i], { ...packInfo(), ...parseStickerCommand(args), onProgress: reply });
+        const fonte = sources[i];
+        const tipoFonte = tipos[i];
+        const podeTentarRecorte = tipoFonte === 'foto' || tipoFonte === 'figurinha parada';
+        const opcoes = stickerPlanToOptions(plano, { tipoMidia: tipoFonte });
+        let relatorioMotor = null;
+        let webp = await makeSticker(fonte, {
+          ...packInfo(),
+          ...opcoes,
+          smart: true,
+          allowAiCut: podeTentarRecorte,
+          onProgress: reply,
+          onReport: (report) => { relatorioMotor = report; }
+        });
+        let falhaRemocao = false;
+        const fundoJaSaiu = ['liso', 'ia'].includes(relatorioMotor?.fundoRecortado) ||
+          relatorioMotor?.plano?.cutState === 'transparent';
+
+        // Primeiro aproveita o recorte grátis. Só foto/figurinha parada pode chamar
+        // o provedor do `.sfundo`; fontes animadas nem enviam um quadro à IA.
+        if (plano.fundo === 'remover' && !fundoJaSaiu && podeTentarRecorte && bgAvailable()) {
+          try {
+            let relatorioDoRecorte = null;
+            webp = await makeSticker(fonte, {
+              ...packInfo(),
+              ...opcoes,
+              removeBg: true,
+              smart: true,
+              onProgress: reply,
+              onReport: (report) => { relatorioDoRecorte = report; }
+            });
+            relatorioMotor = relatorioDoRecorte || { fundoRecortado: 'ia', plano: null };
+          } catch (error) {
+            falhaRemocao = true;
+            log.warn('remoção de fundo pedida no .sia falhou; mantendo a figurinha original', { name: error?.name });
+          }
+        }
+
+        relatorios.push({
+          ...(relatorioMotor || { fundoRecortado: null, plano: null }),
+          tipoMidia: tipoFonte,
+          provedorDisponivel: bgAvailable(),
+          falhaRemocao
+        });
         await reply(wait(sources.length > 1 ? `Enviando figurinha ${i + 1}/${sources.length}` : 'Enviando figurinha'));
         await sendStickerMessage(sock, jid, webp, msg);
         done++;
       }
-      return reply(
-        ok(done > 1 ? `${done} figurinhas prontas` : 'Figurinha pronta', stickerSourceNote(sources, failures, skipped))
-      );
+
+      const fundos = relatorios.map((item) => item.fundoRecortado);
+      const todosComFundoRecortado = fundos.length > 0 && fundos.every((item) => ['liso', 'ia'].includes(item));
+      const resumoMotor = relatorios.find((item) => item.plano)?.plano || null;
+      const mediaTypeForReport = tiposUnicos.length === 1 ? tiposUnicos[0] : 'múltiplas mídias';
+      const descricao = describeStickerPlan(plano, {
+        fundoRecortado: todosComFundoRecortado
+          ? (fundos.includes('ia') ? 'ia' : 'liso')
+          : null,
+        plano: resumoMotor,
+        tipoMidia: mediaTypeForReport,
+        temFonteAnimada: tipos.some((type) => ['vídeo', 'GIF', 'figurinha animada'].includes(type)),
+        provedorDisponivel: relatorios.some((item) => item.provedorDisponivel),
+        falhaRemocao: relatorios.some((item) => item.falhaRemocao),
+        fundoParcial: fundos.some((item) => ['liso', 'ia'].includes(item)) && !todosComFundoRecortado
+      });
+      const linhas = [ok(done > 1 ? `${done} figurinhas prontas` : 'Figurinha pronta', descricao.resumo)];
+      for (const aviso of descricao.avisos) linhas.push(warn(aviso.title, aviso.detail));
+      const nota = stickerSourceNote(sources, failures, skipped);
+      if (nota) linhas.push(`_${nota}_`);
+      return reply(linhas.join('\n'));
     }
 
     case 'sfundo':

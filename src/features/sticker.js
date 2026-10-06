@@ -350,10 +350,10 @@ export async function extractStickerSource(sock, msg, { onProgress, allowViewOnc
  * minutos de CPU) sem garantia de máscara consistente entre quadros. O
  * resultado é validado: recorte vazio é descartado e a figurinha original fica.
  *
- * @returns {Promise<Buffer|null>} webp recortado, ou null para seguir sem IA
+ * @returns {Promise<{buffer: Buffer, via: string}|null>} webp recortado, ou null para seguir sem IA
  */
-async function tryAiCut({ smart, buffer, ext, isVideo, onProgress }) {
-  if (!smart || smart.mode !== 'static' || smart.cut) return null;
+async function tryAiCut({ smart, buffer, ext, isVideo, onProgress, autoCrop = true, autoCut = true, allowAiCut = true }) {
+  if (!allowAiCut || !autoCut || !smart || smart.mode !== 'static' || smart.cut) return null;
   if (!aiCutCouldHelp(smart.cutState) || !bgAutoAllowed()) return null;
 
   await onProgress?.(`${SYM.wait} Fundo complexo — removendo com IA… (pode levar alguns segundos)`);
@@ -378,26 +378,66 @@ async function tryAiCut({ smart, buffer, ext, isVideo, onProgress }) {
     return null;
   }
 
-  const { buffer: webp } = await toStickerWebp(cut, { animated: false, ext: '.png', fit: 'contain', onProgress });
+  const { buffer: webp } = await toStickerWebp(cut, {
+    animated: false,
+    ext: '.png',
+    fit: 'contain',
+    autoCrop,
+    autoCut: false,
+    onProgress
+  });
   log.ok(`fundo removido automaticamente via ${via} (${formatBytes(webp.length)})`);
   await onProgress?.(`${SYM.wait} Fundo removido por IA (${via}) · gravando dados da figurinha…`);
-  return webp;
+  return { buffer: webp, via };
 }
 
 /**
  * Cria figurinha a partir da mídia.
  *
  * `smart` (padrão `true`, o que mantém `.sfundo`/`.fundo` e o resto do bot como
- * estão) escolhe o motor: `true` é o motor inteligente do `.figurinha`;
+ * estão) escolhe o motor: `true` é o motor inteligente do `.sia`;
  * `false` é o `.s` clássico — a escada de antes, sem análise nem recorte.
+ * `allowAiCut` permite bloquear provedores automáticos para fontes animadas.
+ * `onReport`, quando informado, recebe o resultado do recorte e o relatório do motor.
  * @returns {Promise<Buffer>} webp pronto para enviar (com VP8X + EXIF válidos)
  */
-export async function makeSticker(source, { removeBg = false, pack, author, emojis, fit = 'fill', prefer = 'auto', seconds = 0, smart = true, onProgress } = {}) {
+export async function makeSticker(source, {
+  removeBg = false,
+  pack,
+  author,
+  emojis,
+  fit = 'fill',
+  prefer = 'auto',
+  seconds = 0,
+  smart = true,
+  autoCrop = true,
+  autoCut = true,
+  allowAiCut = true,
+  onProgress,
+  onReport
+} = {}) {
   let { buffer } = source;
   const { type, node } = source;
   const mime = String(node?.mimetype || '').toLowerCase();
   const magicExt = detectMediaExt(buffer, '');
   const isStickerInput = type === 'sticker' || type === 'stickerMessage' || mime.includes('webp') || isWebp(buffer);
+
+  const report = async ({ fundoRecortado = null, plano = null } = {}) => {
+    if (typeof onReport !== 'function') return;
+    try {
+      await onReport({
+        fundoRecortado: ['liso', 'ia'].includes(fundoRecortado) ? fundoRecortado : null,
+        plano: plano && typeof plano === 'object' ? plano : null
+      });
+    } catch (error) {
+      log.warn('callback de relatório da figurinha falhou', { name: error?.name });
+    }
+  };
+  const finish = async (webp, { fundoRecortado = null, plano = null, finalEmojis = emojis } = {}) => {
+    const tagged = tagSticker(webp, { pack, author, emojis: finalEmojis });
+    await report({ fundoRecortado, plano });
+    return tagged;
+  };
 
   if (isStickerInput) {
     if (!isWebp(buffer)) throw new Error('webp inválido');
@@ -410,9 +450,18 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
       await onProgress?.(`${SYM.wait} Removendo o fundo…`);
       const { buffer: cut, via } = await removeBackground(png);
       await onProgress?.(`${SYM.wait} Fundo removido (${via}) · criando figurinha 512×512…`);
-      const { buffer: webp } = await toStickerWebp(cut, { animated: false, ext: '.png', fit, smart, onProgress });
+      const converted = await toStickerWebp(cut, {
+        animated: false,
+        ext: '.png',
+        fit,
+        prefer,
+        smart,
+        autoCrop,
+        autoCut,
+        onProgress
+      });
       await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
-      return tagSticker(webp, { pack, author, emojis });
+      return finish(converted.buffer, { fundoRecortado: 'ia', plano: converted.smart || null });
     }
 
     const info = parseWebp(buffer);
@@ -444,19 +493,32 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
         );
       }
       await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
-      return tagSticker(buffer, { pack, author, emojis: finalEmojis });
+      return finish(buffer, { finalEmojis });
     }
 
     // Se for um WebP estático fora do padrão 512x512 e tivermos FFmpeg, padroniza em 512x512
     if (!info.animated && (info.width !== 512 || info.height !== 512) && hasFfmpeg()) {
       await onProgress?.(`${SYM.wait} Ajustando figurinha para 512×512…`);
-      const { buffer: webp } = await toStickerWebp(buffer, { animated: false, ext: '.webp', fit, smart, onProgress });
+      const converted = await toStickerWebp(buffer, {
+        animated: false,
+        ext: '.webp',
+        fit,
+        prefer,
+        smart,
+        autoCrop,
+        autoCut,
+        onProgress
+      });
       await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
-      return tagSticker(webp, { pack, author, emojis: finalEmojis });
+      return finish(converted.buffer, {
+        finalEmojis,
+        fundoRecortado: converted.smart?.cut ? 'liso' : null,
+        plano: converted.smart || null
+      });
     }
 
     await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
-    return tagSticker(buffer, { pack, author, emojis: finalEmojis });
+    return finish(buffer, { finalEmojis });
   }
 
   if (!hasFfmpeg()) {
@@ -482,9 +544,18 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
     const { buffer: cut, via } = await removeBackground(buffer);
     log.ok(`fundo removido via ${via} (${formatBytes(cut.length)})`);
     await onProgress?.(`${SYM.wait} Fundo removido (${via}) · convertendo para figurinha 512×512…`);
-    const { buffer: webp } = await toStickerWebp(cut, { animated: false, ext: '.png', fit, smart, onProgress });
+    const converted = await toStickerWebp(cut, {
+      animated: false,
+      ext: '.png',
+      fit,
+      prefer,
+      smart,
+      autoCrop,
+      autoCut,
+      onProgress
+    });
     await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
-    return tagSticker(webp, { pack, author, emojis });
+    return finish(converted.buffer, { fundoRecortado: 'ia', plano: converted.smart || null });
   }
 
   // O `.s` clássico avisa como antes: quem decide a duração é a escada (até 7 s).
@@ -493,15 +564,18 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
     : 'Convertendo vídeo/GIF em figurinha animada…';
   await onProgress?.(`${SYM.wait} ${isVideo ? videoNote : 'Convertendo imagem em figurinha 512×512…'}`);
   const ext = magicExt || (isGif ? '.gif' : isVideo ? '.mp4' : mime.includes('png') ? '.png' : '.jpg');
-  const { buffer: webp, smart: plan } = await toStickerWebp(buffer, {
+  const converted = await toStickerWebp(buffer, {
     animated: isVideo,
     ext,
     fit,
     prefer,
     maxSeconds: seconds || STICKER_MAX_SECONDS,
     smart,
+    autoCrop,
+    autoCut,
     onProgress
   });
+  const { buffer: webp, smart: plan } = converted;
   // O motor inteligente explica o que decidiu (trecho, quadros, crop, qualidade).
   if (plan) {
     const cut = plan.cut ? ` · ${plan.cut}` : '';
@@ -525,27 +599,32 @@ export async function makeSticker(source, { removeBg = false, pack, author, emoj
   }
   // Fundo complexo em foto/vídeo parado: tenta a IA (opt-in) antes de fechar.
   // Só existe plano no motor inteligente — o `.s` clássico nunca chega na IA.
-  const aiCut = await tryAiCut({ smart: plan, buffer, ext, isVideo, onProgress });
-  if (aiCut) return tagSticker(aiCut, { pack, author, emojis });
+  const aiCut = await tryAiCut({ smart: plan, buffer, ext, isVideo, onProgress, autoCrop, autoCut, allowAiCut });
+  if (aiCut) {
+    await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
+    return finish(aiCut.buffer, { fundoRecortado: 'ia', plano: plan || null });
+  }
 
   await onProgress?.(`${SYM.wait} Gravando dados da figurinha…`);
-  return tagSticker(webp, { pack, author, emojis });
+  return finish(webp, {
+    fundoRecortado: plan?.cut ? 'liso' : null,
+    plano: plan || null
+  });
 }
 
 /**
- * Palavras do usuário para o trade-off da animação (`.figurinha liso`,
- * `.figurinha hd`, `.figurinha curto`, `.figurinha 6s` — o `.s` não tem isso):
+ * Vocabulário compartilhado pela reserva local do `.sia` e pelos atalhos preservados do `.sfundo`:
  *  - liso/fluido  → fluidez máxima (15 fps), qualidade menor por quadro;
  *  - nítido/hd    → imagem mais limpa, menos quadros;
  *  - curto        → até 5 s (o orçamento de 500 KB compra mais qualidade);
  *  - `6s`/`8s`    → duração exata (2 a 10 s).
  * Sem nada disso, o motor decide pelo movimento (automático).
  */
-const PREF_WORDS = {
+export const PREF_WORDS = {
   smooth: ['liso', 'lisa', 'fluido', 'fluida', 'fluidez', 'smooth', 'movimento'],
   sharp: ['nitido', 'nítido', 'nitidez', 'hd', 'qualidade', 'quality', 'sharp', 'cristalino', 'cristalina']
 };
-const SHORT_WORDS = ['curto', 'curta', 'curtinha', 'rapido', 'rápido', 'resumido', 'shorter'];
+export const SHORT_WORDS = ['curto', 'curta', 'curtinha', 'rapido', 'rápido', 'resumido', 'shorter'];
 
 export function parseStickerPrefs(args = []) {
   const words = args.map((a) => String(a).toLowerCase().replace(/^[-–—]+/, '').replace(/^#/, ''));
@@ -577,7 +656,7 @@ function formatFillUse(fill) {
   return ` · usa ${pct}% do limite (o codificador não gasta mais sem perder nitidez)`;
 }
 
-const FIT_WORDS = {
+export const FIT_WORDS = {
   contain: ['inteira', 'inteiro', 'full', 'original', 'normal', 'contain', 'proporcao', 'proporção'],
   cover: ['cortar', 'corte', 'crop', 'cover', 'centro'],
   fill: ['preencher', 'esticar', 'fill']
@@ -598,22 +677,6 @@ export function parseFit(args = []) {
 /** Opções do `.s`: figurinha simples, motor clássico — só o enquadramento. */
 export function parseSimpleSticker(args = []) {
   return { fit: parseFit(args), smart: false };
-}
-
-const BG_WORDS = ['fundo', 'semfundo', 'sfundo', 'removefundo', 'remove-fundo', 'rmbg', 'removebg', 'bg'];
-
-/**
- * Opções do `.figurinha` (comando escondido): motor inteligente + todos os
- * ajustes. O `.s` NÃO usa isto — ele chama `parseSimpleSticker`.
- */
-export function parseStickerCommand(args = []) {
-  const words = args.map((a) => String(a).toLowerCase().replace(/^[-–—]+/, '').replace(/^#/, ''));
-  return {
-    ...parseStickerPrefs(args), // { prefer, seconds }
-    fit: parseFit(args), // enquadramento
-    removeBg: words.some((w) => BG_WORDS.includes(w)), // recorte de fundo
-    smart: true
-  };
 }
 
 /** Info do pack atual para comandos. */

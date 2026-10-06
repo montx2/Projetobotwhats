@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { buildStickerFilter, classicStickerSteps } from '../src/util/ffmpeg.js';
-import { parseFit, parseStickerPrefs, parseSimpleSticker, parseStickerCommand } from '../src/features/sticker.js';
+import { parseFit, parseStickerPrefs, parseSimpleSticker } from '../src/features/sticker.js';
 import { parseWebp, tagSticker, webpDurationMs } from '../src/util/webp.js';
 
 test('parseFit: padrão preenche; flags escolhem outros modos', () => {
@@ -63,7 +63,7 @@ test('figurinha real: fill ocupa 100% do quadrado, contain deixa margem transpar
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/* ─────────────── `.s` simples × `.figurinha` com ajustes ─────────────── */
+/* ─────────────── `.s` simples: comandos e motor clássico ─────────────── */
 
 test('parseSimpleSticker (.s): só enquadramento, sempre no motor clássico', () => {
   assert.deepEqual(parseSimpleSticker([]), { fit: 'fill', smart: false });
@@ -74,35 +74,6 @@ test('parseSimpleSticker (.s): só enquadramento, sempre no motor clássico', ()
   const ignorado = parseSimpleSticker(['liso', 'hd', 'curto', '6s', 'fundo', 'https://pin.it/abc']);
   assert.deepEqual(ignorado, { fit: 'fill', smart: false });
   for (const key of ['prefer', 'seconds', 'removeBg']) assert.equal(key in ignorado, false, `.s não tem "${key}"`);
-});
-
-test('parseStickerCommand (.figurinha): motor inteligente com todos os ajustes', () => {
-  assert.deepEqual(parseStickerCommand([]), { smart: true, prefer: 'auto', seconds: 0, fit: 'fill', removeBg: false });
-  assert.deepEqual(parseStickerCommand(['fundo', 'hd', '6s']), { smart: true, prefer: 'sharp', seconds: 6, fit: 'fill', removeBg: true });
-  assert.deepEqual(parseStickerCommand(['liso', 'cortar']), { smart: true, prefer: 'smooth', seconds: 0, fit: 'cover', removeBg: false });
-  assert.deepEqual(parseStickerCommand(['xyz']), parseStickerCommand([]), 'palavra desconhecida é ignorada');
-  assert.deepEqual(parseStickerCommand(['6s', 'hd', 'fundo']), parseStickerCommand(['fundo', 'hd', '6s']), 'a ordem não importa');
-  assert.deepEqual(
-    parseStickerCommand(['fundo', 'inteira', 'liso', '8,5s', 'https://pin.it/abc']),
-    { smart: true, prefer: 'smooth', seconds: 8.5, fit: 'contain', removeBg: true },
-    'tudo junto, com link no meio'
-  );
-});
-
-test('parseStickerCommand: vocabulário do guia (sinônimos, maiúsculas, traço e cerquilha)', () => {
-  for (const w of ['fundo', 'semfundo', 'sfundo', 'removefundo', 'remove-fundo', 'rmbg', 'removebg', 'bg', 'FUNDO', '-fundo', '—fundo', '#fundo']) {
-    assert.equal(parseStickerCommand([w]).removeBg, true, w);
-  }
-  // Só a palavra inteira liga o recorte: link e palavra parecida não.
-  for (const w of ['fundos', 'background', 'https://pin.it/fundo']) assert.equal(parseStickerCommand([w]).removeBg, false, w);
-  for (const w of ['liso', 'fluido', 'fluidez', 'movimento', 'smooth']) assert.equal(parseStickerCommand([w]).prefer, 'smooth', w);
-  for (const w of ['hd', 'nitido', 'nitidez', 'qualidade', 'sharp']) assert.equal(parseStickerCommand([w]).prefer, 'sharp', w);
-  for (const w of ['curto', 'curta', 'rapido', 'resumido']) assert.equal(parseStickerCommand([w]).seconds, 5, w);
-  for (let n = 3; n <= 10; n++) assert.equal(parseStickerCommand([`${n}s`]).seconds, n, `${n}s`);
-  assert.equal(parseStickerCommand(['8,5s']).seconds, 8.5);
-  for (const w of ['inteira', 'inteiro', 'original', 'proporcao']) assert.equal(parseStickerCommand([w]).fit, 'contain', w);
-  for (const w of ['cortar', 'corte', 'crop', 'centro']) assert.equal(parseStickerCommand([w]).fit, 'cover', w);
-  for (const w of ['preencher', 'esticar', 'fill']) assert.equal(parseStickerCommand([w]).fit, 'fill', w);
 });
 
 test('classicStickerSteps (.s): a escada de antes do motor, intacta', () => {
