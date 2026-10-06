@@ -9,7 +9,8 @@
     "pair": "node scripts/pair.mjs",
     "doctor": "node scripts/doctor.mjs",
     "test": "node scripts/test.mjs",
-    "env": "node scripts/env-report.mjs"
+    "env": "node scripts/env-report.mjs",
+    "comedyhub": "node scripts/comedyhub-probe.mjs"
   },
   "engines": {
     "node": ">=22.0.0"

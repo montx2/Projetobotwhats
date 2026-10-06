@@ -33,6 +33,7 @@ const DOWNLOAD_ITEMS = [
   ['.insta <link>', 'Instagram  ·  `.pin` Pinterest'],
   ['.tw <link>', 'X/Twitter  ·  `.face` Facebook'],
   ['.bsky <link>', 'Bluesky  ·  `.imgur` Imgur  ·  `.dm` Dailymotion'],
+  ['.ch <link>', 'ComedyHub (meme, foto, vídeo) · `.chlogin` conecta a conta'],
   ['.plataformas', 'tudo que o bot baixa hoje']
 ];
 
@@ -165,6 +166,7 @@ export function downloadMenu() {
       ['.tw <link>', 'X/Twitter'],
       ['.face <link>', 'Facebook'],
       ['.bsky <link>', 'Bluesky  ·  `.imgur` Imgur  ·  `.dm` Dailymotion'],
+      ['.ch <link>', 'ComedyHub  ·  `.chlogin` conecta a conta uma vez'],
       ['.plataformas', 'lista completa do que é suportado']
     ]),
     section('Figurinha direto do link', [
@@ -181,7 +183,7 @@ export function downloadMenu() {
     section('Redes atendidas', [
       'TikTok · Douyin · Instagram · YouTube · Pinterest',
       'X/Twitter · Facebook · Threads · Reddit · Bluesky',
-      'Imgur · Dailymotion · Twitch · Vimeo · GIFs',
+      'Imgur · Dailymotion · Twitch · Vimeo · ComedyHub · GIFs',
       'Kwai · Tumblr · Streamable · Snapchat · SoundCloud',
       'VK · Bilibili · Weibo · Rumble · 9GAG e mais'
     ], { note: 'Streams .m3u8 também: o bot baixa os segmentos e entrega MP4' }),
