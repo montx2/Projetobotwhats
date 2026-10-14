@@ -104,26 +104,57 @@ function baseResult(extra = {}) {
   };
 }
 
-/** Maior rendição que seja ARQUIVO (ignora manifestos m3u8/mpd). */
-function tallestFile(list) {
-  const files = Object.values(list || {}).filter(
-    (r) => r?.url && !/\.(m3u8|mpd)(\?|$)/i.test(r.url)
-  );
-  if (!files.length) return null;
-  return files.sort((a, b) => (a.height || 0) - (b.height || 0)).pop();
-}
+const PLAYLIST_URL = /\.(m3u8|mpd)(\?|$)/i;
 
-/** Ideia-pin guarda um vídeo por bloco de página; vídeo-pin guarda em `videos`. */
-function bestVideo(pin) {
-  const direct = tallestFile(pin.videos?.video_list);
-  if (direct) return direct;
-  for (const page of pin.story_pin_data?.pages || []) {
-    for (const block of page.blocks || []) {
-      const fromBlock = tallestFile(block.video?.video_list);
-      if (fromBlock) return fromBlock;
+/**
+ * Todas as rendições de vídeo de UMA lista, da melhor para a pior:
+ * primeiro os ARQUIVOS progressivos (`.mp4` — o que o WhatsApp recebe direto),
+ * depois os manifestos HLS (`.m3u8` — o motor de stream monta e remuxa).
+ *
+ * Guardar as alternativas importa (bug real): a rendição "maior" do Pinterest
+ * às vezes vem num formato que o WhatsApp não reproduz (fragmentado/HEVC), e
+ * sem plano B em vídeo o bot ou mandava o arquivo quebrado ou caía numa
+ * IMAGEM no lugar do vídeo. Com a lista inteira, o download tenta a próxima
+ * rendição de vídeo antes de desistir.
+ */
+export function videoRenditions(pin) {
+  let list = pin?.videos?.video_list;
+  if (!list || !Object.keys(list).length) {
+    // Ideia-pin guarda um vídeo por bloco de página; vídeo-pin guarda em `videos`.
+    for (const page of pin?.story_pin_data?.pages || []) {
+      for (const block of page.blocks || []) {
+        if (block.video?.video_list && Object.keys(block.video.video_list).length) {
+          list = block.video.video_list;
+          break;
+        }
+      }
+      if (list) break;
     }
   }
-  return null;
+  const entries = Object.entries(list || {}).filter(([, r]) => r?.url);
+  const bySize = (a, b) =>
+    (b[1].height || 0) - (a[1].height || 0) || (b[1].width || 0) - (a[1].width || 0);
+  const progressive = entries.filter(([, r]) => !PLAYLIST_URL.test(r.url)).sort(bySize);
+  const streamed = entries.filter(([, r]) => PLAYLIST_URL.test(r.url)).sort(bySize);
+
+  const out = [];
+  const seen = new Set();
+  for (const [key, r] of [...progressive, ...streamed]) {
+    if (seen.has(r.url)) continue;
+    seen.add(r.url);
+    const isPlaylist = PLAYLIST_URL.test(r.url);
+    out.push({
+      type: 'video',
+      url: r.url,
+      label: `${r.width || ''}x${r.height || ''}`.trim() || key,
+      width: r.width || 0,
+      height: r.height || 0,
+      durationMs: r.duration || 0,
+      trusted: true,
+      hint: isPlaylist ? 'hls' : 'video'
+    });
+  }
+  return out;
 }
 
 function dimLabel(size) {
@@ -166,37 +197,30 @@ export function imageRenditions(pin) {
 
 /** Converte um pin do Pinterest (widget ou SSR) no resultado do downloader. */
 function pinResult(pin) {
-  const video = bestVideo(pin);
+  const videos = videoRenditions(pin);
   const images = imageRenditions(pin);
-  if (!video && !images.length) return null;
+  if (!videos.length && !images.length) return null;
 
-  const media = [];
-  if (video) {
-    media.push({
-      type: 'video',
-      url: video.url,
-      label: `${video.width || ''}x${video.height || ''}`.trim(),
-      trusted: true,
-      hint: 'video'
-    });
-  }
-  for (const img of images) {
-    media.push({
-      type: /\.gif(\?|$)/i.test(img.url) ? 'gif' : 'image',
-      url: img.url,
-      label: dimLabel(img),
-      trusted: true,
-      hint: pinimgHash(img.url)
-    });
-  }
+  const imageMedia = images.map((img) => ({
+    type: /\.gif(\?|$)/i.test(img.url) ? 'gif' : 'image',
+    url: img.url,
+    label: dimLabel(img),
+    trusted: true,
+    hint: pinimgHash(img.url)
+  }));
 
+  // Vídeo primeiro: as OUTRAS rendições de vídeo vêm antes das imagens nas
+  // alternativas — trocar um vídeo que não presta por outra QUALIDADE de
+  // vídeo é certo; trocar por uma foto muda o que o usuário pediu.
+  const media = [...videos, ...imageMedia];
   const primary = media[0];
   return baseResult({
-    kind: media.some((m) => m.type === 'video') ? 'video' : primary.type === 'gif' ? 'gif' : 'image',
+    kind: videos.length ? 'video' : primary.type === 'gif' ? 'gif' : 'image',
     title: String(pin.grid_title || pin.title || pin.grid_description || pin.description || 'Pin do Pinterest')
       .trim()
       .slice(0, 100),
     author: pin.pinner?.username || '',
+    duration: videos[0]?.durationMs ? Math.round(videos[0].durationMs / 1000) : 0,
     thumbnail: images[0]?.url || '',
     media: [primary],
     alternates: media.slice(1)

@@ -696,6 +696,21 @@ function bufferRes(buf) {
   });
 }
 
+function mp4Box(type, payload = Buffer.alloc(0)) {
+  const head = Buffer.alloc(8);
+  head.writeUInt32BE(8 + payload.length, 0);
+  head.write(type, 4, 'ascii');
+  return Buffer.concat([head, payload]);
+}
+
+/** MP4 estruturalmente válido (ftyp + moov avc1 + mdat) p/ o inspetor de vídeo. */
+function fakeMp4() {
+  const stsd = mp4Box('stsd', Buffer.concat([Buffer.alloc(4), Buffer.from([0, 0, 0, 1]), mp4Box('avc1', Buffer.alloc(16))]));
+  const hdlr = mp4Box('hdlr', Buffer.concat([Buffer.alloc(8), Buffer.from('vide', 'ascii')]));
+  const trak = mp4Box('trak', mp4Box('mdia', Buffer.concat([hdlr, mp4Box('minf', mp4Box('stbl', stsd))])));
+  return Buffer.concat([mp4Box('ftyp', Buffer.from('isomiso2', 'ascii')), mp4Box('moov', trak), mp4Box('mdat', Buffer.alloc(48, 3))]);
+}
+
 async function freshResponse(response) {
   const body = response.body ? await response.clone().arrayBuffer() : null;
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
@@ -744,7 +759,7 @@ test('download em grupo ativado: link do TikTok baixa e ENVIA O VÍDEO no própr
     [
       ['tikwm.com/api', () => jsonRes(tikwm)],
       ['tiktok.com/oembed', () => jsonRes({ title: 'Vídeo do grupo', author_name: 'criador' })],
-      [/tikwm\.com\/video\/media/, () => bufferRes(Buffer.from('...ftypisomavc1...'))],
+      [/tikwm\.com\/video\/media/, () => bufferRes(fakeMp4())],
       ['vm.tiktok.com', () => jsonRes({}, { status: 200 })]
     ],
     async () => {

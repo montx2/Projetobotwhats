@@ -7,6 +7,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { isWebp, isAnimatedWebp } from './webp.js';
+import { inspectVideoFile, isUnplayableVideoCodec, isUnplayableAudioCodec } from './mp4.js';
 import { gradeImageSamples } from './imageinfo.js';
 import {
   analyzeSource,
@@ -1305,6 +1306,109 @@ export async function remuxToMp4(input, { audioOnly = false, ext = '.ts', timeou
       }
     }
     if (!fs.existsSync(outFile)) throw new Error('ffmpeg não gerou o MP4 do stream');
+    const buf = fs.readFileSync(outFile);
+    if (!buf.length) throw new Error('MP4 remuxado está vazio');
+    return buf;
+  } finally {
+    fs.rmSync(inFile, { force: true });
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
+/**
+ * Conserta um vídeo baixado que o WhatsApp NÃO reproduziria como veio
+ * (MP4 fragmentado do HLS/Pinterest, codec HEVC/AV1/VP9, MPEG-TS disfarçado…).
+ *
+ * Escada de conserto, do mais barato ao mais caro:
+ *   1. já reproduz → devolve os mesmos bytes, sem tocar em nada;
+ *   2. codec bom, envelope ruim (fragmentado/TS/WebM) → remux `-c copy` com
+ *      `+faststart` (e AAC quando o áudio veio em codec rejeitado);
+ *   3. codec de vídeo rejeitado → transcodifica para H.264 + AAC yuv420p.
+ * A saída é reinspecionada: só volta buffer que o inspetor aprova.
+ *
+ * @param {Buffer} input vídeo como baixado
+ * @param {ReturnType<import('./mp4.js').inspectVideoFile>} [info] inspeção já feita
+ * @returns {Promise<Buffer>} MP4 progressivo pronto para o WhatsApp
+ */
+export async function normalizeVideoForWhatsApp(input, info = inspectVideoFile(input), { timeoutMs = 300_000 } = {}) {
+  if (!Buffer.isBuffer(input) || !input.length) throw new Error('vídeo vazio');
+  if (info?.playable) return input;
+  if (!hasFfmpeg()) {
+    const err = new Error(
+      'este vídeo veio num formato que o WhatsApp não reproduz e o FFmpeg não está instalado para consertar'
+    );
+    err.hint = 'Instale o FFmpeg e tente de novo: pkg install ffmpeg (Termux) · apt install ffmpeg · winget install ffmpeg';
+    throw err;
+  }
+  const detail = (info?.problems || []).join('; ') || 'formato incompatível com o WhatsApp';
+
+  // 2) Remux: o codec presta, só o contêiner/fragmentação atrapalha.
+  if (!isUnplayableVideoCodec(info.videoCodec)) {
+    try {
+      const fixed = isUnplayableAudioCodec(info.audioCodec)
+        ? await remuxCopyWithAacAudio(input)
+        : await remuxToMp4(input, { ext: detectMediaExt(input, '.ts'), timeoutMs });
+      if (inspectVideoFile(fixed).playable) return fixed;
+    } catch {
+      /* cai para o transcode */
+    }
+  }
+
+  // 3) Transcode completo para o denominador comum do WhatsApp.
+  const inFile = tmpFile(detectMediaExt(input, '.mp4'));
+  const outFile = tmpFile('.mp4');
+  fs.writeFileSync(inFile, input);
+  try {
+    await runFfmpeg(
+      [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-i', inFile,
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-movflags', '+faststart',
+        outFile
+      ],
+      { timeoutMs }
+    );
+    if (!fs.existsSync(outFile)) throw new Error('ffmpeg não gerou o vídeo convertido');
+    const fixed = fs.readFileSync(outFile);
+    if (!fixed.length) throw new Error('vídeo convertido está vazio');
+    if (!inspectVideoFile(fixed).playable) {
+      throw new Error('o vídeo convertido continua incompatível com o WhatsApp');
+    }
+    return fixed;
+  } catch (error) {
+    throw new Error(`não consegui consertar o vídeo (${detail}): ${String(error.message).slice(0, 140)}`);
+  } finally {
+    fs.rmSync(inFile, { force: true });
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
+/** Remux `-c copy` do vídeo trocando só o áudio por AAC (áudio AC-3/E-AC-3…). */
+async function remuxCopyWithAacAudio(input, { timeoutMs = 240_000 } = {}) {
+  const inFile = tmpFile(detectMediaExt(input, '.ts'));
+  const outFile = tmpFile('.mp4');
+  fs.writeFileSync(inFile, input);
+  try {
+    await runFfmpeg(
+      [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-i', inFile,
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-movflags', '+faststart',
+        outFile
+      ],
+      { timeoutMs }
+    );
+    if (!fs.existsSync(outFile)) throw new Error('ffmpeg não gerou o MP4 remuxado');
     const buf = fs.readFileSync(outFile);
     if (!buf.length) throw new Error('MP4 remuxado está vazio');
     return buf;

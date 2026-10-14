@@ -367,8 +367,35 @@ test('resolveDownload: URL sem extensão que serve imagem é reconhecida pela so
   );
 });
 
+/** Caixa ISO-BMFF mínima (tamanho + tipo + payload). */
+function mp4Box(type, payload = Buffer.alloc(0)) {
+  const head = Buffer.alloc(8);
+  head.writeUInt32BE(8 + payload.length, 0);
+  head.write(type, 4, 'ascii');
+  return Buffer.concat([head, payload]);
+}
+
+/** Init de HLS progressivo: ftyp + moov com trilha avc1 (sem fragmentação). */
+function mp4Init() {
+  const stsd = mp4Box(
+    'stsd',
+    Buffer.concat([Buffer.alloc(4), Buffer.from([0, 0, 0, 1]), mp4Box('avc1', Buffer.alloc(16))])
+  );
+  const hdlr = mp4Box('hdlr', Buffer.concat([Buffer.alloc(8), Buffer.from('vide', 'ascii')]));
+  const trak = mp4Box('trak', mp4Box('mdia', Buffer.concat([hdlr, mp4Box('minf', mp4Box('stbl', stsd))])));
+  return Buffer.concat([mp4Box('ftyp', Buffer.from('isomiso2', 'ascii')), mp4Box('moov', trak)]);
+}
+
 test('resolveDownload: link .m3u8 colado pelo usuário entrega MP4', async () => {
-  await mockFetch(hlsRoutes(), async () => {
+  const media = `#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:4.0,\nseg1.m4s\n#EXTINF:4.0,\nseg2.m4s\n#EXT-X-ENDLIST\n`;
+  await mockFetch(
+    [
+      ['hls/master.m3u8', () => textResponse(media)],
+      ['hls/init.mp4', () => bufferResponse(mp4Init())],
+      ['hls/seg1.m4s', () => bufferResponse(mp4Box('mdat', Buffer.from('seg1')))],
+      ['hls/seg2.m4s', () => bufferResponse(mp4Box('mdat', Buffer.from('seg2')))]
+    ],
+    async () => {
     const result = await resolveDownload('https://cdn.example.com/hls/master.m3u8', 'melhor');
     assert.equal(result.platform, 'Stream HLS');
     assert.equal(result.kind, 'video');

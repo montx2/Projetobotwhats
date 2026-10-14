@@ -52,11 +52,27 @@ function fakeJwt(expSeconds = Math.floor(Date.now() / 1000) + 3600) {
   return `${header}.${payload}.assinatura-fake`;
 }
 
-const MP4_BYTES = Buffer.concat([
-  Buffer.from([0x00, 0x00, 0x00, 0x18]),
-  Buffer.from('ftypmp42', 'ascii'),
-  Buffer.alloc(120, 7)
-]);
+/** Caixa ISO-BMFF mínima (tamanho + tipo + payload). */
+function mp4Box(type, payload = Buffer.alloc(0)) {
+  const head = Buffer.alloc(8);
+  head.writeUInt32BE(8 + payload.length, 0);
+  head.write(type, 4, 'ascii');
+  return Buffer.concat([head, payload]);
+}
+
+/** MP4 estruturalmente válido p/ o inspetor: ftyp + moov(avc1/mp4a) + mdat. */
+const MP4_BYTES = (() => {
+  const stsd = (codec) =>
+    mp4Box('stsd', Buffer.concat([Buffer.alloc(4), Buffer.from([0, 0, 0, 1]), mp4Box(codec, Buffer.alloc(16))]));
+  const hdlr = (kind) => mp4Box('hdlr', Buffer.concat([Buffer.alloc(8), Buffer.from(kind, 'ascii')]));
+  const trak = (kind, codec) =>
+    mp4Box('trak', mp4Box('mdia', Buffer.concat([hdlr(kind), mp4Box('minf', mp4Box('stbl', stsd(codec)))])));
+  return Buffer.concat([
+    mp4Box('ftyp', Buffer.from('mp42isom', 'ascii')),
+    mp4Box('moov', Buffer.concat([trak('vide', 'avc1'), trak('soun', 'mp4a')])),
+    mp4Box('mdat', Buffer.alloc(120, 7))
+  ]);
+})();
 const JPEG_BYTES = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(80, 3)]);
 
 function jsonResponse(body, { status = 200 } = {}) {

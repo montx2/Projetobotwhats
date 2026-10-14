@@ -42,7 +42,12 @@ if (mode === 'fail') {
 const template = args[args.indexOf('-o') + 1];
 const audio = /^bestaudio/.test(args[args.indexOf('-f') + 1] || '');
 const out = template.replace('%(ext)s', audio ? 'mp3' : 'mp4');
-fs.writeFileSync(out, Buffer.concat([Buffer.from(audio ? 'ID3' : '\\0\\0\\0\\x18ftypmp42'), Buffer.alloc(64, 1)]));
+const box = (t, pl) => { const h = Buffer.alloc(8); h.writeUInt32BE(8 + pl.length, 0); h.write(t, 4); return Buffer.concat([h, pl]); };
+const stsd = box('stsd', Buffer.concat([Buffer.alloc(4), Buffer.from([0, 0, 0, 1]), box('avc1', Buffer.alloc(16))]));
+const hdlr = box('hdlr', Buffer.concat([Buffer.alloc(8), Buffer.from('vide')]));
+const trak = box('trak', box('mdia', Buffer.concat([hdlr, box('minf', box('stbl', stsd))])));
+const mp4 = Buffer.concat([box('ftyp', Buffer.from('mp42isom')), box('moov', trak), box('mdat', Buffer.alloc(64, 1))]);
+fs.writeFileSync(out, audio ? Buffer.concat([Buffer.from('ID3'), Buffer.alloc(64, 1)]) : mp4);
 fs.writeFileSync(path.join(path.dirname(out), 'media.info.json'), JSON.stringify({ title: 'Música do yt-dlp', uploader: 'Canal Y', duration: 212.4, thumbnail: 'https://i.ytimg.com/x.jpg' }));
 `;
 
