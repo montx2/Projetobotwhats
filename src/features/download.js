@@ -19,6 +19,13 @@
 //
 // Quem consome isto além do `.dl`: o `.s <link>` (stickerlink.js), que usa o
 // mesmo `resolveDownload` para transformar um link em figurinha pronta.
+//
+// Garantia de reprodução: TODO vídeo que sai daqui passa pelo inspetor de
+// contêiner (`util/mp4.js`). Pinterest & cia. entregam parte dos vídeos em
+// MP4 fragmentado/HEVC que toca no VLC mas o WhatsApp recusa ("há algo
+// errado com o arquivo de vídeo") — quando isso acontece, o bot remuxa ou
+// transcodifica com FFmpeg, tenta outra rendição, e só desiste com erro
+// explicado. Arquivo quebrado em silêncio, nunca mais.
 
 import { SYM, ok, warn, fail, wait } from '../core/ui.js';
 import { cfg } from '../core/config.js';
@@ -46,9 +53,10 @@ import { isComedyHubUrl, downloadComedyHub } from './downloaders/comedyhub.js';
 import { cobaltDownload } from './downloaders/cobalt.js';
 import { canUseYtdlp, ytdlpBuffer, ytdlpInfo, youtubeWatchUrl } from './downloaders/ytdlp.js';
 import { isGoogleVideoUrl, fetchGoogleVideoBuffer } from './downloaders/gvs.js';
-import { probeStream, kindByContentType } from './downloaders/media.js';
+import { probeStream, kindByContentType, looksLikeImageBytes } from './downloaders/media.js';
 import { isHlsUrl, looksLikePlaylist, downloadHls, downloadHlsFromText } from './downloaders/hls.js';
-import { detectAudioMime, hasFfmpeg, applyAudioFilter } from '../util/ffmpeg.js';
+import { detectAudioMime, hasFfmpeg, applyAudioFilter, normalizeVideoForWhatsApp } from '../util/ffmpeg.js';
+import { inspectVideoFile } from '../util/mp4.js';
 
 export { parseQuality };
 
@@ -311,6 +319,93 @@ async function downloadItemWithAlternates(item, alternates, onProgress, maxBytes
   }
 }
 
+/**
+ * Confere se um vídeo baixado é algo que o WhatsApp REALMENTE reproduz — e
+ * conserta quando não é (bug real do Pinterest: a rendição chega em MP4
+ * fragmentado ou HEVC, toca no VLC, mas o WhatsApp devolve "há algo errado
+ * com o arquivo de vídeo" e o usuário recebe um arquivo que não abre).
+ * Sem conserto possível, lança erro COM dica: mandar o arquivo quebrado em
+ * silêncio era o comportamento antigo, e é pior do que falhar explicando.
+ */
+async function ensureVideoBufferPlayable(buffer, { onProgress } = {}) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) throw new Error('vídeo vazio');
+  if (looksLikeImageBytes(buffer)) throw new Error('o arquivo baixado é uma imagem, não um vídeo');
+  const info = inspectVideoFile(buffer);
+  if (info.playable) return buffer;
+  log.warn(`vídeo incompatível com o WhatsApp (${info.problems.join('; ')}) — tentando consertar`);
+  await onProgress?.(wait('Ajustando o vídeo para tocar no WhatsApp'));
+  try {
+    const fixed = await normalizeVideoForWhatsApp(buffer, info);
+    log.dl(`vídeo normalizado p/ WhatsApp · ${formatBytes(fixed.length)}`);
+    return fixed;
+  } catch (error) {
+    const err = new Error(
+      `o vídeo veio num formato que o WhatsApp não reproduz (${info.problems.join('; ')}) e não consegui consertar`
+    );
+    if (error?.hint) err.hint = error.hint;
+    err.cause = error;
+    throw err;
+  }
+}
+
+/**
+ * Baixa um item de VÍDEO já com a garantia de reprodução: se a rendição
+ * escolhida não baixa OU baixa num formato que o WhatsApp não toca, tenta a
+ * próxima alternativa (outra qualidade de vídeo, o HLS…) antes de desistir.
+ */
+async function downloadVideoItem(item, alternates, onProgress, maxBytes) {
+  const candidates = [item, ...(alternates || [])].filter(
+    (c) => (typeof c === 'string' && c) || c?.url
+  );
+  let lastError = null;
+  let imageFallback = null;
+  for (const candidate of candidates) {
+    try {
+      const buffer = await downloadMedia(candidate, onProgress, maxBytes);
+      // Extrator que "falha" costuma devolver a CAPA do post (um JPEG) no
+      // lugar do vídeo. Isso não é vídeo — mas também não é lixo: guardamos
+      // como última opção e quem chama reclassifica o item para imagem
+      // (o `.dl` manda a foto em vez de um "vídeo" que não abre, e o
+      // `.s <link>` ainda faz a figurinha estática da capa).
+      if (looksLikeImageBytes(buffer)) {
+        imageFallback = imageFallback || buffer;
+        lastError = new Error('o endereço do vídeo devolveu uma imagem (a capa do post)');
+        continue;
+      }
+      const playable = await ensureVideoBufferPlayable(buffer, { onProgress });
+      return { buffer: playable, imageBytes: false };
+    } catch (error) {
+      lastError = error;
+      if (candidates.length > 1) {
+        await onProgress?.(wait('Essa versão não deu certo — tentando outra')).catch(() => {});
+      }
+    }
+  }
+  if (imageFallback) return { buffer: imageFallback, imageBytes: true };
+  throw lastError || new Error('não consegui baixar o vídeo');
+}
+
+/**
+ * Mesma garantia para resultados que já chegam com buffers prontos (Cobalt,
+ * yt-dlp, HLS): inspeciona cada buffer de vídeo e conserta o que não tocar.
+ */
+async function ensureResultVideosPlayable(result, onProgress) {
+  if (!result?.buffers?.length) return result;
+  for (let i = 0; i < result.buffers.length; i++) {
+    const type = result.media?.[i]?.type || (result.kind === 'video' ? 'video' : '');
+    if (type !== 'video') continue;
+    if (result.media?.[i] && looksLikeImageBytes(result.buffers[i])) {
+      // Capa no lugar do vídeo: reclassifica para imagem em vez de mandar
+      // um "vídeo" que o WhatsApp não abre (mesmo critério do download).
+      log.warn('extrator devolveu imagem no lugar do vídeo — tratando como imagem');
+      result.media[i].type = 'image';
+      continue;
+    }
+    result.buffers[i] = await ensureVideoBufferPlayable(result.buffers[i], { onProgress });
+  }
+  return result;
+}
+
 function isCorruptedHtmlBuffer(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;
   const head = buffer.subarray(0, 50).toString('utf8').trim().toLowerCase();
@@ -319,7 +414,9 @@ function isCorruptedHtmlBuffer(buffer) {
 
 /** Baixa os buffers de resultados que vieram só com URLs. */
 async function withBuffers(result, onProgress, maxBytes) {
-  if (result.buffers?.length) return validateResultBufferLimits(result, maxBytes);
+  if (result.buffers?.length) {
+    return ensureResultVideosPlayable(validateResultBufferLimits(result, maxBytes), onProgress);
+  }
   const items = (result.media || []).slice(0, 10);
   if (!items.length) throw new Error('o extrator não devolveu mídia');
   const perFileLimit = Math.min(HARD_DOWNLOAD_LIMIT, Math.max(1, Number(maxBytes) || 1));
@@ -333,9 +430,18 @@ async function withBuffers(result, onProgress, maxBytes) {
       await onProgress?.(wait(`Baixando mídia ${i + 1}/${items.length}`));
     }
     const limit = Math.min(perFileLimit, remaining);
-    const buffer = i === 0
-      ? await downloadItemWithAlternates(items[i], result.alternates, onProgress, limit)
-      : await downloadMedia(items[i], onProgress, limit);
+    const wantVideo =
+      items[i]?.type === 'video' || (!items[i]?.type && result.kind === 'video');
+    let buffer;
+    if (wantVideo) {
+      const got = await downloadVideoItem(items[i], i === 0 ? result.alternates : [], onProgress, limit);
+      buffer = got.buffer;
+      if (got.imageBytes) items[i].type = 'image';
+    } else if (i === 0) {
+      buffer = await downloadItemWithAlternates(items[i], result.alternates, onProgress, limit);
+    } else {
+      buffer = await downloadMedia(items[i], onProgress, limit);
+    }
     if (isCorruptedHtmlBuffer(buffer)) {
       throw new Error('arquivo baixado é inválido (resposta HTML em vez de mídia)');
     }
@@ -466,7 +572,12 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
     ytdlpTried = true;
     try {
       const out = await viaYtdlp(ytWatchUrl, platform, { audioOnly, maxBytes, onProgress });
-      if (out?.buffers?.length) return normalize(validateResultBufferLimits(out, maxBytes), platform);
+      if (out?.buffers?.length) {
+        return normalize(
+          await ensureResultVideosPlayable(validateResultBufferLimits(out, maxBytes), onProgress),
+          platform
+        );
+      }
     } catch (error) {
       const message = String(error?.message || error).slice(0, 200);
       preErrors.push(message);
@@ -605,7 +716,7 @@ export async function resolveDownload(url, quality = 'melhor', { audioOnly = fal
     if (failureHint && !error.hint) error.hint = failureHint;
     throw error;
   }
-  return normalize(result, platform);
+  return normalize(await ensureResultVideosPlayable(result, onProgress), platform);
 }
 
 function normalize(result, platform) {

@@ -265,7 +265,7 @@ O `.dl` funciona como porta única: o bot identifica a rede pelo link e escolhe 
 | TikTok | vídeo HD sem marca, álbum de fotos e áudio (`.ttmp3`) |
 | Douyin | mesma cascata do TikTok (tikwm → Cobalt → página) |
 | Instagram | post, foto, reel e carrossel (todos os slides) |
-| Pinterest | imagem em resolução original e vídeo (aceita pin.it) |
+| Pinterest | imagem em resolução original e vídeo (aceita pin.it) — o vídeo é inspecionado e, se vier em formato que o WhatsApp não toca (MP4 fragmentado/HEVC), é remuxado/convertido ou trocado por outra rendição antes do envio |
 | YouTube | vídeo e áudio (`.yt`/`.ytmp3`): yt-dlp → Innertube → Invidious → Cobalt |
 | X/Twitter | vídeo, GIF e fotos do tweet |
 | Facebook | vídeo, reels e foto pública |
