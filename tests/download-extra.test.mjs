@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { setDnsLookupForTests } from '../src/core/http.js';
+import { setDnsLookupForTests, fetchBuffer } from '../src/core/http.js';
 
 import {
   isHlsUrl,
@@ -102,6 +102,40 @@ function box(tag, { fill = 'x', size = 24 } = {}) {
 }
 
 /* ─────────────────────────── parsers HLS ─────────────────────────── */
+
+test('fetchBuffer: corpo menor que o content-length é recusado (download incompleto)', async () => {
+  // Bug real: o leitor devolvia o que chegava sem comparar com o anúncio —
+  // conexão cortada no meio virava "vídeo" truncado entregue em silêncio.
+  const shortBody = new Response(Buffer.alloc(500, 7), {
+    status: 200,
+    headers: { 'content-type': 'video/mp4', 'content-length': '1000' }
+  });
+  const fullBody = new Response(Buffer.alloc(1000, 7), {
+    status: 200,
+    headers: { 'content-type': 'video/mp4', 'content-length': '1000' }
+  });
+  // Compressão muda o enquadramento: content-length é o tamanho GZIP, os
+  // bytes lidos são os decodificados — a comparação não vale ali.
+  const gzipBody = new Response(Buffer.alloc(1000, 7), {
+    status: 200,
+    headers: { 'content-type': 'video/mp4', 'content-encoding': 'gzip', 'content-length': '29' }
+  });
+  await mockFetch(
+    [
+      ['curto.mp4', () => shortBody],
+      ['inteiro.mp4', () => fullBody],
+      ['gzip.mp4', () => gzipBody]
+    ],
+    async () => {
+      await assert.rejects(
+        () => fetchBuffer('https://cdn.example.com/curto.mp4'),
+        /download incompleto/
+      );
+      assert.equal((await fetchBuffer('https://cdn.example.com/inteiro.mp4')).length, 1000);
+      assert.equal((await fetchBuffer('https://cdn.example.com/gzip.mp4')).length, 1000);
+    }
+  );
+});
 
 test('isHlsUrl reconhece .m3u8, query de formato e ignora página comum', () => {
   assert.equal(isHlsUrl('https://cdn.example.com/hls/master.m3u8'), true);

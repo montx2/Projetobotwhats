@@ -119,7 +119,7 @@ function isVideoCodec(codec) {
  * @param {Buffer} buffer
  * @returns {{
  *   format: 'mp4'|'webm'|'mpegts'|'unknown',
- *   isMp4: boolean, majorBrand: string, fragmented: boolean,
+ *   isMp4: boolean, majorBrand: string, fragmented: boolean, truncated: boolean,
  *   hasMoov: boolean, hasMdat: boolean,
  *   hasVideo: boolean, videoCodec: string|null, audioCodec: string|null,
  *   playable: boolean, problems: string[]
@@ -135,6 +135,7 @@ export function inspectVideoFile(buffer) {
     isMp4: false,
     majorBrand: '',
     fragmented: false,
+    truncated: false,
     hasMoov: false,
     hasMdat: false,
     hasVideo: false,
@@ -172,6 +173,27 @@ export function inspectVideoFile(buffer) {
   out.hasMdat = top.some((b) => b.type === 'mdat');
   out.fragmented = top.some((b) => b.type === 'moof');
 
+  // Download truncado (bug real): alguma caixa declara tamanho além do fim do
+  // arquivo — o clássico é o mdat pela metade depois de um `moov` faststart:
+  // o parser para, o miolo some, e o WhatsApp recusa com "há algo errado com
+  // o arquivo de vídeo" mesmo o inspetor achando moov/codec tudo perfeito.
+  // Rabo de encoder com tamanho inválido (2..7) após a última caixa NÃO é
+  // truncamento — arquivo completo com lixo no fim ainda toca.
+  const covered = top.length ? top[top.length - 1].end : 0;
+  const residual = buffer.length - covered;
+  if (residual >= 8) {
+    const declared = buffer.readUInt32BE(covered);
+    // size==1 = cabeçalho de tamanho estendido (16 bytes) cortado; size>=8
+    // maior que o resto = a caixa (em geral mdat) foi cortada no meio.
+    if (declared === 1 || (declared >= 8 && declared > residual)) {
+      out.truncated = true;
+      const type = buffer.toString('ascii', covered + 4, covered + 8);
+      out.problems.push(
+        `arquivo truncado — caixa ${/^[ -~]{4}$/.test(type) ? type : 'desconhecida'} declara ${declared} bytes e o arquivo termina ${residual} bytes depois`
+      );
+    }
+  }
+
   const moov = top.find((b) => b.type === 'moov');
   if (!moov) {
     out.problems.push('sem caixa moov (arquivo truncado ou só o segmento inicial)');
@@ -184,6 +206,10 @@ export function inspectVideoFile(buffer) {
   out.audioCodec = inner.audioCodec;
   out.hasVideo = inner.hasVideo;
   out.fragmented = out.fragmented || inner.fragmented;
+
+  // Vídeo sem mdat = só metadados (ou o mdat foi cortado com cabeçalho de
+  // menos de 8 bytes e sumiu da leitura): não tem o que reproduzir.
+  if (out.hasVideo && !out.hasMdat) out.problems.push('sem caixa mdat (arquivo sem os dados do vídeo)');
 
   if (out.fragmented) out.problems.push('MP4 fragmentado (CMAF) — o WhatsApp não reproduz');
   if (!out.hasVideo) out.problems.push('nenhuma trilha de vídeo no MP4');

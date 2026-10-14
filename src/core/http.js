@@ -357,7 +357,31 @@ export async function fetchBuffer(url, { maxBytes = 120 * 1024 * 1024, ...opts }
     await res.body?.cancel?.().catch(() => {});
     throw new HttpError(`HTTP ${res.status} em ${shortUrl(url)}`, { status: res.status, url, retryAfterMs: retryAfterMs(res.headers) });
   }
-  return readResponseBuffer(res, maxBytes, url);
+  const buffer = await readResponseBuffer(res, maxBytes, url);
+  // Completude do download: corpo MENOR que o content-length anunciado =
+  // conexão/proxy fechou no meio e o arquivo sairia TRUNCADO. Um MP4 cortado
+  // no meio do mdat é exatamente o "há algo errado com o arquivo de vídeo" do
+  // WhatsApp — o envio passaria em silêncio sem esta conferência (o leitor de
+  // corpo devolve o que chegou, sem comparar com o anúncio). Compressão
+  // (content-encoding) e chunked (transfer-encoding) mudam o enquadramento do
+  // corpo, então ali o content-length não é comparável com os bytes lidos —
+  // nesses casos quem conclui é o inspetor de contêiner (util/mp4.js).
+  const encoding = String(res.headers?.get('content-encoding') || '').trim().toLowerCase();
+  const chunked = res.headers?.get('transfer-encoding');
+  const declared = Number(res.headers?.get('content-length'));
+  if (
+    Number.isFinite(declared) &&
+    declared > 0 &&
+    !chunked &&
+    (!encoding || encoding === 'identity') &&
+    buffer.length !== declared
+  ) {
+    throw new HttpError(
+      `download incompleto (${formatBytes(buffer.length)} de ${formatBytes(declared)})`,
+      { status: res.status, url }
+    );
+  }
+  return buffer;
 }
 
 /** POST JSON retornando JSON, com resposta limitada a 2 MiB por padrão. */

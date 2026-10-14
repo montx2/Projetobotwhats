@@ -332,6 +332,16 @@ async function ensureVideoBufferPlayable(buffer, { onProgress } = {}) {
   if (looksLikeImageBytes(buffer)) throw new Error('o arquivo baixado é uma imagem, não um vídeo');
   const info = inspectVideoFile(buffer);
   if (info.playable) return buffer;
+  // Download INCOMPLETO (mdat cortado / sem dados): remuxar deixaria o arquivo
+  // consistente, mas os bytes perdidos não voltam — o vídeo sairia menor que o
+  // anunciado. Melhor falhar explicando: quem chama tenta a próxima rendição
+  // ou a próxima estratégia da cascata, e sem nenhuma boa o usuário recebe o
+  // motivo em vez de um arquivo "quase certo" que o WhatsApp recusa.
+  if (info.truncated || (info.hasMoov && info.hasVideo && !info.hasMdat)) {
+    const detail = info.problems.join('; ') || 'conteúdo do vídeo ausente';
+    log.warn(`download incompleto (${detail}) — recusando; cascata tenta outra fonte`);
+    throw new Error(`o download veio incompleto (${detail}) — não vou mandar vídeo cortado`);
+  }
   log.warn(`vídeo incompatível com o WhatsApp (${info.problems.join('; ')}) — tentando consertar`);
   await onProgress?.(wait('Ajustando o vídeo para tocar no WhatsApp'));
   try {
@@ -358,8 +368,13 @@ async function downloadVideoItem(item, alternates, onProgress, maxBytes) {
     (c) => (typeof c === 'string' && c) || c?.url
   );
   let lastError = null;
+  // Erro do candidato de VÍDEO: a capa/alternativa de imagem nunca pode
+  // enterrar o motivo real (ex.: "download incompleto") — o usuário precisa
+  // de saber POR QUE o vídeo não veio, não de um 404 da foto de capa.
+  let videoError = null;
   let imageFallback = null;
   for (const candidate of candidates) {
+    const isImageCandidate = typeof candidate === 'object' && candidate?.type === 'image';
     try {
       const buffer = await downloadMedia(candidate, onProgress, maxBytes);
       // Extrator que "falha" costuma devolver a CAPA do post (um JPEG) no
@@ -376,13 +391,14 @@ async function downloadVideoItem(item, alternates, onProgress, maxBytes) {
       return { buffer: playable, imageBytes: false };
     } catch (error) {
       lastError = error;
+      if (!isImageCandidate) videoError = videoError || error;
       if (candidates.length > 1) {
         await onProgress?.(wait('Essa versão não deu certo — tentando outra')).catch(() => {});
       }
     }
   }
   if (imageFallback) return { buffer: imageFallback, imageBytes: true };
-  throw lastError || new Error('não consegui baixar o vídeo');
+  throw videoError || lastError || new Error('não consegui baixar o vídeo');
 }
 
 /**

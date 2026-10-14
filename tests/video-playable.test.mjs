@@ -96,6 +96,40 @@ function fakeMp4({ videoCodec = 'avc1', audioCodec = 'mp4a', fragmented = false,
   return Buffer.concat(parts);
 }
 
+/**
+ * Download cortado no meio do mdat com `moov` faststart intacto — o caso real
+ * do print: ffmpeg avisa "partial file", mas moov/codec estão perfeitos e o
+ * WhatsApp recusa o arquivo. O mdat declara 5000 bytes e só 100 chegam.
+ */
+function truncatedFaststartMp4() {
+  const traks = [trak('vide', 'avc1'), trak('soun', 'mp4a')];
+  const mdatHead = Buffer.alloc(8);
+  mdatHead.writeUInt32BE(8 + 5000, 0);
+  mdatHead.write('mdat', 4, 'ascii');
+  return Buffer.concat([
+    mp4Box('ftyp', Buffer.from('isomiso2', 'ascii')),
+    mp4Box('moov', Buffer.concat(traks)),
+    mdatHead,
+    Buffer.alloc(100, 3)
+  ]);
+}
+
+/** MP4 completo sem nenhum mdat (só metadados — não há o que reproduzir). */
+function mp4WithoutMdat() {
+  const traks = [trak('vide', 'avc1'), trak('soun', 'mp4a')];
+  return Buffer.concat([
+    mp4Box('ftyp', Buffer.from('isomiso2', 'ascii')),
+    mp4Box('moov', Buffer.concat(traks))
+  ]);
+}
+
+/** Arquivo completo com rabo de encoder (12 bytes que não formam caixa). */
+function mp4WithJunkTail() {
+  const junk = Buffer.alloc(12, 0);
+  junk.writeUInt32BE(4, 0); // tamanho 4 < cabeçalho de 8: caixa inválida, não truncamento
+  return Buffer.concat([fakeMp4(), junk]);
+}
+
 /* ───────────────────────── inspetor ───────────────────────── */
 
 test('inspetor: MP4 progressivo H.264 + AAC é reproduzível', () => {
@@ -138,6 +172,27 @@ test('inspetor: sem moov (truncado) e WebM disfarçado são reprovados', () => {
   const ts = Buffer.alloc(188 * 2, 0x47);
   assert.equal(inspectVideoFile(ts).format, 'mpegts');
   assert.equal(inspectVideoFile(ts).playable, false);
+});
+
+test('inspetor: download truncado no mdat (faststart) é REPROVADO — era o que passava em silêncio', () => {
+  const info = inspectVideoFile(truncatedFaststartMp4());
+  assert.equal(info.truncated, true);
+  assert.equal(info.playable, false, 'arquivo cortado não pode ser entregue');
+  assert.match(info.problems.join(' '), /truncado/);
+});
+
+test('inspetor: MP4 sem mdat (só metadados) não é reproduzível', () => {
+  const info = inspectVideoFile(mp4WithoutMdat());
+  assert.equal(info.hasMdat, false);
+  assert.equal(info.hasVideo, true);
+  assert.equal(info.playable, false);
+  assert.match(info.problems.join(' '), /sem caixa mdat/);
+});
+
+test('inspetor: rabo de encoder (caixa inválida depois do fim) NÃO é acusado de truncamento', () => {
+  const info = inspectVideoFile(mp4WithJunkTail());
+  assert.equal(info.truncated, false);
+  assert.equal(info.playable, true, 'arquivo completo com lixo no fim continua válido');
 });
 
 test('inspetor: MP4 só de áudio não é vídeo reproduzível; lixo também não', () => {
@@ -279,6 +334,57 @@ test('resolveDownload: pin só com rendição que o WhatsApp não toca NÃO vira
         () => resolveDownload(PIN_URL, 'melhor'),
         (error) => {
           assert.match(error.message, /WhatsApp não reproduz/);
+          return true;
+        }
+      );
+    }
+  );
+});
+
+test('resolveDownload: rendição TRUNCADA cai para a próxima rendição (H.264) do mesmo pin', async () => {
+  // Caso do print: o CDN cortou o corpo no meio do mdat; o inspetor tem que
+  // reprovar e a cascata buscar a próxima rendição em vez de mandar o corte.
+  const truncated = truncatedFaststartMp4();
+  const good = fakeMp4({ videoCodec: 'avc1' });
+  await mockFetch(
+    [
+      ['widgets.pinterest.com', () => jsonResponse(WIDGET_PIN)],
+      ['720w.mp4', () => bufferResponse(truncated)],
+      ['360w.mp4', () => bufferResponse(good)]
+    ],
+    async () => {
+      const result = await resolveDownload(PIN_URL, 'melhor');
+      assert.equal(result.platform, 'Pinterest');
+      assert.equal(result.kind, 'video');
+      assert.deepEqual(result.buffers[0], good, 'quem vai ao chat é a rendição inteira');
+    }
+  );
+});
+
+test('resolveDownload: pin cuja ÚNICA rendição veio truncada NÃO vira envio quebrado', async () => {
+  const pin = {
+    data: [
+      {
+        id: '687159481848754665',
+        grid_title: 'Só truncado',
+        videos: {
+          video_list: {
+            V_720P: { url: 'https://v1.pinimg.com/videos/iht/expMp4/aa/720w.mp4', width: 720, height: 1280, duration: 5000 }
+          }
+        }
+      }
+    ]
+  };
+  await mockFetch(
+    [
+      ['widgets.pinterest.com', () => jsonResponse(pin)],
+      ['720w.mp4', () => bufferResponse(truncatedFaststartMp4())]
+    ],
+    async () => {
+      await assert.rejects(
+        () => resolveDownload(PIN_URL, 'melhor'),
+        (error) => {
+          assert.match(error.message, /incompleto|truncado|cortado/);
           return true;
         }
       );
